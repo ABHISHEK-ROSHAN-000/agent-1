@@ -8,14 +8,22 @@ import type { Logger } from "../core/log"
 import type { ModelService } from "../models/model-service"
 import type { Database, NewMessage } from "../db/database"
 import type { EventService } from "../events/service"
-import type { Message, ModelProfile, Session, TokenUsage, Turn, TurnStatus } from "../shared/types"
+import type { Message, ModelProfile, Session, TokenUsage, Turn } from "../shared/types"
+import { argumentsHash, type PermissionService } from "../permissions/permission-service"
 import { executeTool, toolNames, toolSet } from "./tools"
 import type { TurnBus } from "./turn-bus"
+
+interface PendingToolCall {
+  readonly toolCallId: string
+  readonly toolName: string
+  readonly input: unknown
+}
 
 interface CheckpointState {
   readonly step: number
   readonly messages: ModelMessage[]
   readonly usage: TokenUsage
+  readonly pendingToolCalls?: PendingToolCall[]
 }
 
 interface StepResult {
@@ -71,6 +79,7 @@ export class TurnService {
     private readonly db: Database,
     private readonly events: EventService,
     private readonly models: ModelService,
+    private readonly permissions: PermissionService,
     private readonly bus: TurnBus,
     private readonly logger: Logger,
     options: TurnServiceOptions = {},
@@ -132,6 +141,12 @@ export class TurnService {
     return this.db.getSessionMessages(sessionId, limit)
   }
 
+  async resumeWaiting(turnId: string): Promise<void> {
+    const turn = await this.db.getTurn(turnId)
+    if (!turn || turn.status !== "waiting_approval") return
+    await this.runTurn(turnId, true)
+  }
+
   private async runTurn(turnId: string, resumed: boolean): Promise<void> {
     if (this.active.has(turnId)) return
     const controller = new AbortController()
@@ -178,6 +193,33 @@ export class TurnService {
           this.bus.publish(turnId, { type: "done", status: "cancelled" })
           return
         }
+
+        if (state.pendingToolCalls && state.pendingToolCalls.length > 0) {
+          const pending = await this.resolvePending(turn, state)
+          state = pending.state
+          if (pending.waiting) {
+            await this.db.saveTurnStep(turnId, {
+              step: state.step,
+              sessionId: turn.sessionId,
+              messages: pending.newMessages,
+              checkpoint: state,
+              usage: state.usage,
+              status: "waiting_approval",
+            })
+            this.bus.publish(turnId, { type: "status", status: "waiting_approval" })
+            return
+          }
+          await this.db.saveTurnStep(turnId, {
+            step: state.step,
+            sessionId: turn.sessionId,
+            messages: pending.newMessages,
+            checkpoint: state,
+            usage: state.usage,
+            status: "running",
+          })
+          this.bus.publish(turnId, { type: "status", status: "running" })
+        }
+
         if (state.step >= this.maxSteps) {
           await this.fail(turn, `budget_exceeded: maximum steps (${this.maxSteps})`)
           return
@@ -253,55 +295,74 @@ export class TurnService {
           return
         }
 
+        const pendingCalls: PendingToolCall[] = []
         for (const call of step.toolCalls) {
-          this.bus.publish(turnId, {
-            type: "tool",
-            phase: "start",
-            toolName: call.toolName,
-            toolCallId: call.toolCallId,
-          })
-          await this.events.append("tool.started", session.id, {
+          const decision = await this.permissions.evaluate(call.toolName, call.input)
+          await this.permissions.audit({
+            actor: "agent",
+            action: "permission.decision",
+            resource: `tool.${call.toolName}`,
+            decision: decision.effect,
+            ruleId: decision.ruleId,
             turnId,
-            toolName: call.toolName,
-            toolCallId: call.toolCallId,
+            details: { toolCallId: call.toolCallId, risk: decision.risk },
           })
-          let output: unknown
-          let failed = false
-          try {
-            output = await executeTool(call.toolName, call.input)
-          } catch (error) {
-            failed = true
-            output = { error: error instanceof Error ? error.message : String(error) }
+
+          if (decision.effect === "deny") {
+            const message = this.toolResultMessage(call, null, decision.reason)
+            state = { ...state, messages: [...state.messages, message] }
+            newMessages.push(
+              this.newToolMessage(call, decision.reason, message),
+            )
+            await this.events.append("tool.denied", session.id, {
+              turnId,
+              toolName: call.toolName,
+              toolCallId: call.toolCallId,
+              reason: decision.reason,
+            })
+            continue
           }
-          this.bus.publish(turnId, {
-            type: "tool",
-            phase: "done",
-            toolName: call.toolName,
-            toolCallId: call.toolCallId,
+
+          if (decision.effect === "ask") {
+            const approval = await this.permissions.requestApproval({
+              turnId,
+              sessionId: session.id,
+              toolCallId: call.toolCallId,
+              toolName: call.toolName,
+              arguments: call.input,
+              ruleId: decision.ruleId,
+            })
+            pendingCalls.push(call)
+            await this.events.append("approval.created", session.id, {
+              turnId,
+              approvalId: approval.id,
+              toolName: call.toolName,
+              toolCallId: call.toolCallId,
+            })
+            continue
+          }
+
+          const message = await this.executeToolCall(turnId, session.id, call)
+          state = { ...state, messages: [...state.messages, message] }
+          newMessages.push(this.newToolMessage(call, textFromMessage(message), message))
+        }
+
+        if (pendingCalls.length > 0) {
+          state = { ...state, pendingToolCalls: pendingCalls }
+          await this.db.saveTurnStep(turnId, {
+            step: state.step,
+            sessionId: session.id,
+            messages: newMessages,
+            checkpoint: state,
+            usage: state.usage,
+            status: "waiting_approval",
           })
-          await this.events.append("tool.completed", session.id, {
+          this.bus.publish(turnId, { type: "status", status: "waiting_approval" })
+          await this.events.append("turn.waiting_approval", session.id, {
             turnId,
-            toolName: call.toolName,
-            toolCallId: call.toolCallId,
-            ok: !failed,
+            approvals: pendingCalls.length,
           })
-          const toolMessage: ModelMessage = {
-            role: "tool",
-            content: [
-              {
-                type: "tool-result",
-                toolCallId: call.toolCallId,
-                toolName: call.toolName,
-                output: { type: "json", value: output as never },
-              },
-            ],
-          }
-          state = { ...state, messages: [...state.messages, toolMessage] }
-          newMessages.push({
-            role: "tool",
-            text: JSON.stringify(output),
-            content: toolMessage,
-          })
+          return
         }
 
         await this.db.saveTurnStep(turnId, {
@@ -334,6 +395,160 @@ export class TurnService {
       }
     } finally {
       this.active.delete(turnId)
+    }
+  }
+
+  private async resolvePending(
+    turn: Turn,
+    state: CheckpointState,
+  ): Promise<{ state: CheckpointState; newMessages: NewMessage[]; waiting: boolean }> {
+    const pending = state.pendingToolCalls ?? []
+    const stillPending: PendingToolCall[] = []
+    const newMessages: NewMessage[] = []
+    let messages = [...state.messages]
+
+    for (const call of pending) {
+      const approval = await this.permissions.findApproval(turn.id, call.toolCallId)
+      if (!approval || approval.status === "pending") {
+        if (!approval) {
+          await this.permissions.requestApproval({
+            turnId: turn.id,
+            sessionId: turn.sessionId,
+            toolCallId: call.toolCallId,
+            toolName: call.toolName,
+            arguments: call.input,
+          })
+        }
+        stillPending.push(call)
+        continue
+      }
+
+      if (approval.status === "approved") {
+        if (argumentsHash(call.input) !== approval.argumentsHash) {
+          const message = this.toolResultMessage(call, null, "Approval arguments changed")
+          messages = [...messages, message]
+          newMessages.push(this.newToolMessage(call, "Approval arguments changed", message))
+          await this.permissions.audit({
+            actor: "system",
+            action: "tool.denied",
+            resource: `tool.${call.toolName}`,
+            decision: "deny",
+            approvalId: approval.id,
+            turnId: turn.id,
+            details: { reason: "arguments_changed" },
+          })
+        } else {
+          const message = await this.executeToolCall(turn.id, turn.sessionId, call)
+          messages = [...messages, message]
+          newMessages.push(this.newToolMessage(call, textFromMessage(message), message))
+        }
+        continue
+      }
+
+      const reason =
+        approval.status === "rejected"
+          ? approval.reason ?? "Approval rejected"
+          : approval.status === "expired"
+            ? "Approval expired"
+            : "Approval invalidated"
+      const message = this.toolResultMessage(call, null, reason)
+      messages = [...messages, message]
+      newMessages.push(this.newToolMessage(call, reason, message))
+      await this.permissions.audit({
+        actor: "system",
+        action: "tool.denied",
+        resource: `tool.${call.toolName}`,
+        decision: "deny",
+        approvalId: approval.id,
+        turnId: turn.id,
+        details: { reason },
+      })
+    }
+
+    return {
+      state: {
+        ...state,
+        messages,
+        pendingToolCalls: stillPending.length > 0 ? stillPending : undefined,
+      },
+      newMessages,
+      waiting: stillPending.length > 0,
+    }
+  }
+
+  private async executeToolCall(
+    turnId: string,
+    sessionId: string,
+    call: PendingToolCall,
+  ): Promise<ModelMessage> {
+    this.bus.publish(turnId, {
+      type: "tool",
+      phase: "start",
+      toolName: call.toolName,
+      toolCallId: call.toolCallId,
+    })
+    await this.events.append("tool.started", sessionId, {
+      turnId,
+      toolName: call.toolName,
+      toolCallId: call.toolCallId,
+    })
+    let output: unknown
+    let failed = false
+    try {
+      output = await executeTool(call.toolName, call.input)
+    } catch (error) {
+      failed = true
+      output = { error: error instanceof Error ? error.message : String(error) }
+    }
+    this.bus.publish(turnId, {
+      type: "tool",
+      phase: "done",
+      toolName: call.toolName,
+      toolCallId: call.toolCallId,
+    })
+    await this.events.append("tool.completed", sessionId, {
+      turnId,
+      toolName: call.toolName,
+      toolCallId: call.toolCallId,
+      ok: !failed,
+    })
+    await this.permissions.audit({
+      actor: "agent",
+      action: "tool.executed",
+      resource: `tool.${call.toolName}`,
+      decision: failed ? "error" : "allow",
+      turnId,
+      details: { toolCallId: call.toolCallId, failed },
+    })
+    return this.toolResultMessage(call, output)
+  }
+
+  private toolResultMessage(
+    call: PendingToolCall,
+    output: unknown,
+    deniedReason?: string,
+  ): ModelMessage {
+    const result = deniedReason
+      ? { type: "execution-denied" as const, reason: deniedReason }
+      : { type: "json" as const, value: output as never }
+    return {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: call.toolCallId,
+          toolName: call.toolName,
+          output: result,
+        },
+      ],
+    }
+  }
+
+  private newToolMessage(call: PendingToolCall, text: string, content: ModelMessage): NewMessage {
+    return {
+      role: "tool",
+      text,
+      content,
     }
   }
 

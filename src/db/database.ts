@@ -5,11 +5,16 @@ import { SqliteClient, SqliteMigrator } from "@effect/sql-sqlite-bun"
 import { mkdirSync } from "node:fs"
 import path from "node:path"
 import type {
+  Approval,
+  ApprovalStatus,
+  AuditEntry,
   EventRecord,
   Message,
   MessageRole,
   ModelProfile,
   ModelProfileInput,
+  PermissionRule,
+  RuleEffect,
   Session,
   TokenUsage,
   Turn,
@@ -77,6 +82,48 @@ interface CheckpointRow {
   readonly step: number
   readonly state_json: string
   readonly created_at: string
+}
+
+interface PermissionRuleRow {
+  readonly id: string
+  readonly action: string
+  readonly resource: string
+  readonly effect: RuleEffect
+  readonly position: number
+  readonly ttl_seconds: number | null
+  readonly expires_at: string | null
+  readonly note: string | null
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface ApprovalRow {
+  readonly id: string
+  readonly turn_id: string
+  readonly session_id: string
+  readonly tool_call_id: string
+  readonly tool_name: string
+  readonly arguments_json: string
+  readonly arguments_hash: string
+  readonly status: ApprovalStatus
+  readonly created_at: string
+  readonly expires_at: string
+  readonly decided_at: string | null
+  readonly decided_by: string | null
+  readonly reason: string | null
+}
+
+interface AuditRow {
+  readonly id: number
+  readonly at: string
+  readonly actor: string
+  readonly action: string
+  readonly resource: string
+  readonly decision: string
+  readonly rule_id: string | null
+  readonly approval_id: string | null
+  readonly turn_id: string | null
+  readonly details_json: string
 }
 
 interface EventRow {
@@ -199,11 +246,11 @@ function rowToMessage(row: MessageRow): import("../shared/types").Message {
   }
 }
 
-function rowToTurn(row: TurnRow): import("../shared/types").Turn {
+function rowToTurn(row: TurnRow): Turn {
   return {
     id: row.id,
     sessionId: row.session_id,
-    status: row.status as import("../shared/types").TurnStatus,
+    status: row.status as TurnStatus,
     modelProfileId: row.model_profile_id,
     userMessageId: row.user_message_id,
     stepCount: row.step_count,
@@ -215,6 +262,85 @@ function rowToTurn(row: TurnRow): import("../shared/types").Turn {
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
   }
+}
+
+function rowToRule(row: PermissionRuleRow): PermissionRule {
+  return {
+    id: row.id,
+    action: row.action,
+    resource: row.resource,
+    effect: row.effect,
+    position: row.position,
+    ttlSeconds: row.ttl_seconds,
+    expiresAt: row.expires_at,
+    note: row.note,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function rowToApproval(row: ApprovalRow): Approval {
+  let args: unknown = {}
+  try {
+    args = JSON.parse(row.arguments_json) as unknown
+  } catch {
+    args = {}
+  }
+  return {
+    id: row.id,
+    turnId: row.turn_id,
+    sessionId: row.session_id,
+    toolCallId: row.tool_call_id,
+    toolName: row.tool_name,
+    arguments: args,
+    argumentsHash: row.arguments_hash,
+    status: row.status,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    decidedAt: row.decided_at,
+    decidedBy: row.decided_by,
+    reason: row.reason,
+  }
+}
+
+function rowToAudit(row: AuditRow): AuditEntry {
+  let details: unknown = {}
+  try {
+    details = JSON.parse(row.details_json) as unknown
+  } catch {
+    details = {}
+  }
+  return {
+    id: row.id,
+    at: row.at,
+    actor: row.actor,
+    action: row.action,
+    resource: row.resource,
+    decision: row.decision,
+    ruleId: row.rule_id,
+    approvalId: row.approval_id,
+    turnId: row.turn_id,
+    details,
+  }
+}
+
+export interface NewPermissionRule {
+  readonly action: string
+  readonly resource: string
+  readonly effect: RuleEffect
+  readonly position?: number
+  readonly ttlSeconds?: number | null
+  readonly note?: string | null
+}
+
+export interface NewApproval {
+  readonly turnId: string
+  readonly sessionId: string
+  readonly toolCallId: string
+  readonly toolName: string
+  readonly arguments: unknown
+  readonly argumentsHash: string
+  readonly expiresAt: string
 }
 
 function rowToEvent(row: EventRow): EventRecord {
@@ -925,7 +1051,7 @@ export class Database {
                  input_tokens, output_tokens, cost_usd, error, started_at, updated_at,
                  completed_at
           FROM turns
-          WHERE status IN ('queued', 'running', 'resuming')
+          WHERE status IN ('queued', 'running', 'resuming', 'waiting_approval')
           ORDER BY started_at ASC
         `
         return rows.map(rowToTurn)
@@ -940,6 +1066,258 @@ export class Database {
           updated_at = ${nowIso()}
         WHERE id = ${sessionId}
       `.pipe(Effect.asVoid),
+    )
+  }
+
+  // ---------------------------------------------------------------------------
+  // Permission rules
+
+  async listPermissionRules(): Promise<PermissionRule[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<PermissionRuleRow>`
+          SELECT id, action, resource, effect, position, ttl_seconds, expires_at, note,
+                 created_at, updated_at
+          FROM permission_rules
+          ORDER BY position ASC, id ASC
+        `
+        return rows.map(rowToRule)
+      }),
+    )
+  }
+
+  async getPermissionRule(id: string): Promise<PermissionRule | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<PermissionRuleRow>`
+          SELECT id, action, resource, effect, position, ttl_seconds, expires_at, note,
+                 created_at, updated_at
+          FROM permission_rules
+          WHERE id = ${id}
+        `
+        const row = rows[0]
+        return row ? rowToRule(row) : null
+      }),
+    )
+  }
+
+  async createPermissionRule(input: NewPermissionRule): Promise<PermissionRule> {
+    const id = newId("rule")
+    const now = nowIso()
+    const position = input.position ?? 100
+    const ttlSeconds = input.ttlSeconds ?? null
+    const expiresAt =
+      ttlSeconds === null ? null : new Date(Date.now() + ttlSeconds * 1000).toISOString()
+    const note = input.note ?? null
+    await this.query((sql) =>
+      sql`
+        INSERT INTO permission_rules
+          (id, action, resource, effect, position, ttl_seconds, expires_at, note, created_at, updated_at)
+        VALUES (${id}, ${input.action}, ${input.resource}, ${input.effect}, ${position},
+                ${ttlSeconds}, ${expiresAt}, ${note}, ${now}, ${now})
+      `.pipe(Effect.asVoid),
+    )
+    return {
+      id,
+      action: input.action,
+      resource: input.resource,
+      effect: input.effect,
+      position,
+      ttlSeconds,
+      expiresAt,
+      note,
+      createdAt: now,
+      updatedAt: now,
+    }
+  }
+
+  async updatePermissionRule(
+    id: string,
+    input: Partial<NewPermissionRule>,
+  ): Promise<PermissionRule | null> {
+    const current = await this.getPermissionRule(id)
+    if (!current) return null
+    const now = nowIso()
+    const action = input.action ?? current.action
+    const resource = input.resource ?? current.resource
+    const effect = input.effect ?? current.effect
+    const position = input.position ?? current.position
+    const ttlSeconds = input.ttlSeconds === undefined ? current.ttlSeconds : input.ttlSeconds
+    const expiresAt =
+      ttlSeconds === null ? null : new Date(Date.now() + ttlSeconds * 1000).toISOString()
+    const note = input.note === undefined ? current.note : input.note
+    await this.query((sql) =>
+      sql`
+        UPDATE permission_rules SET action = ${action}, resource = ${resource}, effect = ${effect},
+          position = ${position}, ttl_seconds = ${ttlSeconds}, expires_at = ${expiresAt},
+          note = ${note}, updated_at = ${now}
+        WHERE id = ${id}
+      `.pipe(Effect.asVoid),
+    )
+    return this.getPermissionRule(id)
+  }
+
+  async deletePermissionRule(id: string): Promise<void> {
+    await this.query((sql) => sql`DELETE FROM permission_rules WHERE id = ${id}`.pipe(Effect.asVoid))
+  }
+
+  // ---------------------------------------------------------------------------
+  // Approvals
+
+  async createApproval(input: NewApproval): Promise<Approval> {
+    const id = newId("apv")
+    const now = nowIso()
+    await this.query((sql) =>
+      sql`
+        INSERT INTO approvals
+          (id, turn_id, session_id, tool_call_id, tool_name, arguments_json, arguments_hash,
+           status, created_at, expires_at, decided_at, decided_by, reason)
+        VALUES
+          (${id}, ${input.turnId}, ${input.sessionId}, ${input.toolCallId}, ${input.toolName},
+           ${JSON.stringify(input.arguments)}, ${input.argumentsHash}, 'pending', ${now},
+           ${input.expiresAt}, NULL, NULL, NULL)
+      `.pipe(Effect.asVoid),
+    )
+    return {
+      id,
+      turnId: input.turnId,
+      sessionId: input.sessionId,
+      toolCallId: input.toolCallId,
+      toolName: input.toolName,
+      arguments: input.arguments,
+      argumentsHash: input.argumentsHash,
+      status: "pending",
+      createdAt: now,
+      expiresAt: input.expiresAt,
+      decidedAt: null,
+      decidedBy: null,
+      reason: null,
+    }
+  }
+
+  async getApproval(id: string): Promise<Approval | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<ApprovalRow>`
+          SELECT id, turn_id, session_id, tool_call_id, tool_name, arguments_json,
+                 arguments_hash, status, created_at, expires_at, decided_at, decided_by, reason
+          FROM approvals
+          WHERE id = ${id}
+        `
+        const row = rows[0]
+        return row ? rowToApproval(row) : null
+      }),
+    )
+  }
+
+  async findApproval(turnId: string, toolCallId: string): Promise<Approval | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<ApprovalRow>`
+          SELECT id, turn_id, session_id, tool_call_id, tool_name, arguments_json,
+                 arguments_hash, status, created_at, expires_at, decided_at, decided_by, reason
+          FROM approvals
+          WHERE turn_id = ${turnId} AND tool_call_id = ${toolCallId}
+          ORDER BY created_at DESC
+          LIMIT 1
+        `
+        const row = rows[0]
+        return row ? rowToApproval(row) : null
+      }),
+    )
+  }
+
+  async listApprovals(status?: ApprovalStatus, limit = 100): Promise<Approval[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = status
+          ? yield* sql<ApprovalRow>`
+              SELECT id, turn_id, session_id, tool_call_id, tool_name, arguments_json,
+                     arguments_hash, status, created_at, expires_at, decided_at, decided_by, reason
+              FROM approvals
+              WHERE status = ${status}
+              ORDER BY created_at DESC
+              LIMIT ${limit}
+            `
+          : yield* sql<ApprovalRow>`
+              SELECT id, turn_id, session_id, tool_call_id, tool_name, arguments_json,
+                     arguments_hash, status, created_at, expires_at, decided_at, decided_by, reason
+              FROM approvals
+              ORDER BY created_at DESC
+              LIMIT ${limit}
+            `
+        return rows.map(rowToApproval)
+      }),
+    )
+  }
+
+  async decideApproval(
+    id: string,
+    status: "approved" | "rejected" | "expired" | "invalidated",
+    decidedBy: string,
+    reason: string | null,
+  ): Promise<Approval | null> {
+    const now = nowIso()
+    await this.query((sql) =>
+      sql`
+        UPDATE approvals
+        SET status = ${status}, decided_at = ${now}, decided_by = ${decidedBy}, reason = ${reason}
+        WHERE id = ${id} AND status = 'pending'
+      `.pipe(Effect.asVoid),
+    )
+    return this.getApproval(id)
+  }
+
+  async expireApprovals(now = nowIso()): Promise<string[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ id: string }>`
+          UPDATE approvals SET status = 'expired', decided_at = ${now}
+          WHERE status = 'pending' AND expires_at <= ${now}
+          RETURNING id
+        `
+        return rows.map((row) => row.id)
+      }),
+    )
+  }
+
+  // ---------------------------------------------------------------------------
+  // Audit
+
+  async appendAudit(input: {
+    actor: string
+    action: string
+    resource: string
+    decision: string
+    ruleId?: string | null
+    approvalId?: string | null
+    turnId?: string | null
+    details?: unknown
+  }): Promise<void> {
+    await this.query((sql) =>
+      sql`
+        INSERT INTO audit_log
+          (at, actor, action, resource, decision, rule_id, approval_id, turn_id, details_json)
+        VALUES
+          (${nowIso()}, ${input.actor}, ${input.action}, ${input.resource}, ${input.decision},
+           ${input.ruleId ?? null}, ${input.approvalId ?? null}, ${input.turnId ?? null},
+           ${JSON.stringify(input.details ?? {})})
+      `.pipe(Effect.asVoid),
+    )
+  }
+
+  async listAudit(limit = 100): Promise<AuditEntry[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<AuditRow>`
+          SELECT id, at, actor, action, resource, decision, rule_id, approval_id, turn_id,
+                 details_json
+          FROM audit_log
+          ORDER BY id DESC
+          LIMIT ${limit}
+        `
+        return rows.map(rowToAudit)
+      }),
     )
   }
 }

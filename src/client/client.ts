@@ -1,4 +1,12 @@
-import type { ModelProfile, ModelProfileInput, Turn } from "../shared/types"
+import type {
+  Approval,
+  ApprovalStatus,
+  AuditEntry,
+  ModelProfile,
+  ModelProfileInput,
+  PermissionRule,
+  Turn,
+} from "../shared/types"
 
 export interface ClientOptions {
   readonly baseUrl: string
@@ -223,6 +231,64 @@ export class AgentOneClient {
 
   setDefaultModelProfile(id: string): Promise<{ ok: true; profile: ModelProfile }> {
     return this.request("POST", `/v1/model-profiles/${encodeURIComponent(id)}/default`, {})
+  }
+
+  listRules(): Promise<{ rules: PermissionRule[] }> {
+    return this.request("GET", "/v1/rules")
+  }
+
+  createRule(input: {
+    action: string
+    resource: string
+    effect: "allow" | "ask" | "deny"
+    position?: number
+    ttlSeconds?: number | null
+    note?: string | null
+  }): Promise<{ rule: PermissionRule }> {
+    return this.request("POST", "/v1/rules", input)
+  }
+
+  updateRule(
+    id: string,
+    input: Partial<{
+      action: string
+      resource: string
+      effect: "allow" | "ask" | "deny"
+      position: number
+      ttlSeconds: number | null
+      note: string | null
+    }>,
+  ): Promise<{ rule: PermissionRule }> {
+    return this.request("PATCH", `/v1/rules/${encodeURIComponent(id)}`, input)
+  }
+
+  removeRule(id: string): Promise<{ ok: true }> {
+    return this.request("DELETE", `/v1/rules/${encodeURIComponent(id)}`)
+  }
+
+  listApprovals(status?: ApprovalStatus): Promise<{ approvals: Approval[] }> {
+    const suffix = status ? `?status=${encodeURIComponent(status)}` : ""
+    return this.request("GET", `/v1/approvals${suffix}`)
+  }
+
+  getApproval(id: string): Promise<{ approval: Approval }> {
+    return this.request("GET", `/v1/approvals/${encodeURIComponent(id)}`)
+  }
+
+  decideApproval(
+    id: string,
+    decision: "approve" | "reject",
+    options?: { reason?: string; arguments?: unknown },
+  ): Promise<{ approval: Approval }> {
+    return this.request("POST", `/v1/approvals/${encodeURIComponent(id)}/decision`, {
+      decision,
+      ...(options?.reason ? { reason: options.reason } : {}),
+      ...(options && options.arguments !== undefined ? { arguments: options.arguments } : {}),
+    })
+  }
+
+  listAudit(limit = 100): Promise<{ entries: AuditEntry[] }> {
+    return this.request("GET", `/v1/audit?limit=${limit}`)
   }
 
   stop(): Promise<{ ok: true }> {

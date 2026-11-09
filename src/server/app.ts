@@ -6,12 +6,14 @@ import type { Logger } from "../core/log"
 import { nowPlusSeconds } from "../core/time"
 import type { Database } from "../db/database"
 import type { EventService } from "../events/service"
-import type { AuthContext } from "../shared/types"
+import type { ApprovalStatus, AuthContext } from "../shared/types"
 import { AuthService, SESSION_TTL_SECONDS } from "../auth/auth-service"
 import type { ModelService } from "../models/model-service"
 import { ModelProfileError } from "../models/model-service"
 import type { TurnService } from "../agent/turn-service"
 import type { TurnBus } from "../agent/turn-bus"
+import type { PermissionService } from "../permissions/permission-service"
+import { PermissionError } from "../permissions/permission-service"
 import { createTurnStream } from "./turn-stream"
 import {
   clearSessionCookie,
@@ -57,6 +59,21 @@ const updateModelProfileSchema = modelProfileSchema.partial().extend({
   supportsTools: z.boolean().optional(),
 })
 
+const ruleSchema = z.object({
+  action: z.string().min(1).max(200),
+  resource: z.string().min(1).max(500),
+  effect: z.enum(["allow", "ask", "deny"]),
+  position: z.number().int().min(0).max(1_000_000).optional(),
+  ttlSeconds: z.number().int().positive().nullable().optional(),
+  note: z.string().max(500).nullable().optional(),
+})
+
+const approvalDecisionSchema = z.object({
+  decision: z.enum(["approve", "reject"]),
+  reason: z.string().max(2_000).optional(),
+  arguments: z.unknown().optional(),
+})
+
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 
 export interface AppDependencies {
@@ -67,6 +84,7 @@ export interface AppDependencies {
   readonly models: ModelService
   readonly turns: TurnService
   readonly turnBus: TurnBus
+  readonly permissions: PermissionService
   readonly logger: Logger
   readonly startedAt: number
   readonly shutdown: (reason: string) => void | Promise<void>
@@ -100,6 +118,9 @@ function issueHttpError(error: unknown): HttpError {
   if (error instanceof ModelProfileError) {
     return new HttpError(400, "model_profile_error", error.message)
   }
+  if (error instanceof PermissionError) {
+    return new HttpError(error.status, error.code, error.message)
+  }
   return new HttpError(500, "internal_error", "Internal server error")
 }
 
@@ -116,6 +137,7 @@ export class App {
   private readonly models: ModelService
   private readonly turns: TurnService
   private readonly turnBus: TurnBus
+  private readonly permissions: PermissionService
   private readonly logger: Logger
   private readonly startedAt: number
   private readonly shutdown: (reason: string) => void | Promise<void>
@@ -128,6 +150,7 @@ export class App {
     this.models = dependencies.models
     this.turns = dependencies.turns
     this.turnBus = dependencies.turnBus
+    this.permissions = dependencies.permissions
     this.logger = dependencies.logger
     this.startedAt = dependencies.startedAt
     this.shutdown = dependencies.shutdown
@@ -209,6 +232,9 @@ export class App {
           "model-profiles",
           "turns",
           "streaming",
+          "permissions",
+          "approvals",
+          "audit",
         ],
       })
     }
@@ -257,6 +283,106 @@ export class App {
 
     if (path === "/favicon.ico" && method === "GET") {
       return new Response(null, { status: 204 })
+    }
+
+    if (path === "/v1/rules" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse({ rules: await this.permissions.listRules() })
+    }
+
+    if (path === "/v1/rules" && method === "POST") {
+      await this.requireAuth(request)
+      const parsed = ruleSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      return jsonResponse({ rule: await this.permissions.createRule(parsed.data) }, 201)
+    }
+
+    const ruleMatch = /^\/v1\/rules\/([^/]+)$/.exec(path)
+    if (ruleMatch) {
+      await this.requireAuth(request)
+      const id = decodeURIComponent(ruleMatch[1] ?? "")
+      if (method === "PATCH") {
+        const parsed = ruleSchema.partial().safeParse(await readJson(request))
+        if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+        const rule = await this.permissions.updateRule(id, parsed.data)
+        if (!rule) throw new HttpError(404, "rule_not_found", "Rule not found")
+        return jsonResponse({ rule })
+      }
+      if (method === "DELETE") {
+        const removed = await this.permissions.deleteRule(id)
+        if (!removed) throw new HttpError(404, "rule_not_found", "Rule not found")
+        return jsonResponse({ ok: true })
+      }
+      throw new HttpError(405, "method_not_allowed", "Method not allowed")
+    }
+
+    if (path === "/v1/approvals" && method === "GET") {
+      await this.requireAuth(request)
+      const rawStatus = url.searchParams.get("status")
+      if (
+        rawStatus &&
+        rawStatus !== "pending" &&
+        rawStatus !== "approved" &&
+        rawStatus !== "rejected" &&
+        rawStatus !== "expired" &&
+        rawStatus !== "invalidated"
+      ) {
+        throw new HttpError(400, "invalid_status", "Invalid approval status")
+      }
+      const limitRaw = url.searchParams.get("limit")
+      const limit = limitRaw ? Math.min(500, Math.max(1, Number(limitRaw) || 100)) : 100
+      return jsonResponse({
+        approvals: await this.permissions.listApprovals(
+          (rawStatus as ApprovalStatus | null) ?? undefined,
+          limit,
+        ),
+      })
+    }
+
+    const approvalMatch = /^\/v1\/approvals\/([^/]+)(?:\/decision)?$/.exec(path)
+    if (approvalMatch) {
+      await this.requireAuth(request)
+      const id = decodeURIComponent(approvalMatch[1] ?? "")
+      const isDecision = path.endsWith("/decision")
+      if (!isDecision && method === "GET") {
+        const approval = await this.permissions.getApproval(id)
+        if (!approval) throw new HttpError(404, "approval_not_found", "Approval not found")
+        return jsonResponse({ approval })
+      }
+      if (isDecision && method === "POST") {
+        const parsed = approvalDecisionSchema.safeParse(await readJson(request))
+        if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+        let approval
+        try {
+          approval = await this.permissions.decideApproval(id, parsed.data.decision, {
+            decidedBy: "user",
+            ...(parsed.data.reason ? { reason: parsed.data.reason } : {}),
+            ...(parsed.data.arguments !== undefined ? { arguments: parsed.data.arguments } : {}),
+          })
+        } catch (error) {
+          if (error instanceof PermissionError && error.code === "approval_expired") {
+            const expired = await this.permissions.getApproval(id)
+            if (expired?.status === "expired") void this.turns.resumeWaiting(expired.turnId)
+          }
+          throw error
+        }
+        void this.turns.resumeWaiting(approval.turnId).catch((error) => {
+          this.logger.error("approval.resume_failed", {
+            approvalId: approval.id,
+            turnId: approval.turnId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
+        return jsonResponse({ approval })
+      }
+      throw new HttpError(405, "method_not_allowed", "Method not allowed")
+    }
+
+    if (path === "/v1/audit" && method === "GET") {
+      await this.requireAuth(request)
+      const limitRaw = url.searchParams.get("limit")
+      const limit = limitRaw ? Math.min(500, Math.max(1, Number(limitRaw) || 100)) : 100
+      return jsonResponse({ entries: await this.permissions.listAudit(limit) })
     }
 
     if (path === "/v1/model-profiles" && method === "GET") {

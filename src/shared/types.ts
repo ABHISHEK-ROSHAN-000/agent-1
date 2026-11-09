@@ -55,6 +55,7 @@ export interface Message {
 export type TurnStatus =
   | "queued"
   | "running"
+  | "waiting_approval"
   | "interrupted"
   | "resuming"
   | "completed"
@@ -81,6 +82,53 @@ export interface TokenUsage {
   readonly inputTokens: number
   readonly outputTokens: number
   readonly costUsd: number
+}
+
+export type RuleEffect = "allow" | "ask" | "deny"
+export type ToolRisk = "read" | "write" | "external" | "shell" | "unknown"
+
+export interface PermissionRule {
+  readonly id: string
+  readonly action: string
+  readonly resource: string
+  readonly effect: RuleEffect
+  readonly position: number
+  readonly ttlSeconds: number | null
+  readonly expiresAt: string | null
+  readonly note: string | null
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired" | "invalidated"
+
+export interface Approval {
+  readonly id: string
+  readonly turnId: string
+  readonly sessionId: string
+  readonly toolCallId: string
+  readonly toolName: string
+  readonly arguments: unknown
+  readonly argumentsHash: string
+  readonly status: ApprovalStatus
+  readonly createdAt: string
+  readonly expiresAt: string
+  readonly decidedAt: string | null
+  readonly decidedBy: string | null
+  readonly reason: string | null
+}
+
+export interface AuditEntry {
+  readonly id: number
+  readonly at: string
+  readonly actor: string
+  readonly action: string
+  readonly resource: string
+  readonly decision: string
+  readonly ruleId: string | null
+  readonly approvalId: string | null
+  readonly turnId: string | null
+  readonly details: unknown
 }
 
 export interface EventRecord {

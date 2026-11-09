@@ -6,6 +6,7 @@ import { Logger } from "../core/log"
 import { Database } from "../db/database"
 import { EventService } from "../events/service"
 import { ModelService } from "../models/model-service"
+import { PermissionService } from "../permissions/permission-service"
 import { TurnBus } from "./turn-bus"
 import { TurnService } from "./turn-service"
 import { startFakeOpenAI, type FakeOpenAI } from "../test/fake-openai"
@@ -43,8 +44,9 @@ async function setup() {
     maxOutputTokens: 256,
   })
   const events = new EventService(db, logger)
+  const permissions = new PermissionService(db, logger)
   const bus = new TurnBus()
-  const turns = new TurnService(db, events, modelService, bus, logger, {
+  const turns = new TurnService(db, events, modelService, permissions, bus, logger, {
     maxSteps: 4,
     maxWallMs: 10_000,
   })

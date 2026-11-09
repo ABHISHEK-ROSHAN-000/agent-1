@@ -5,6 +5,7 @@ import { AuthService } from "../auth/auth-service"
 import { SecretStore } from "../auth/secret-store"
 import { EventService } from "../events/service"
 import { ModelService } from "../models/model-service"
+import { PermissionService } from "../permissions/permission-service"
 import { TurnBus } from "../agent/turn-bus"
 import { TurnService } from "../agent/turn-service"
 import { App } from "../server/app"
@@ -61,8 +62,10 @@ async function main(): Promise<void> {
     await auth.pruneExpired()
     events = new EventService(db, logger)
     const models = new ModelService(db, logger, config.modelSecretsPath)
+    const permissions = new PermissionService(db, logger)
+    await permissions.expireApprovals()
     const turnBus = new TurnBus()
-    const turns = new TurnService(db, events, models, turnBus, logger)
+    const turns = new TurnService(db, events, models, permissions, turnBus, logger)
 
     const app = new App({
       config,
@@ -72,6 +75,7 @@ async function main(): Promise<void> {
       models,
       turns,
       turnBus,
+      permissions,
       logger,
       startedAt: Date.now(),
       shutdown: (reason) => void shutdown(reason),

@@ -124,6 +124,7 @@ export function startFakeOpenAI(): FakeOpenAI {
       const toolNames = body.tools?.map((entry) => entry.function?.name ?? "") ?? []
       const wantsProbe = toolNames.includes("probe") && /probe/i.test(userText)
       const wantsEcho = /test_echo|echo/i.test(userText) && toolNames.includes("test_echo")
+      const wantsConfirm = /confirm/i.test(userText) && toolNames.includes("test_confirm")
       const wantsLoop = /loop/i.test(userText) && toolNames.includes("test_echo")
       const slow = /slow/i.test(userText)
       const isProbeText = /reply with the single word: ready/i.test(userText)
@@ -139,7 +140,9 @@ export function startFakeOpenAI(): FakeOpenAI {
       let tool: { name: string; args: Record<string, unknown> } | undefined
       if (wantsProbe) tool = { name: "probe", args: { value: "ok" } }
       else if (wantsLoop) tool = { name: "test_echo", args: { message: "loop" } }
-      else if (wantsEcho && !hasToolResult) {
+      else if (wantsConfirm && !hasToolResult) {
+        tool = { name: "test_confirm", args: { note: "confirm from fake" } }
+      } else if (wantsEcho && !hasToolResult) {
         tool = { name: "test_echo", args: { message: "hello from fake" } }
       }
       if (isProbeText || isSummarize) tool = undefined

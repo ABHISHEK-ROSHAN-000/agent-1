@@ -24,6 +24,15 @@ Commands:
   model default <id>
   model remove <id>
   chat --session <id> --message <text> [--model <profile-id>]
+  rules list
+  rules add --action <action> --resource <resource> --effect allow|ask|deny [--note <note>]
+  rules update <id> [--effect ...] [--position ...] [--action ...] [--resource ...]
+  rules remove <id>
+  approvals list [--status pending|approved|rejected|expired|invalidated]
+  approvals show <id>
+  approvals approve <id>
+  approvals reject <id> [--reason <text>]
+  audit [--limit <n>]
 
 Options:
   --data-dir <path>   Override the Agent-1 data directory
@@ -397,6 +406,151 @@ async function chatCommand(parsed: ParsedArgs): Promise<void> {
   }
 }
 
+async function rulesCommand(parsed: ParsedArgs): Promise<void> {
+  const sub = parsed.positionals[1]
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+
+  if (sub === "list" || !sub) {
+    const result = await client.listRules()
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    for (const rule of result.rules) {
+      process.stdout.write(
+        `${rule.id}  ${rule.position.toString().padStart(3, " ")}  ${rule.effect.padEnd(5)}  ${rule.action}  ${rule.resource}${rule.note ? `  # ${rule.note}` : ""}\n`,
+      )
+    }
+    return
+  }
+
+  if (sub === "add") {
+    const effect = flagString(parsed, "effect")
+    if (effect !== "allow" && effect !== "ask" && effect !== "deny") {
+      throw new Error("Usage: agent-1 rules add --action <action> --resource <resource> --effect allow|ask|deny")
+    }
+    const action = flagString(parsed, "action")
+    const resource = flagString(parsed, "resource") ?? "*"
+    if (!action) throw new Error("Action is required")
+    const position = flagString(parsed, "position")
+    const note = flagString(parsed, "note") ?? null
+    const result = await client.createRule({
+      action,
+      resource,
+      effect,
+      ...(position ? { position: Number(position) } : {}),
+      note,
+    })
+    output(json, result, `Created rule ${result.rule.id}.`)
+    return
+  }
+
+  const id = parsed.positionals[2]
+  if (!id) throw new Error("Rule id is required")
+
+  if (sub === "update") {
+    const effect = flagString(parsed, "effect")
+    if (effect !== undefined && effect !== "allow" && effect !== "ask" && effect !== "deny") {
+      throw new Error("Effect must be allow, ask, or deny")
+    }
+    const position = flagString(parsed, "position")
+    const result = await client.updateRule(id, {
+      ...(effect ? { effect } : {}),
+      ...(position ? { position: Number(position) } : {}),
+      ...(flagString(parsed, "action") ? { action: flagString(parsed, "action")! } : {}),
+      ...(flagString(parsed, "resource") ? { resource: flagString(parsed, "resource")! } : {}),
+      ...(flagString(parsed, "note") !== undefined ? { note: flagString(parsed, "note") ?? null } : {}),
+    })
+    output(json, result, `Updated rule ${result.rule.id}.`)
+    return
+  }
+
+  if (sub === "remove") {
+    const result = await client.removeRule(id)
+    output(json, result, `Removed rule ${id}.`)
+    return
+  }
+
+  throw new Error("Usage: agent-1 rules list|add|update|remove")
+}
+
+async function approvalsCommand(parsed: ParsedArgs): Promise<void> {
+  const sub = parsed.positionals[1]
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+
+  if (sub === "list" || !sub) {
+    const statusFilter = flagString(parsed, "status")
+    const result = await client.listApprovals(statusFilter as never)
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    if (result.approvals.length === 0) {
+      process.stdout.write("No approvals.\n")
+      return
+    }
+    for (const approval of result.approvals) {
+      process.stdout.write(
+        `${approval.id}  ${approval.status.padEnd(9)}  ${approval.toolName}  ${approval.argumentsHash.slice(0, 12)}\n`,
+      )
+    }
+    return
+  }
+
+  const id = parsed.positionals[2]
+  if (!id) throw new Error("Approval id is required")
+
+  if (sub === "show") {
+    const result = await client.getApproval(id)
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    process.stdout.write(JSON.stringify(result.approval, null, 2) + "\n")
+    return
+  }
+
+  if (sub === "approve" || sub === "reject") {
+    const result = await client.decideApproval(id, sub === "approve" ? "approve" : "reject", {
+      ...(flagString(parsed, "reason") ? { reason: flagString(parsed, "reason")! } : {}),
+    })
+    output(json, result, `Approval ${id}: ${result.approval.status}.`)
+    return
+  }
+
+  throw new Error("Usage: agent-1 approvals list|show|approve|reject")
+}
+
+async function auditCommand(parsed: ParsedArgs): Promise<void> {
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+  const limit = Number(flagString(parsed, "limit") ?? "100")
+  const result = await client.listAudit(Number.isFinite(limit) ? limit : 100)
+  if (json) {
+    output(true, result, "")
+    return
+  }
+  for (const entry of result.entries) {
+    process.stdout.write(
+      `${entry.at}  ${entry.actor}  ${entry.action}  ${entry.decision}  ${entry.resource}\n`,
+    )
+  }
+}
+
 async function main(argv: readonly string[]): Promise<number> {
   const parsed = parseArgs(argv)
   const command = parsed.positionals[0]
@@ -437,6 +591,18 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     if (command === "chat") {
       await chatCommand(parsed)
+      return 0
+    }
+    if (command === "rules") {
+      await rulesCommand(parsed)
+      return 0
+    }
+    if (command === "approvals") {
+      await approvalsCommand(parsed)
+      return 0
+    }
+    if (command === "audit") {
+      await auditCommand(parsed)
       return 0
     }
     process.stderr.write(`Unknown command: ${command}\n\n`)

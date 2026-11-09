@@ -69,6 +69,62 @@ export const openApiDocument = {
         responses: { "200": { description: "New password returned once" } },
       },
     },
+    "/v1/rules": {
+      get: {
+        summary: "List permission rules",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Rules" } },
+      },
+      post: {
+        summary: "Create a permission rule",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "201": { description: "Rule created" } },
+      },
+    },
+    "/v1/rules/{id}": {
+      patch: {
+        summary: "Update a permission rule",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Rule updated" } },
+      },
+      delete: {
+        summary: "Delete a permission rule",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Rule deleted" } },
+      },
+    },
+    "/v1/approvals": {
+      get: {
+        summary: "List approvals, optionally by status",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Approvals" } },
+      },
+    },
+    "/v1/approvals/{id}": {
+      get: {
+        summary: "Get an approval",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Approval" } },
+      },
+    },
+    "/v1/approvals/{id}/decision": {
+      post: {
+        summary: "Approve or reject an approval",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Approval decision" }, "409": { description: "Arguments changed or already decided" } },
+      },
+    },
+    "/v1/audit": {
+      get: {
+        summary: "Read the permission audit log",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Audit entries" } },
+      },
+    },
     "/v1/model-profiles": {
       get: {
         summary: "List model profiles",

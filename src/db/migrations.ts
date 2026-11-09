@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import { SqlClient } from "effect/sql"
 import { SqliteMigrator } from "@effect/sql-sqlite-bun"
 
-export const LATEST_SCHEMA_VERSION = 2
+export const LATEST_SCHEMA_VERSION = 3
 
 const initial = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -150,7 +150,83 @@ const agentRuntime = Effect.gen(function* () {
   yield* Effect.void
 })
 
+const permissions = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS permission_rules (
+      id TEXT PRIMARY KEY,
+      action TEXT NOT NULL,
+      resource TEXT NOT NULL DEFAULT '*',
+      effect TEXT NOT NULL CHECK (effect IN ('allow', 'ask', 'deny')),
+      position INTEGER NOT NULL DEFAULT 0,
+      ttl_seconds INTEGER,
+      expires_at TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `
+  yield* sql`CREATE INDEX IF NOT EXISTS permission_rules_position_idx ON permission_rules (position, id)`
+
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS approvals (
+      id TEXT PRIMARY KEY,
+      turn_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      arguments_json TEXT NOT NULL,
+      arguments_hash TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'invalidated')),
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      decided_at TEXT,
+      decided_by TEXT,
+      reason TEXT
+    )
+  `
+  yield* sql`CREATE INDEX IF NOT EXISTS approvals_status_idx ON approvals (status, created_at)`
+  yield* sql`CREATE INDEX IF NOT EXISTS approvals_turn_idx ON approvals (turn_id, tool_call_id)`
+
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      at TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      resource TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      rule_id TEXT,
+      approval_id TEXT,
+      turn_id TEXT,
+      details_json TEXT NOT NULL
+    )
+  `
+  yield* sql`CREATE INDEX IF NOT EXISTS audit_log_at_idx ON audit_log (at)`
+
+  const now = new Date().toISOString()
+  const rules: Array<[string, string, string, string, number, string]> = [
+    ["rule_allow_test_echo", "tool.test_echo", "*", "allow", 10, "Read-only test echo tool"],
+    ["rule_allow_test_time", "tool.test_time", "*", "allow", 11, "Read-only test clock tool"],
+    ["rule_ask_test_confirm", "tool.test_confirm", "*", "ask", 30, "Approval-gated test tool"],
+    ["rule_ask_fs_writes", "fs.write", "*", "ask", 40, "Future filesystem writes"],
+    ["rule_ask_shell", "shell.exec", "*", "ask", 41, "Future shell commands"],
+    ["rule_ask_connectors", "connector.*", "*", "ask", 42, "Future connector actions"],
+  ]
+  for (const [id, action, resource, effect, position, note] of rules) {
+    yield* sql`
+      INSERT OR IGNORE INTO permission_rules
+        (id, action, resource, effect, position, ttl_seconds, expires_at, note, created_at, updated_at)
+      VALUES (${id}, ${action}, ${resource}, ${effect}, ${position}, NULL, NULL, ${note}, ${now}, ${now})
+    `
+  }
+
+  yield* Effect.void
+})
+
 export const migrationLoader = SqliteMigrator.fromRecord({
   "0001_initial": initial,
   "0002_agent_runtime": agentRuntime,
+  "0003_permissions": permissions,
 })
