@@ -1,0 +1,27 @@
+{
+  "name": "agent-1",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.4",
+  "description": "Agent-1: a local, approval-gated personal assistant for Windows.",
+  "license": "UNLICENSED",
+  "bin": {
+    "agent-1": "./bin/agent-1.js"
+  },
+  "scripts": {
+    "start": "bun run src/cli/main.ts",
+    "daemon": "bun run src/daemon/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:unit": "bun test src",
+    "check": "bun run typecheck && bun test"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.4",
+    "typescript": "7.0.2"
+  }
+}
