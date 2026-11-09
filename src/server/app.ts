@@ -20,6 +20,7 @@ import { WorkspaceError } from "../tools/workspace-service"
 import type { JournalService } from "../tools/journal-service"
 import { JournalError } from "../tools/journal-service"
 import { createTurnStream } from "./turn-stream"
+import { serveWeb } from "./static"
 import {
   clearSessionCookie,
   errorResponse,
@@ -104,18 +105,6 @@ export interface AppDependencies {
   readonly logger: Logger
   readonly startedAt: number
   readonly shutdown: (reason: string) => void | Promise<void>
-}
-
-function homePage(): string {
-  return `<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent-1</title></head>
-<body style="font-family: system-ui, sans-serif; max-width: 42rem; margin: 4rem auto; padding: 0 1rem;">
-<h1>Agent-1</h1>
-<p>The local daemon is running.</p>
-<p>Pair a device with <code>agent-1 pair</code>, or use the CLI locally. The web app arrives in Phase 5.</p>
-</body>
-</html>`
 }
 
 function pairingPage(message: string): string {
@@ -308,14 +297,6 @@ export class App {
       return this.pair(request, url)
     }
 
-    if (path === "/" && method === "GET") {
-      return htmlResponse(homePage())
-    }
-
-    if (path === "/favicon.ico" && method === "GET") {
-      return new Response(null, { status: 204 })
-    }
-
     if (path === "/v1/tools" && method === "GET") {
       await this.requireAuth(request)
       return jsonResponse({ tools: this.tools.list() })
@@ -339,6 +320,48 @@ export class App {
       const removed = await this.workspace.remove(decodeURIComponent(workspaceMatch[1] ?? ""))
       if (!removed) throw new HttpError(404, "workspace_not_found", "Workspace not found")
       return jsonResponse({ ok: true })
+    }
+
+    const workspaceFileMatch = /^\/v1\/workspaces\/([^/]+)\/(tree|file)$/.exec(path)
+    if (workspaceFileMatch && method === "GET") {
+      await this.requireAuth(request)
+      const id = decodeURIComponent(workspaceFileMatch[1] ?? "")
+      const kind = workspaceFileMatch[2]
+      const workspace = await this.db.getWorkspace(id)
+      if (!workspace) throw new HttpError(404, "workspace_not_found", "Workspace not found")
+      const requested = url.searchParams.get("path") ?? workspace.path
+      const resolved = await this.workspace.requireInsideGrant(requested, workspace.path)
+      if (kind === "tree") {
+        return jsonResponse(await this.tools.execute("fs_list", { path: resolved }, {}))
+      }
+      if (!url.searchParams.get("path")) {
+        throw new HttpError(400, "path_required", "A file path is required")
+      }
+      return jsonResponse(await this.tools.execute("fs_read", { path: resolved }, {}))
+    }
+
+    const contextMatch = /^\/v1\/sessions\/([^/]+)\/context$/.exec(path)
+    if (contextMatch && method === "GET") {
+      await this.requireAuth(request)
+      const id = decodeURIComponent(contextMatch[1] ?? "")
+      const session = await this.db.getSession(id)
+      if (!session) throw new HttpError(404, "session_not_found", "Session not found")
+      const [turns, messages, model] = await Promise.all([
+        this.db.listTurns(id, 100),
+        this.db.getSessionMessages(id, 500),
+        session.modelProfileId ? this.models.get(session.modelProfileId) : Promise.resolve(null),
+      ])
+      return jsonResponse({
+        session,
+        model,
+        messages: messages.length,
+        turns: turns.length,
+        inputTokens: turns.reduce((sum, turn) => sum + turn.inputTokens, 0),
+        outputTokens: turns.reduce((sum, turn) => sum + turn.outputTokens, 0),
+        costUsd: turns.reduce((sum, turn) => sum + turn.costUsd, 0),
+        lastActivity: turns[0]?.updatedAt ?? session.updatedAt,
+        contextWindow: model?.contextWindow ?? null,
+      })
     }
 
     if (path === "/v1/journal" && method === "GET") {
@@ -594,6 +617,10 @@ export class App {
     if (path === "/v1/openapi.json" && method === "GET") {
       await this.requireAuth(request)
       return jsonResponse(openApiDocument)
+    }
+
+    if ((method === "GET" || method === "HEAD") && !path.startsWith("/v1/")) {
+      return serveWeb(this.config.webRoot, path)
     }
 
     throw new HttpError(404, "not_found", "Not found")

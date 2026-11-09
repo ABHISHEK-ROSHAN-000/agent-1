@@ -13,15 +13,21 @@
     "start": "bun run src/cli/main.ts",
     "daemon": "bun run src/daemon/main.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "web:dev": "bun run --cwd web dev",
+    "web:build": "bun run --cwd web build",
+    "web:typecheck": "bun run --cwd web typecheck",
+    "test": "bun test src",
     "test:unit": "bun test src",
-    "check": "bun run typecheck && bun test"
+    "test:e2e": "bun run web:build && bun test e2e",
+    "test:all": "bun run check && bun run test:e2e",
+    "check": "bun run typecheck && bun run web:typecheck && bun test src"
   },
   "engines": {
     "bun": ">=1.4.0"
   },
   "devDependencies": {
     "@types/bun": "1.4.4",
+    "playwright-core": "1.65.0",
     "typescript": "7.0.2"
   },
   "dependencies": {
@@ -30,6 +36,7 @@
     "@effect/sql-sqlite-bun": "4.1.2",
     "ai": "7.0.166",
     "effect": "4.1.2",
+    "qrcode-terminal": "0.12.0",
     "zod": "4.6.7"
   }
 }

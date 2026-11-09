@@ -5,6 +5,7 @@ import { SecretStore } from "../auth/secret-store"
 import { AgentOneClient } from "../client/client"
 import { autostartStatus, disableAutostart, enableAutostart } from "../daemon/autostart"
 import { startService, stopService, serviceStatus } from "../daemon/service"
+import * as QRCode from "qrcode-terminal"
 
 const HELP = `${PRODUCT_NAME} ${VERSION}
 
@@ -205,8 +206,13 @@ async function pairCommand(parsed: ParsedArgs): Promise<void> {
   if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
   const client = new AgentOneClient({ baseUrl: status.state.url, password })
   const pairing = await client.pair()
-  if (hasFlag(parsed, "json")) output(true, pairing, "")
-  else process.stdout.write(`Pairing link: ${pairing.url}\nExpires: ${pairing.expiresAt}\n`)
+  if (hasFlag(parsed, "json")) {
+    output(true, pairing, "")
+  } else {
+    process.stdout.write(`Pairing link: ${pairing.url}\nExpires: ${pairing.expiresAt}\n\n`)
+    QRCode.generate(pairing.url, { small: true })
+    process.stdout.write("\nScan the QR code with the Agent-1 login screen, or paste the link.\n")
+  }
 }
 
 async function sessionCommand(parsed: ParsedArgs): Promise<void> {

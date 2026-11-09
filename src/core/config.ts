@@ -5,7 +5,7 @@ import { VERSION } from "./version"
 
 export const PRODUCT_NAME = "Agent-1"
 export const AUTH_USERNAME = "agent-1"
-export const PHASE = "Phase 1 — daemon foundations"
+export const PHASE = "Phase 5 — web client"
 
 export interface AppConfig {
   readonly dataDir: string
@@ -19,6 +19,7 @@ export interface AppConfig {
   readonly lockPath: string
   readonly logsDir: string
   readonly logPath: string
+  readonly webRoot: string
   readonly host: string
   readonly port: number
   readonly allowedHosts: readonly string[]
@@ -75,6 +76,9 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     lockPath: path.join(dataDir, "state", "service.lock"),
     logsDir: path.join(dataDir, "logs"),
     logPath: path.join(dataDir, "logs", "service.log"),
+    webRoot: env.AGENT1_WEB_ROOT
+      ? path.resolve(env.AGENT1_WEB_ROOT)
+      : path.resolve(import.meta.dir, "..", "..", "web", "dist"),
     host: "127.0.0.1",
     port,
     allowedHosts,
