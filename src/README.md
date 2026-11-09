@@ -1,6 +1,6 @@
 # Source map
 
-Planned modules. Only the Phase 0 skeleton exists so far.
+Phase 1 modules are implemented. Later-phase directories are planned only.
 
 | Directory | Responsibility | Phase |
 |---|---|---|

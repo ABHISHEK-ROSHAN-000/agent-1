@@ -1,59 +1,268 @@
-import { CLI_NAME, PHASE, PRODUCT_NAME, VERSION } from "../core/version"
+import { parseArgs, flagString, hasFlag, type ParsedArgs } from "./args"
+import { CLI_NAME, PRODUCT_NAME, VERSION } from "../core/version"
+import { ensureDataDirs, resolveConfig, type AppConfig } from "../core/config"
+import { SecretStore } from "../auth/secret-store"
+import { AgentOneClient } from "../client/client"
+import { autostartStatus, disableAutostart, enableAutostart } from "../daemon/autostart"
+import { startService, stopService, serviceStatus } from "../daemon/service"
 
 const HELP = `${PRODUCT_NAME} ${VERSION}
-${PHASE}
 
 Usage: ${CLI_NAME} <command> [options]
 
-Commands planned for later phases:
-  service      start | stop | status | restart
-  pair         create a one-time pairing link
-  auth         show | rotate
-  session      create | list
-  chat         start or resume a chat session
-  approvals    list | decide
-  rules        list | create | update | delete
-  memory       show | pending | approve | reject | undo
-  skills       list | show | pending | approve | reject
-  connectors   list | connect | revoke
-  mcp          list | install | remove
-  schedules    list | create | pause | resume | delete
-  tui          open the terminal client
-  remote       on --yes | off | status
-  diagnose     build a redacted diagnostic bundle
+Commands:
+  service start|stop|status|restart
+  service autostart on|off|status
+  status
+  auth show|rotate
+  pair
+  session create [--title <title>]
+  session list
 
-Current commands:
-  ${CLI_NAME} --help
-  ${CLI_NAME} --version
-  ${CLI_NAME} status
+Options:
+  --data-dir <path>   Override the Agent-1 data directory
+  --port <port>       Override the local API port (0 = random)
+  --json              Print machine-readable JSON
+  --help              Show this help
+  --version           Show the version
 `
 
 function printHelp(stream: NodeJS.WriteStream = process.stdout): void {
   stream.write(HELP)
 }
 
-function main(argv: readonly string[]): number {
-  const command = argv[0]
+function output(json: boolean, value: unknown, text: string): void {
+  if (json) process.stdout.write(`${JSON.stringify(value)}\n`)
+  else process.stdout.write(`${text}\n`)
+}
 
-  if (!command || command === "help" || command === "--help" || command === "-h") {
+function configFor(parsed: ParsedArgs): AppConfig {
+  const env = { ...process.env }
+  const dataDir = flagString(parsed, "data-dir")
+  if (dataDir) env.AGENT1_DATA_DIR = dataDir
+  const port = flagString(parsed, "port")
+  if (port) env.AGENT1_PORT = port
+  return resolveConfig(env)
+}
+
+async function passwordFor(config: AppConfig): Promise<string> {
+  const fromEnv = process.env.AGENT1_PASSWORD
+  if (fromEnv) return fromEnv
+  const password = await new SecretStore(config.secretsPath).readPassword()
+  if (!password) {
+    throw new Error("No password is available. Start the service first or set AGENT1_PASSWORD.")
+  }
+  return password
+}
+
+async function serviceCommand(parsed: ParsedArgs): Promise<void> {
+  const sub = parsed.positionals[1]
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+
+  if (!sub || sub === "status") {
+    const status = await serviceStatus(config)
+    if (json) {
+      output(true, status, "")
+      return
+    }
+    if (status.status === "stopped") {
+      process.stdout.write("Agent-1 is stopped.\n")
+      return
+    }
+    if (status.status === "stale") {
+      process.stdout.write(`Agent-1 is not running (stale state for pid ${status.state?.pid}).\n`)
+      return
+    }
+    process.stdout.write(
+      `Agent-1 is running.\n  PID:     ${status.state?.pid}\n  URL:     ${status.state?.url}\n  Version: ${status.state?.version}\n  Health:  ${status.healthy ? "ok" : "unreachable"}\n`,
+    )
+    return
+  }
+
+  if (sub === "start") {
+    ensureDataDirs(config)
+    const result = await startService(config)
+    if (json) {
+      output(true, { status: "running", alreadyRunning: result.alreadyRunning, ...result.state }, "")
+      return
+    }
+    process.stdout.write(
+      `Agent-1 is ${result.alreadyRunning ? "already running" : "running"}.\n  PID: ${result.state.pid}\n  URL: ${result.state.url}\n`,
+    )
+    process.stdout.write("Show the password with: agent-1 auth show\n")
+    return
+  }
+
+  if (sub === "stop") {
+    const status = await serviceStatus(config)
+    if (status.status !== "running") {
+      const result = { stopped: false, forced: false }
+      output(json, result, "Agent-1 was not running.")
+      return
+    }
+    const password = await passwordFor(config)
+    const result = await stopService(config, password)
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    process.stdout.write(result.stopped ? "Agent-1 stopped.\n" : "Agent-1 was not running.\n")
+    if (result.forced) process.stdout.write("The process did not stop gracefully and was forced.\n")
+    return
+  }
+
+  if (sub === "restart") {
+    const current = await serviceStatus(config)
+    if (current.status === "running") {
+      const password = await passwordFor(config)
+      await stopService(config, password)
+    }
+    const result = await startService(config)
+    if (json) {
+      output(true, { status: "running", alreadyRunning: result.alreadyRunning, ...result.state }, "")
+      return
+    }
+    process.stdout.write(`Agent-1 restarted.\n  PID: ${result.state.pid}\n  URL: ${result.state.url}\n`)
+    return
+  }
+
+  if (sub === "autostart") {
+    const action = parsed.positionals[2]
+    if (action === "on") {
+      const status = enableAutostart()
+      output(json, status, `Autostart enabled (${status.entryName}).`)
+      return
+    }
+    if (action === "off") {
+      const status = disableAutostart()
+      output(json, status, `Autostart disabled (${status.entryName}).`)
+      return
+    }
+    if (!action || action === "status") {
+      const status = autostartStatus()
+      output(json, status, `Autostart is ${status.enabled ? "enabled" : "disabled"} (${status.entryName}).`)
+      return
+    }
+    throw new Error("Usage: agent-1 service autostart on|off|status")
+  }
+
+  throw new Error("Usage: agent-1 service start|stop|status|restart|autostart")
+}
+
+async function authCommand(parsed: ParsedArgs): Promise<void> {
+  const sub = parsed.positionals[1]
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  ensureDataDirs(config)
+
+  if (sub === "show") {
+    const password = await new SecretStore(config.secretsPath).readPassword()
+    if (!password) throw new Error("No password is available. Start the service first.")
+    output(json, { password }, password)
+    return
+  }
+
+  if (sub === "rotate") {
+    const password = await passwordFor(config)
+    const status = await serviceStatus(config)
+    if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+    const client = new AgentOneClient({ baseUrl: status.state.url, password })
+    const result = await client.rotatePassword()
+    output(json, result, `New password: ${result.password}`)
+    return
+  }
+
+  throw new Error("Usage: agent-1 auth show|rotate")
+}
+
+async function pairCommand(parsed: ParsedArgs): Promise<void> {
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+  const pairing = await client.pair()
+  if (hasFlag(parsed, "json")) output(true, pairing, "")
+  else process.stdout.write(`Pairing link: ${pairing.url}\nExpires: ${pairing.expiresAt}\n`)
+}
+
+async function sessionCommand(parsed: ParsedArgs): Promise<void> {
+  const sub = parsed.positionals[1]
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+
+  if (sub === "create") {
+    const title = flagString(parsed, "title")
+    const result = await client.createSession(title)
+    output(json, result, `Created session ${String(result.session.id)} ("${String(result.session.title)}")`)
+    return
+  }
+
+  if (sub === "list" || !sub) {
+    const result = await client.listSessions()
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    if (result.sessions.length === 0) {
+      process.stdout.write("No sessions.\n")
+      return
+    }
+    for (const session of result.sessions) {
+      process.stdout.write(`${String(session.id)}  ${String(session.title)}\n`)
+    }
+    return
+  }
+
+  throw new Error("Usage: agent-1 session create|list")
+}
+
+async function main(argv: readonly string[]): Promise<number> {
+  const parsed = parseArgs(argv)
+  const command = parsed.positionals[0]
+
+  if (command === "version" || hasFlag(parsed, "version") || command === "-v") {
+    process.stdout.write(`${CLI_NAME} ${VERSION}\n`)
+    return 0
+  }
+  if (!command || command === "help" || hasFlag(parsed, "help") || command === "-h") {
     printHelp()
     return 0
   }
 
-  if (command === "version" || command === "--version" || command === "-v") {
-    process.stdout.write(`${CLI_NAME} ${VERSION}\n`)
-    return 0
+  try {
+    if (command === "status") {
+      await serviceCommand({ ...parsed, positionals: ["service", "status", ...parsed.positionals.slice(1)] })
+      return 0
+    }
+    if (command === "service") {
+      await serviceCommand(parsed)
+      return 0
+    }
+    if (command === "auth") {
+      await authCommand(parsed)
+      return 0
+    }
+    if (command === "pair") {
+      await pairCommand(parsed)
+      return 0
+    }
+    if (command === "session") {
+      await sessionCommand(parsed)
+      return 0
+    }
+    process.stderr.write(`Unknown command: ${command}\n\n`)
+    printHelp(process.stderr)
+    return 1
+  } catch (error) {
+    process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`)
+    return 1
   }
-
-  if (command === "status") {
-    process.stdout.write(`${PRODUCT_NAME} ${VERSION} — ${PHASE}\n`)
-    process.stdout.write("Daemon lifecycle is not implemented yet (Phase 1).\n")
-    return 0
-  }
-
-  process.stderr.write(`Unknown command: ${command}\n\n`)
-  printHelp(process.stderr)
-  return 1
 }
 
-process.exitCode = main(process.argv.slice(2))
+process.exitCode = await main(process.argv.slice(2))

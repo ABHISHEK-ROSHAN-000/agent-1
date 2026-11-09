@@ -1,0 +1,388 @@
+import { z } from "zod"
+import type { AppConfig } from "../core/config"
+import { PHASE, PRODUCT_NAME } from "../core/config"
+import { newRequestId } from "../core/ids"
+import type { Logger } from "../core/log"
+import { nowPlusSeconds } from "../core/time"
+import type { Database } from "../db/database"
+import type { EventService } from "../events/service"
+import type { AuthContext } from "../shared/types"
+import { AuthService, SESSION_TTL_SECONDS } from "../auth/auth-service"
+import {
+  clearSessionCookie,
+  errorResponse,
+  htmlResponse,
+  HttpError,
+  isHostAllowed,
+  isOriginAllowed,
+  jsonResponse,
+  parseCookies,
+  readJson,
+  sessionCookie,
+} from "./http"
+import { openApiDocument } from "./openapi"
+import { createEventStream } from "./sse"
+
+const loginSchema = z.object({
+  password: z.string().min(1).max(4096),
+})
+
+const createSessionSchema = z.object({
+  title: z.string().trim().min(1).max(200).optional(),
+})
+
+const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
+
+export interface AppDependencies {
+  readonly config: AppConfig
+  readonly db: Database
+  readonly auth: AuthService
+  readonly events: EventService
+  readonly logger: Logger
+  readonly startedAt: number
+  readonly shutdown: (reason: string) => void | Promise<void>
+}
+
+function homePage(): string {
+  return `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent-1</title></head>
+<body style="font-family: system-ui, sans-serif; max-width: 42rem; margin: 4rem auto; padding: 0 1rem;">
+<h1>Agent-1</h1>
+<p>The local daemon is running.</p>
+<p>Pair a device with <code>agent-1 pair</code>, or use the CLI locally. The web app arrives in Phase 5.</p>
+</body>
+</html>`
+}
+
+function pairingPage(message: string): string {
+  return `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent-1 pairing</title></head>
+<body style="font-family: system-ui, sans-serif; max-width: 42rem; margin: 4rem auto; padding: 0 1rem;">
+<h1>Agent-1 pairing</h1>
+<p>${message}</p>
+</body>
+</html>`
+}
+
+function issueHttpError(error: unknown): HttpError {
+  if (error instanceof HttpError) return error
+  return new HttpError(500, "internal_error", "Internal server error")
+}
+
+function validationMessage(result: z.ZodSafeParseResult<unknown>): string {
+  if (result.success) return ""
+  return result.error.issues.map((issue) => issue.message).join("; ")
+}
+
+export class App {
+  private readonly config: AppConfig
+  private readonly db: Database
+  private readonly auth: AuthService
+  private readonly events: EventService
+  private readonly logger: Logger
+  private readonly startedAt: number
+  private readonly shutdown: (reason: string) => void | Promise<void>
+
+  constructor(dependencies: AppDependencies) {
+    this.config = dependencies.config
+    this.db = dependencies.db
+    this.auth = dependencies.auth
+    this.events = dependencies.events
+    this.logger = dependencies.logger
+    this.startedAt = dependencies.startedAt
+    this.shutdown = dependencies.shutdown
+  }
+
+  readonly fetch = async (request: Request): Promise<Response> => {
+    const requestId = newRequestId()
+    const started = performance.now()
+    const url = new URL(request.url)
+    let response: Response
+    try {
+      if (!isHostAllowed(request.headers.get("host"), this.config.allowedHosts)) {
+        throw new HttpError(403, "host_not_allowed", "Host header is not allowed")
+      }
+      response = await this.route(request, url, requestId)
+    } catch (error) {
+      const httpError = issueHttpError(error)
+      if (httpError.status >= 500) {
+        this.logger.error("http.failed", {
+          requestId,
+          method: request.method,
+          path: url.pathname,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+      response = errorResponse(
+        httpError.status,
+        httpError.code,
+        httpError.message,
+        requestId,
+        httpError.headers,
+      )
+    }
+
+    response.headers.set("x-request-id", requestId)
+    this.logger.info("http.request", {
+      requestId,
+      method: request.method,
+      path: url.pathname,
+      status: response.status,
+      durationMs: Math.round(performance.now() - started),
+    })
+    return response
+  }
+
+  private async route(request: Request, url: URL, requestId: string): Promise<Response> {
+    const path = url.pathname
+    const method = request.method.toUpperCase()
+
+    if (path === "/v1/health" && method === "GET") {
+      const eventSeq = await this.events.latestSeq()
+      return jsonResponse({
+        status: "ok",
+        product: PRODUCT_NAME,
+        version: this.config.version,
+        phase: PHASE,
+        uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
+        eventSeq,
+      })
+    }
+
+    if (path === "/v1/info" && method === "GET") {
+      await this.requireAuth(request)
+      const eventSeq = await this.events.latestSeq()
+      return jsonResponse({
+        status: "ok",
+        product: PRODUCT_NAME,
+        version: this.config.version,
+        phase: PHASE,
+        uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
+        eventSeq,
+        dataDir: this.config.dataDir,
+        capabilities: ["auth", "sessions", "events", "pairing", "openapi"],
+      })
+    }
+
+    if (path === "/v1/auth/login" && method === "POST") {
+      return this.login(request, requestId)
+    }
+
+    if (path === "/v1/auth/logout" && method === "POST") {
+      const auth = await this.requireAuth(request)
+      await this.auth.logout(auth.sessionId)
+      await this.events.append("auth.logout", null, {})
+      return jsonResponse(
+        { ok: true },
+        200,
+        { "set-cookie": clearSessionCookie(this.config.secureCookies) },
+      )
+    }
+
+    if (path === "/v1/auth/pair" && method === "POST") {
+      await this.requireAuth(request)
+      const pairing = await this.auth.createPairingToken()
+      const pairUrl = `${url.origin}/pair?token=${encodeURIComponent(pairing.token)}`
+      await this.events.append("auth.pair_created", null, { expiresAt: pairing.expiresAt })
+      return jsonResponse({ url: pairUrl, expiresAt: pairing.expiresAt })
+    }
+
+    if (path === "/v1/auth/rotate" && method === "POST") {
+      await this.requireAuth(request)
+      const password = await this.auth.rotatePassword()
+      await this.events.append("auth.password_rotated", null, {})
+      return jsonResponse(
+        { password },
+        200,
+        { "set-cookie": clearSessionCookie(this.config.secureCookies) },
+      )
+    }
+
+    if (path === "/pair" && method === "GET") {
+      return this.pair(request, url)
+    }
+
+    if (path === "/" && method === "GET") {
+      return htmlResponse(homePage())
+    }
+
+    if (path === "/favicon.ico" && method === "GET") {
+      return new Response(null, { status: 204 })
+    }
+
+    if (path === "/v1/sessions" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse({ sessions: await this.db.listSessions() })
+    }
+
+    if (path === "/v1/sessions" && method === "POST") {
+      await this.requireAuth(request)
+      return this.createSession(request, requestId)
+    }
+
+    if (path.startsWith("/v1/sessions/") && method === "GET") {
+      await this.requireAuth(request)
+      const id = decodeURIComponent(path.slice("/v1/sessions/".length))
+      const session = await this.db.getSession(id)
+      if (!session) throw new HttpError(404, "session_not_found", "Session not found")
+      return jsonResponse({ session })
+    }
+
+    if (path === "/v1/events" && method === "GET") {
+      await this.requireAuth(request)
+      return createEventStream(request, this.events, this.logger)
+    }
+
+    if (path === "/v1/system/stop" && method === "POST") {
+      await this.requireAuth(request)
+      setTimeout(() => void this.shutdown("api"), 25)
+      return jsonResponse({ ok: true })
+    }
+
+    if (path === "/v1/openapi.json" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse(openApiDocument)
+    }
+
+    throw new HttpError(404, "not_found", "Not found")
+  }
+
+  private async login(request: Request, requestId: string): Promise<Response> {
+    const body = await readJson(request)
+    const parsed = loginSchema.safeParse(body)
+    if (!parsed.success) {
+      throw new HttpError(400, "invalid_body", validationMessage(parsed))
+    }
+
+    let token: { token: string; expiresAt: string } | null
+    try {
+      token = await this.auth.login(parsed.data.password)
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Too many login attempts")) {
+        throw new HttpError(429, "rate_limited", error.message)
+      }
+      throw error
+    }
+    if (!token) {
+      this.logger.warn("auth.login_failed", { requestId })
+      throw new HttpError(401, "invalid_password", "Invalid password")
+    }
+
+    await this.events.append("auth.login", null, {})
+    return jsonResponse(
+      { ok: true, expiresAt: token.expiresAt },
+      200,
+      { "set-cookie": sessionCookie(token.token, SESSION_TTL_SECONDS, this.config.secureCookies) },
+    )
+  }
+
+  private async pair(request: Request, url: URL): Promise<Response> {
+    const token = url.searchParams.get("token")
+    if (!token) return htmlResponse(pairingPage("Missing pairing token."), 400)
+    const session = await this.auth.consumePairingToken(token)
+    if (!session) return htmlResponse(pairingPage("This pairing link is invalid, expired, or already used."), 400)
+    await this.events.append("auth.paired", null, {})
+    return new Response(null, {
+      status: 303,
+      headers: {
+        location: "/",
+        "set-cookie": sessionCookie(session.token, SESSION_TTL_SECONDS, this.config.secureCookies),
+      },
+    })
+  }
+
+  private async createSession(request: Request, requestId: string): Promise<Response> {
+    const idempotencyKey = request.headers.get("idempotency-key")
+    if (idempotencyKey) {
+      const existing = await this.db.getIdempotency(idempotencyKey)
+      if (existing) {
+        if (existing.expiresAt <= new Date().toISOString()) {
+          // Expired entries are treated as absent.
+        } else if (
+          existing.method !== request.method ||
+          existing.path !== new URL(request.url).pathname
+        ) {
+          throw new HttpError(409, "idempotency_conflict", "Idempotency key was used for another request")
+        } else {
+          return new Response(existing.response, {
+            status: existing.status,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          })
+        }
+      }
+    }
+
+    const body = await readJson(request)
+    const parsed = createSessionSchema.safeParse(body)
+    if (!parsed.success) {
+      throw new HttpError(400, "invalid_body", validationMessage(parsed))
+    }
+    const created = await this.db.createSession(parsed.data.title ?? "New session")
+    this.events.publish(created.event)
+    const payload = JSON.stringify({ session: created.session })
+    if (idempotencyKey) {
+      await this.db.setIdempotency(
+        idempotencyKey,
+        request.method,
+        new URL(request.url).pathname,
+        201,
+        payload,
+        nowPlusSeconds(IDEMPOTENCY_TTL_SECONDS),
+      )
+    }
+    this.logger.info("session.created", { requestId, sessionId: created.session.id })
+    return new Response(payload, {
+      status: 201,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    })
+  }
+
+  private async requireAuth(request: Request): Promise<AuthContext> {
+    const auth = await this.authenticate(request)
+    if (!auth) {
+      throw new HttpError(401, "unauthorized", "Authentication required", {
+        "www-authenticate": 'Basic realm="Agent-1"',
+      })
+    }
+    if (
+      auth.kind === "cookie" &&
+      request.method.toUpperCase() !== "GET" &&
+      !isOriginAllowed(request.headers.get("origin"), this.config.allowedHosts)
+    ) {
+      throw new HttpError(403, "origin_not_allowed", "Origin is not allowed")
+    }
+    return auth
+  }
+
+  private async authenticate(request: Request): Promise<AuthContext | null> {
+    const authorization = request.headers.get("authorization")
+    if (authorization?.startsWith("Basic ")) {
+      try {
+        const decoded = Buffer.from(authorization.slice(6), "base64").toString("utf8")
+        const separator = decoded.indexOf(":")
+        if (separator > 0) {
+          const username = decoded.slice(0, separator)
+          const password = decoded.slice(separator + 1)
+          if (username === this.config.authUsername && (await this.auth.verifyPassword(password))) {
+            return { kind: "basic", sessionId: null }
+          }
+        }
+      } catch {
+        return null
+      }
+    }
+
+    const cookies = parseCookies(request.headers.get("cookie"))
+    const token = cookies.agent1_session
+    if (token) {
+      const session = await this.auth.verifySessionToken(token)
+      if (session) return { kind: "cookie", sessionId: session.sessionId }
+    }
+    return null
+  }
+}
