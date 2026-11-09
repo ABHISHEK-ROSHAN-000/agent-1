@@ -6,6 +6,9 @@ import { SecretStore } from "../auth/secret-store"
 import { EventService } from "../events/service"
 import { ModelService } from "../models/model-service"
 import { PermissionService } from "../permissions/permission-service"
+import { WorkspaceService } from "../tools/workspace-service"
+import { JournalService } from "../tools/journal-service"
+import { ToolService } from "../tools/tool-service"
 import { TurnBus } from "../agent/turn-bus"
 import { TurnService } from "../agent/turn-service"
 import { App } from "../server/app"
@@ -64,8 +67,12 @@ async function main(): Promise<void> {
     const models = new ModelService(db, logger, config.modelSecretsPath)
     const permissions = new PermissionService(db, logger)
     await permissions.expireApprovals()
+    const workspace = new WorkspaceService(db, logger, config.dataDir)
+    const journal = new JournalService(db, logger)
+    await journal.reconcile()
+    const tools = new ToolService(workspace, journal, logger)
     const turnBus = new TurnBus()
-    const turns = new TurnService(db, events, models, permissions, turnBus, logger)
+    const turns = new TurnService(db, events, models, permissions, tools, turnBus, logger)
 
     const app = new App({
       config,
@@ -76,6 +83,9 @@ async function main(): Promise<void> {
       turns,
       turnBus,
       permissions,
+      workspace,
+      journal,
+      tools,
       logger,
       startedAt: Date.now(),
       shutdown: (reason) => void shutdown(reason),

@@ -1,12 +1,12 @@
 # Agent-1
 
-**Status:** Phase 3 complete — permissions and approvals. Phase 4 (core tools and Folder Ops reference flow) is next.
+**Status:** Phase 4 complete — core tools and the Folder Ops reference flow. Phase 5 (web client) is next.
 
 Agent-1 is a local, single-user personal assistant daemon for Windows. It will run in the background at sign-in, own sessions, tools, permissions, memory, and the remote tunnel, and serve thin clients: a web app/PWA, a desktop window and tray, and a TUI.
 
 This repository is a clean rebuild. The original Folder Ops prototype has been removed. Folder Ops now exists only as a reference workflow and integration test for the file tools, approval gate, journal, crash recovery, and undo.
 
-The daemon, agent runtime, and approval gate are usable from the CLI/API: detached lifecycle, SQLite, durable events/SSE, auth/pairing, cloud/local model profiles, streaming chat turns, read-only test tools, checkpoints, resume, budgets, compaction, permission rules, exact-argument approvals, and an audit log. Real filesystem/shell/web tools and the web/TUI UI are still ahead.
+The daemon, agent runtime, approval gate, and core tools are usable from the CLI/API: detached lifecycle, SQLite, durable events/SSE, auth/pairing, cloud/local model profiles, streaming turns, checkpoints, resume, budgets, compaction, permission rules, exact-argument approvals, workspace grants, filesystem tools with journal/undo, shell, web fetch/search, and audit logging. The web UI and TUI are still ahead.
 
 ## What it will do
 
@@ -40,9 +40,13 @@ bun src/cli/main.ts session list
 bun src/cli/main.ts model add --name local --kind local --base-url http://127.0.0.1:11434/v1 --model llama3.2
 bun src/cli/main.ts model test <profile-id>
 bun src/cli/main.ts chat --session <session-id> --message "Hello"
+bun src/cli/main.ts workspace add C:\Users\me\Documents --access write
+bun src/cli/main.ts tools list
 bun src/cli/main.ts rules list
 bun src/cli/main.ts approvals list --status pending
 bun src/cli/main.ts approvals approve <approval-id>
+bun src/cli/main.ts journal list
+bun src/cli/main.ts journal undo <batch-id>
 bun src/cli/main.ts audit
 bun src/cli/main.ts pair
 bun src/cli/main.ts service stop
@@ -63,10 +67,10 @@ src/events/   durable event service and SSE feed
 src/server/   /v1 API, auth middleware, SSE, OpenAPI
 src/client/   typed API client
 src/test/     integration helpers
-src/agent/    turn loop, streaming, checkpoints, recovery, test tools
+src/agent/    turn loop, streaming, checkpoints, recovery
 src/models/   cloud/local model profiles, capability probe, DPAPI keys
-src/permissions/ rules and approvals (Phase 3)
-src/tools/    filesystem, shell, web (Phase 4)
+src/permissions/ rules, approvals, audit
+src/tools/    workspaces, filesystem, journal/undo, shell, web
 src/memory/   USER + NOTES stores and session search (Phase 7)
 src/skills/   skills, learning review, curator (Phase 11)
 src/connectors/ Gmail, Calendar, Drive (Phase 8)
@@ -80,25 +84,27 @@ e2e/          Playwright and ConPTY tests (Phase 13)
 
 ## Plan
 
-The full plan is at `C:\Users\ABHISHEK\.opencode\plan\PLAN.md` (v0.4). Evidence: [`P1_RESULTS.md`](P1_RESULTS.md), [`P2_RESULTS.md`](P2_RESULTS.md), and [`P3_RESULTS.md`](P3_RESULTS.md). The plan covers the product decisions, architecture, permission model, memory and learning design, connectors, MCP guardrails, phases, testing gate, and the installer-last sequence.
+The full plan is at `C:\Users\ABHISHEK\.opencode\plan\PLAN.md` (v0.4). Evidence: [`P1_RESULTS.md`](P1_RESULTS.md), [`P2_RESULTS.md`](P2_RESULTS.md), [`P3_RESULTS.md`](P3_RESULTS.md), and [`P4_RESULTS.md`](P4_RESULTS.md). The plan covers the product decisions, architecture, permission model, memory and learning design, connectors, MCP guardrails, phases, testing gate, and the installer-last sequence.
 
 ## Tests
 
 ```text
 bun run check
-52 pass, 0 fail, 285 expect() calls, 22 files
+62 pass, 0 fail, 350 expect() calls, 25 files
 ```
 
-Coverage includes Phase 1 and 2 foundations plus permission rules, exact-argument approvals, approval persistence across restart, deny rules, audit logging, CLI approvals/rules/audit, and all prior streaming/tool/resume/compaction tests.
+Coverage includes Phase 1–3 plus workspace grants, path/symlink protections, filesystem read/write/move, journal undo, 500-file injected crash/resume/undo, shell, SSRF, and CLI workspace/tools/journal flows.
 
 ## Limits
 
-- Phase 3 has no web approval UI; approvals/rules are exposed through the API and CLI. The web client is Phase 5.
-- Real filesystem, shell, and web tools are Phase 4. The current approval test uses the no-side-effect `test_confirm` tool.
+- The web approval UI is Phase 5; approvals, rules, workspaces, and journal are exposed through the API/CLI.
+- The 500-file crash test is at the tool/journal layer with an injected failure; a browser-driven 500-file run belongs to the Phase 5/13 UI test gate.
+- Web search requires `AGENT1_SEARCH_URL`; there is no default search provider.
+- Shell is non-interactive; SSRF protection uses DNS/redirect checks but Windows per-process egress is a later hardening item.
 - The API binds to loopback only. Remote access is Phase 6.
 - The OpenAPI document is a hand-written contract for the current routes; generated clients/codegen are later.
 - Autostart uses the per-user Startup folder because Task Scheduler registration was denied in the non-elevated development environment. The installer can add a Task Scheduler backend.
-- No real tools, memory, connectors, MCP, scheduler, or web/TUI UI yet. The full Folder Ops reference workflow lands in Phase 4.
+- No memory, connectors, MCP, scheduler, TUI, or web UI yet.
 
 ## License
 

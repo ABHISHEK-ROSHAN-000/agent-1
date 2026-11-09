@@ -10,7 +10,7 @@ import type { Database, NewMessage } from "../db/database"
 import type { EventService } from "../events/service"
 import type { Message, ModelProfile, Session, TokenUsage, Turn } from "../shared/types"
 import { argumentsHash, type PermissionService } from "../permissions/permission-service"
-import { executeTool, toolNames, toolSet } from "./tools"
+import type { ToolService } from "../tools/tool-service"
 import type { TurnBus } from "./turn-bus"
 
 interface PendingToolCall {
@@ -80,6 +80,7 @@ export class TurnService {
     private readonly events: EventService,
     private readonly models: ModelService,
     private readonly permissions: PermissionService,
+    private readonly tools: ToolService,
     private readonly bus: TurnBus,
     private readonly logger: Logger,
     options: TurnServiceOptions = {},
@@ -297,11 +298,16 @@ export class TurnService {
 
         const pendingCalls: PendingToolCall[] = []
         for (const call of step.toolCalls) {
-          const decision = await this.permissions.evaluate(call.toolName, call.input)
+          const permissionContext = await this.tools.permissionContext(call.toolName, call.input)
+          const decision = await this.permissions.evaluate(call.toolName, call.input, {
+            action: this.tools.action(call.toolName),
+            risk: this.tools.risk(call.toolName),
+            ...permissionContext,
+          })
           await this.permissions.audit({
             actor: "agent",
             action: "permission.decision",
-            resource: `tool.${call.toolName}`,
+            resource: decision.ruleId ? permissionContext.resource : this.tools.action(call.toolName),
             decision: decision.effect,
             ruleId: decision.ruleId,
             turnId,
@@ -331,6 +337,7 @@ export class TurnService {
               toolName: call.toolName,
               arguments: call.input,
               ruleId: decision.ruleId,
+              resource: permissionContext.resource,
             })
             pendingCalls.push(call)
             await this.events.append("approval.created", session.id, {
@@ -495,7 +502,11 @@ export class TurnService {
     let output: unknown
     let failed = false
     try {
-      output = await executeTool(call.toolName, call.input)
+      output = await this.tools.execute(call.toolName, call.input, {
+        turnId,
+        sessionId,
+        toolCallId: call.toolCallId,
+      })
     } catch (error) {
       failed = true
       output = { error: error instanceof Error ? error.message : String(error) }
@@ -565,7 +576,7 @@ export class TurnService {
       model,
       system: this.systemPrompt(session),
       messages,
-      tools: toolSet(),
+      tools: this.tools.definitions(),
       stopWhen: stepCountIs(1),
       maxOutputTokens: profile.maxOutputTokens,
       temperature: 0,
@@ -654,8 +665,8 @@ export class TurnService {
     const summary = session.summary ? `\n\nEarlier conversation summary:\n${session.summary}` : ""
     return [
       "You are Agent-1, a local personal assistant running on the user's Windows laptop.",
-      "You are in Phase 2: chat and read-only tools only. You cannot read, write, or send anything outside the available tools.",
-      `Available read-only tools: ${toolNames().join(", ")}.`,
+      "You can use the available tools. Writes and shell commands require explicit user approval.",
+      `Available tools: ${this.tools.names().join(", ")}.`,
       "Use tools when they help. Do not claim a side effect or a tool result you did not receive.",
       "Be direct, concrete, and concise. Ask one clarifying question only when necessary.",
       summary,

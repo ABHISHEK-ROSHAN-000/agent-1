@@ -9,6 +9,8 @@ import type {
   ApprovalStatus,
   AuditEntry,
   EventRecord,
+  JournalEntry,
+  JournalState,
   Message,
   MessageRole,
   ModelProfile,
@@ -19,6 +21,8 @@ import type {
   TokenUsage,
   Turn,
   TurnStatus,
+  Workspace,
+  WorkspaceAccess,
 } from "../shared/types"
 import { newId } from "../core/ids"
 import { nowIso } from "../core/time"
@@ -111,6 +115,33 @@ interface ApprovalRow {
   readonly decided_at: string | null
   readonly decided_by: string | null
   readonly reason: string | null
+}
+
+interface WorkspaceRow {
+  readonly id: string
+  readonly label: string
+  readonly path: string
+  readonly access: WorkspaceAccess
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface JournalRow {
+  readonly id: string
+  readonly batch_id: string
+  readonly turn_id: string | null
+  readonly session_id: string | null
+  readonly tool_name: string
+  readonly operation: string
+  readonly source: string | null
+  readonly target: string | null
+  readonly source_hash: string | null
+  readonly target_hash: string | null
+  readonly state: JournalState
+  readonly undo_json: string
+  readonly error: string | null
+  readonly created_at: string
+  readonly updated_at: string
 }
 
 interface AuditRow {
@@ -301,6 +332,56 @@ function rowToApproval(row: ApprovalRow): Approval {
     decidedBy: row.decided_by,
     reason: row.reason,
   }
+}
+
+function rowToWorkspace(row: WorkspaceRow): Workspace {
+  return {
+    id: row.id,
+    label: row.label,
+    path: row.path,
+    access: row.access,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function rowToJournal(row: JournalRow): JournalEntry {
+  let undo: unknown = {}
+  try {
+    undo = JSON.parse(row.undo_json) as unknown
+  } catch {
+    undo = {}
+  }
+  return {
+    id: row.id,
+    batchId: row.batch_id,
+    turnId: row.turn_id,
+    sessionId: row.session_id,
+    toolName: row.tool_name,
+    operation: row.operation,
+    source: row.source,
+    target: row.target,
+    sourceHash: row.source_hash,
+    targetHash: row.target_hash,
+    state: row.state,
+    undo,
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+export interface NewJournalEntry {
+  readonly batchId: string
+  readonly turnId?: string | null
+  readonly sessionId?: string | null
+  readonly toolName: string
+  readonly operation: string
+  readonly source?: string | null
+  readonly target?: string | null
+  readonly sourceHash?: string | null
+  readonly targetHash?: string | null
+  readonly undo?: unknown
 }
 
 function rowToAudit(row: AuditRow): AuditEntry {
@@ -1319,5 +1400,189 @@ export class Database {
         return rows.map(rowToAudit)
       }),
     )
+  }
+
+  // ---------------------------------------------------------------------------
+  // Workspaces
+
+  async createWorkspace(input: {
+    label: string
+    path: string
+    access: WorkspaceAccess
+  }): Promise<Workspace> {
+    const id = newId("ws")
+    const now = nowIso()
+    await this.query((sql) =>
+      sql`
+        INSERT INTO workspaces (id, label, path, access, created_at, updated_at)
+        VALUES (${id}, ${input.label}, ${input.path}, ${input.access}, ${now}, ${now})
+      `.pipe(Effect.asVoid),
+    )
+    return {
+      id,
+      label: input.label,
+      path: input.path,
+      access: input.access,
+      createdAt: now,
+      updatedAt: now,
+    }
+  }
+
+  async listWorkspaces(): Promise<Workspace[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<WorkspaceRow>`
+          SELECT id, label, path, access, created_at, updated_at
+          FROM workspaces
+          ORDER BY label ASC, id ASC
+        `
+        return rows.map(rowToWorkspace)
+      }),
+    )
+  }
+
+  async getWorkspace(id: string): Promise<Workspace | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<WorkspaceRow>`
+          SELECT id, label, path, access, created_at, updated_at
+          FROM workspaces
+          WHERE id = ${id}
+        `
+        const row = rows[0]
+        return row ? rowToWorkspace(row) : null
+      }),
+    )
+  }
+
+  async deleteWorkspace(id: string): Promise<void> {
+    await this.query((sql) => sql`DELETE FROM workspaces WHERE id = ${id}`.pipe(Effect.asVoid))
+  }
+
+  // ---------------------------------------------------------------------------
+  // Journal
+
+  async createJournalEntry(input: NewJournalEntry): Promise<JournalEntry> {
+    const id = newId("jrn")
+    const now = nowIso()
+    await this.query((sql) =>
+      sql`
+        INSERT INTO journal
+          (id, batch_id, turn_id, session_id, tool_name, operation, source, target,
+           source_hash, target_hash, state, undo_json, error, created_at, updated_at)
+        VALUES
+          (${id}, ${input.batchId}, ${input.turnId ?? null}, ${input.sessionId ?? null},
+           ${input.toolName}, ${input.operation}, ${input.source ?? null}, ${input.target ?? null},
+           ${input.sourceHash ?? null}, ${input.targetHash ?? null}, 'planned',
+           ${JSON.stringify(input.undo ?? {})}, NULL, ${now}, ${now})
+      `.pipe(Effect.asVoid),
+    )
+    return {
+      id,
+      batchId: input.batchId,
+      turnId: input.turnId ?? null,
+      sessionId: input.sessionId ?? null,
+      toolName: input.toolName,
+      operation: input.operation,
+      source: input.source ?? null,
+      target: input.target ?? null,
+      sourceHash: input.sourceHash ?? null,
+      targetHash: input.targetHash ?? null,
+      state: "planned",
+      undo: input.undo ?? {},
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+    }
+  }
+
+  async updateJournalEntry(
+    id: string,
+    state: JournalState,
+    options: { targetHash?: string | null; error?: string | null } = {},
+  ): Promise<JournalEntry | null> {
+    await this.query((sql) =>
+      sql`
+        UPDATE journal SET state = ${state}, target_hash = ${options.targetHash ?? null},
+          error = ${options.error ?? null}, updated_at = ${nowIso()}
+        WHERE id = ${id}
+      `.pipe(Effect.asVoid),
+    )
+    return this.getJournalEntry(id)
+  }
+
+  async getJournalEntry(id: string): Promise<JournalEntry | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<JournalRow>`
+          SELECT id, batch_id, turn_id, session_id, tool_name, operation, source, target,
+                 source_hash, target_hash, state, undo_json, error, created_at, updated_at
+          FROM journal
+          WHERE id = ${id}
+        `
+        const row = rows[0]
+        return row ? rowToJournal(row) : null
+      }),
+    )
+  }
+
+  async listJournal(limit = 100): Promise<JournalEntry[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<JournalRow>`
+          SELECT id, batch_id, turn_id, session_id, tool_name, operation, source, target,
+                 source_hash, target_hash, state, undo_json, error, created_at, updated_at
+          FROM journal
+          ORDER BY rowid DESC
+          LIMIT ${limit}
+        `
+        return rows.map(rowToJournal)
+      }),
+    )
+  }
+
+  async listJournalBatch(batchId: string): Promise<JournalEntry[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<JournalRow>`
+          SELECT id, batch_id, turn_id, session_id, tool_name, operation, source, target,
+                 source_hash, target_hash, state, undo_json, error, created_at, updated_at
+          FROM journal
+          WHERE batch_id = ${batchId}
+          ORDER BY rowid ASC
+        `
+        return rows.map(rowToJournal)
+      }),
+    )
+  }
+
+  async listUnsettledJournal(): Promise<JournalEntry[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<JournalRow>`
+          SELECT id, batch_id, turn_id, session_id, tool_name, operation, source, target,
+                 source_hash, target_hash, state, undo_json, error, created_at, updated_at
+          FROM journal
+          WHERE state IN ('planned', 'applying', 'unknown')
+          ORDER BY rowid ASC
+        `
+        return rows.map(rowToJournal)
+      }),
+    )
+  }
+
+  async appendJournalAudit(entry: {
+    action: string
+    resource: string
+    decision: string
+    details?: unknown
+  }): Promise<void> {
+    await this.appendAudit({
+      actor: "agent",
+      action: entry.action,
+      resource: entry.resource,
+      decision: entry.decision,
+      details: entry.details,
+    })
   }
 }

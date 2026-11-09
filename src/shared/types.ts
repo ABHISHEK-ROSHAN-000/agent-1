@@ -118,6 +118,37 @@ export interface Approval {
   readonly reason: string | null
 }
 
+export type WorkspaceAccess = "read" | "write"
+
+export interface Workspace {
+  readonly id: string
+  readonly label: string
+  readonly path: string
+  readonly access: WorkspaceAccess
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+export type JournalState = "planned" | "applying" | "done" | "failed" | "unknown" | "undone"
+
+export interface JournalEntry {
+  readonly id: string
+  readonly batchId: string
+  readonly turnId: string | null
+  readonly sessionId: string | null
+  readonly toolName: string
+  readonly operation: string
+  readonly source: string | null
+  readonly target: string | null
+  readonly sourceHash: string | null
+  readonly targetHash: string | null
+  readonly state: JournalState
+  readonly undo: unknown
+  readonly error: string | null
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
 export interface AuditEntry {
   readonly id: number
   readonly at: string

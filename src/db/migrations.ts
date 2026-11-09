@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import { SqlClient } from "effect/sql"
 import { SqliteMigrator } from "@effect/sql-sqlite-bun"
 
-export const LATEST_SCHEMA_VERSION = 3
+export const LATEST_SCHEMA_VERSION = 4
 
 const initial = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -225,8 +225,69 @@ const permissions = Effect.gen(function* () {
   yield* Effect.void
 })
 
+const coreTools = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS workspaces (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      path TEXT NOT NULL UNIQUE,
+      access TEXT NOT NULL CHECK (access IN ('read', 'write')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `
+  yield* sql`CREATE INDEX IF NOT EXISTS workspaces_path_idx ON workspaces (path)`
+
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS journal (
+      id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      turn_id TEXT,
+      session_id TEXT,
+      tool_name TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      source TEXT,
+      target TEXT,
+      source_hash TEXT,
+      target_hash TEXT,
+      state TEXT NOT NULL CHECK (state IN ('planned', 'applying', 'done', 'failed', 'unknown', 'undone')),
+      undo_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `
+  yield* sql`CREATE INDEX IF NOT EXISTS journal_batch_idx ON journal (batch_id, id)`
+  yield* sql`CREATE INDEX IF NOT EXISTS journal_turn_idx ON journal (turn_id, id)`
+  yield* sql`CREATE INDEX IF NOT EXISTS journal_state_idx ON journal (state)`
+
+  const now = new Date().toISOString()
+  const rules: Array<[string, string, string, string, number, string]> = [
+    ["rule_allow_web_fetch", "web.fetch", "*", "allow", 50, "Fetch public web content with SSRF guard"],
+    ["rule_allow_web_search", "web.search", "*", "allow", 51, "Search with configured provider"],
+    ["rule_ask_fs_write", "fs.write", "*", "ask", 60, "File writes require approval"],
+    ["rule_ask_fs_mkdir", "fs.mkdir", "*", "ask", 61, "Directory creation requires approval"],
+    ["rule_ask_fs_moves", "fs.apply_moves", "*", "ask", 62, "Batch moves require approval"],
+    ["rule_ask_fs_undo", "fs.undo", "*", "ask", 63, "Undo requires approval"],
+    ["rule_deny_fs_delete", "fs.delete", "*", "deny", 64, "Hard delete is disabled"],
+    ["rule_ask_shell_exec", "shell.exec", "*", "ask", 65, "Shell commands require approval"],
+  ]
+  for (const [id, action, resource, effect, position, note] of rules) {
+    yield* sql`
+      INSERT OR IGNORE INTO permission_rules
+        (id, action, resource, effect, position, ttl_seconds, expires_at, note, created_at, updated_at)
+      VALUES (${id}, ${action}, ${resource}, ${effect}, ${position}, NULL, NULL, ${note}, ${now}, ${now})
+    `
+  }
+
+  yield* Effect.void
+})
+
 export const migrationLoader = SqliteMigrator.fromRecord({
   "0001_initial": initial,
   "0002_agent_runtime": agentRuntime,
   "0003_permissions": permissions,
+  "0004_core_tools": coreTools,
 })

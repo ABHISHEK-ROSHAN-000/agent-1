@@ -2,10 +2,12 @@ import type {
   Approval,
   ApprovalStatus,
   AuditEntry,
+  JournalEntry,
   ModelProfile,
   ModelProfileInput,
   PermissionRule,
   Turn,
+  Workspace,
 } from "../shared/types"
 
 export interface ClientOptions {
@@ -289,6 +291,51 @@ export class AgentOneClient {
 
   listAudit(limit = 100): Promise<{ entries: AuditEntry[] }> {
     return this.request("GET", `/v1/audit?limit=${limit}`)
+  }
+
+  listTools(): Promise<{
+    tools: Array<{
+      name: string
+      action: string
+      description: string
+      risk: string
+      readOnly: boolean
+    }>
+  }> {
+    return this.request("GET", "/v1/tools")
+  }
+
+  listWorkspaces(): Promise<{ workspaces: Workspace[] }> {
+    return this.request("GET", "/v1/workspaces")
+  }
+
+  addWorkspace(input: {
+    path: string
+    label?: string
+    access?: "read" | "write"
+  }): Promise<{ workspace: Workspace }> {
+    return this.request("POST", "/v1/workspaces", input)
+  }
+
+  removeWorkspace(id: string): Promise<{ ok: true }> {
+    return this.request("DELETE", `/v1/workspaces/${encodeURIComponent(id)}`)
+  }
+
+  listJournal(limit = 100): Promise<{ entries: JournalEntry[] }> {
+    return this.request("GET", `/v1/journal?limit=${limit}`)
+  }
+
+  getJournal(id: string): Promise<{ entry: JournalEntry }> {
+    return this.request("GET", `/v1/journal/${encodeURIComponent(id)}`)
+  }
+
+  undoJournal(batchId?: string): Promise<{
+    batchId: string
+    undone: number
+    skipped: number
+    errors: string[]
+  }> {
+    return this.request("POST", "/v1/journal/undo", batchId ? { batchId } : {})
   }
 
   stop(): Promise<{ ok: true }> {

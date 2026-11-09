@@ -129,6 +129,7 @@ export function startFakeOpenAI(): FakeOpenAI {
       const slow = /slow/i.test(userText)
       const isProbeText = /reply with the single word: ready/i.test(userText)
       const isSummarize = /summarize the earlier conversation/i.test(userText) || /summarize/i.test(systemText)
+      const applyMatch = /apply moves:\s*(\{[\s\S]*\})/i.exec(userText)
       const stream = body.stream === true
 
       let text = `Fake response: ${userText.slice(0, 200)}`
@@ -138,7 +139,9 @@ export function startFakeOpenAI(): FakeOpenAI {
       else if (wantsProbe) text = ""
 
       let tool: { name: string; args: Record<string, unknown> } | undefined
-      if (wantsProbe) tool = { name: "probe", args: { value: "ok" } }
+      if (applyMatch && toolNames.includes("fs_apply_moves") && !hasToolResult) {
+        tool = { name: "fs_apply_moves", args: JSON.parse(applyMatch[1]!) as Record<string, unknown> }
+      } else if (wantsProbe) tool = { name: "probe", args: { value: "ok" } }
       else if (wantsLoop) tool = { name: "test_echo", args: { message: "loop" } }
       else if (wantsConfirm && !hasToolResult) {
         tool = { name: "test_confirm", args: { note: "confirm from fake" } }

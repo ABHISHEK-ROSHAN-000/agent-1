@@ -7,6 +7,9 @@ import { Database } from "../db/database"
 import { EventService } from "../events/service"
 import { ModelService } from "../models/model-service"
 import { PermissionService } from "../permissions/permission-service"
+import { JournalService } from "../tools/journal-service"
+import { ToolService } from "../tools/tool-service"
+import { WorkspaceService } from "../tools/workspace-service"
 import { TurnBus } from "./turn-bus"
 import { TurnService } from "./turn-service"
 import { startFakeOpenAI, type FakeOpenAI } from "../test/fake-openai"
@@ -45,8 +48,11 @@ async function setup() {
   })
   const events = new EventService(db, logger)
   const permissions = new PermissionService(db, logger)
+  const workspace = new WorkspaceService(db, logger, dir)
+  const journal = new JournalService(db, logger)
+  const tools = new ToolService(workspace, journal, logger)
   const bus = new TurnBus()
-  const turns = new TurnService(db, events, modelService, permissions, bus, logger, {
+  const turns = new TurnService(db, events, modelService, permissions, tools, bus, logger, {
     maxSteps: 4,
     maxWallMs: 10_000,
   })

@@ -37,6 +37,51 @@ describe("PermissionService", () => {
     expect((await service.evaluate("not_a_tool", {})).effect).toBe("deny")
   })
 
+  test("applies filesystem risk defaults and protected paths", async () => {
+    const { service } = await setup()
+    expect(
+      (await service.evaluate("fs_read", {}, {
+        action: "fs.read",
+        risk: "read",
+        resource: "C:\\work\\a.txt",
+        inGrant: true,
+      })).effect,
+    ).toBe("allow")
+    expect(
+      (await service.evaluate("fs_read", {}, {
+        action: "fs.read",
+        risk: "read",
+        resource: "C:\\other\\a.txt",
+        inGrant: false,
+      })).effect,
+    ).toBe("ask")
+    expect(
+      (await service.evaluate("fs_read", {}, {
+        action: "fs.read",
+        risk: "read",
+        resource: "C:\\Windows\\System32\\x",
+        inGrant: true,
+        sensitive: true,
+      })).effect,
+    ).toBe("deny")
+    expect(
+      (await service.evaluate("fs_write", {}, {
+        action: "fs.write",
+        risk: "write",
+        resource: "C:\\work\\a.txt",
+        inGrant: true,
+      })).effect,
+    ).toBe("ask")
+    expect(
+      (await service.evaluate("fs_delete", {}, {
+        action: "fs.delete",
+        risk: "write",
+        resource: "C:\\work\\a.txt",
+        inGrant: true,
+      })).effect,
+    ).toBe("deny")
+  })
+
   test("deny wins over allow, and explicit allow wins over ask", async () => {
     const { service } = await setup()
     const deny = await service.createRule({

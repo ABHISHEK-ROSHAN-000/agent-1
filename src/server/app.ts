@@ -14,6 +14,11 @@ import type { TurnService } from "../agent/turn-service"
 import type { TurnBus } from "../agent/turn-bus"
 import type { PermissionService } from "../permissions/permission-service"
 import { PermissionError } from "../permissions/permission-service"
+import type { ToolService } from "../tools/tool-service"
+import type { WorkspaceService } from "../tools/workspace-service"
+import { WorkspaceError } from "../tools/workspace-service"
+import type { JournalService } from "../tools/journal-service"
+import { JournalError } from "../tools/journal-service"
 import { createTurnStream } from "./turn-stream"
 import {
   clearSessionCookie,
@@ -74,6 +79,14 @@ const approvalDecisionSchema = z.object({
   arguments: z.unknown().optional(),
 })
 
+const workspaceSchema = z.object({
+  path: z.string().min(1).max(4_000),
+  label: z.string().min(1).max(100).optional(),
+  access: z.enum(["read", "write"]).optional(),
+})
+
+const journalUndoSchema = z.object({ batchId: z.string().min(1).optional() })
+
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 
 export interface AppDependencies {
@@ -85,6 +98,9 @@ export interface AppDependencies {
   readonly turns: TurnService
   readonly turnBus: TurnBus
   readonly permissions: PermissionService
+  readonly workspace: WorkspaceService
+  readonly journal: JournalService
+  readonly tools: ToolService
   readonly logger: Logger
   readonly startedAt: number
   readonly shutdown: (reason: string) => void | Promise<void>
@@ -121,6 +137,12 @@ function issueHttpError(error: unknown): HttpError {
   if (error instanceof PermissionError) {
     return new HttpError(error.status, error.code, error.message)
   }
+  if (error instanceof WorkspaceError) {
+    return new HttpError(400, "workspace_error", error.message)
+  }
+  if (error instanceof JournalError) {
+    return new HttpError(409, "journal_error", error.message)
+  }
   return new HttpError(500, "internal_error", "Internal server error")
 }
 
@@ -138,6 +160,9 @@ export class App {
   private readonly turns: TurnService
   private readonly turnBus: TurnBus
   private readonly permissions: PermissionService
+  private readonly workspace: WorkspaceService
+  private readonly journal: JournalService
+  private readonly tools: ToolService
   private readonly logger: Logger
   private readonly startedAt: number
   private readonly shutdown: (reason: string) => void | Promise<void>
@@ -151,6 +176,9 @@ export class App {
     this.turns = dependencies.turns
     this.turnBus = dependencies.turnBus
     this.permissions = dependencies.permissions
+    this.workspace = dependencies.workspace
+    this.journal = dependencies.journal
+    this.tools = dependencies.tools
     this.logger = dependencies.logger
     this.startedAt = dependencies.startedAt
     this.shutdown = dependencies.shutdown
@@ -235,6 +263,9 @@ export class App {
           "permissions",
           "approvals",
           "audit",
+          "workspaces",
+          "journal",
+          "tools",
         ],
       })
     }
@@ -283,6 +314,55 @@ export class App {
 
     if (path === "/favicon.ico" && method === "GET") {
       return new Response(null, { status: 204 })
+    }
+
+    if (path === "/v1/tools" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse({ tools: this.tools.list() })
+    }
+
+    if (path === "/v1/workspaces" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse({ workspaces: await this.workspace.list() })
+    }
+
+    if (path === "/v1/workspaces" && method === "POST") {
+      await this.requireAuth(request)
+      const parsed = workspaceSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      return jsonResponse({ workspace: await this.workspace.add(parsed.data) }, 201)
+    }
+
+    const workspaceMatch = /^\/v1\/workspaces\/([^/]+)$/.exec(path)
+    if (workspaceMatch && method === "DELETE") {
+      await this.requireAuth(request)
+      const removed = await this.workspace.remove(decodeURIComponent(workspaceMatch[1] ?? ""))
+      if (!removed) throw new HttpError(404, "workspace_not_found", "Workspace not found")
+      return jsonResponse({ ok: true })
+    }
+
+    if (path === "/v1/journal" && method === "GET") {
+      await this.requireAuth(request)
+      const limitRaw = url.searchParams.get("limit")
+      const limit = limitRaw ? Math.min(500, Math.max(1, Number(limitRaw) || 100)) : 100
+      return jsonResponse({ entries: await this.journal.list(limit) })
+    }
+
+    if (path === "/v1/journal/undo" && method === "POST") {
+      await this.requireAuth(request)
+      const parsed = journalUndoSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      const batchId = parsed.data.batchId ?? (await this.journal.latestBatchId())
+      if (!batchId) throw new HttpError(404, "journal_empty", "No journal batch to undo")
+      return jsonResponse(await this.journal.undoBatch(batchId))
+    }
+
+    const journalMatch = /^\/v1\/journal\/([^/]+)$/.exec(path)
+    if (journalMatch && method === "GET") {
+      await this.requireAuth(request)
+      const entry = await this.journal.get(decodeURIComponent(journalMatch[1] ?? ""))
+      if (!entry) throw new HttpError(404, "journal_not_found", "Journal entry not found")
+      return jsonResponse({ entry })
     }
 
     if (path === "/v1/rules" && method === "GET") {

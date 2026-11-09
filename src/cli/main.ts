@@ -33,6 +33,13 @@ Commands:
   approvals approve <id>
   approvals reject <id> [--reason <text>]
   audit [--limit <n>]
+  workspace list
+  workspace add <path> [--label <label>] [--access read|write]
+  workspace remove <id>
+  journal list [--limit <n>]
+  journal show <id>
+  journal undo [batch-id]
+  tools list
 
 Options:
   --data-dir <path>   Override the Agent-1 data directory
@@ -551,6 +558,116 @@ async function auditCommand(parsed: ParsedArgs): Promise<void> {
   }
 }
 
+async function workspaceCommand(parsed: ParsedArgs): Promise<void> {
+  const sub = parsed.positionals[1]
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+
+  if (sub === "list" || !sub) {
+    const result = await client.listWorkspaces()
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    for (const workspace of result.workspaces) {
+      process.stdout.write(`${workspace.id}  ${workspace.access.padEnd(5)}  ${workspace.path}  # ${workspace.label}\n`)
+    }
+    return
+  }
+  if (sub === "add") {
+    const pathValue = parsed.positionals[2]
+    if (!pathValue) throw new Error("Usage: agent-1 workspace add <path> [--label <label>] [--access read|write]")
+    const access = flagString(parsed, "access")
+    if (access !== undefined && access !== "read" && access !== "write") {
+      throw new Error("Access must be read or write")
+    }
+    const result = await client.addWorkspace({
+      path: pathValue,
+      ...(flagString(parsed, "label") ? { label: flagString(parsed, "label")! } : {}),
+      ...(access ? { access } : {}),
+    })
+    output(json, result, `Granted ${result.workspace.access} workspace ${result.workspace.id}: ${result.workspace.path}`)
+    return
+  }
+  if (sub === "remove") {
+    const id = parsed.positionals[2]
+    if (!id) throw new Error("Usage: agent-1 workspace remove <id>")
+    const result = await client.removeWorkspace(id)
+    output(json, result, `Removed workspace ${id}.`)
+    return
+  }
+  throw new Error("Usage: agent-1 workspace list|add|remove")
+}
+
+async function journalCommand(parsed: ParsedArgs): Promise<void> {
+  const sub = parsed.positionals[1]
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+
+  if (sub === "list" || !sub) {
+    const limit = Number(flagString(parsed, "limit") ?? "100")
+    const result = await client.listJournal(Number.isFinite(limit) ? limit : 100)
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    for (const entry of result.entries) {
+      process.stdout.write(
+        `${entry.id}  ${entry.batchId}  ${entry.state.padEnd(8)}  ${entry.operation}  ${entry.source ?? entry.target ?? ""}\n`,
+      )
+    }
+    return
+  }
+  if (sub === "show") {
+    const id = parsed.positionals[2]
+    if (!id) throw new Error("Usage: agent-1 journal show <id>")
+    const result = await client.getJournal(id)
+    output(json, result, JSON.stringify(result.entry, null, 2))
+    return
+  }
+  if (sub === "undo") {
+    const batchId = parsed.positionals[2]
+    const result = await client.undoJournal(batchId)
+    output(
+      json,
+      result,
+      `Undo ${result.batchId}: ${result.undone} completed, ${result.skipped} skipped${result.errors.length ? `, ${result.errors.length} errors` : ""}.`,
+    )
+    if (result.errors.length && !json) {
+      for (const error of result.errors) process.stderr.write(`  ${error}\n`)
+    }
+    return
+  }
+  throw new Error("Usage: agent-1 journal list|show|undo")
+}
+
+async function toolsCommand(parsed: ParsedArgs): Promise<void> {
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+  const result = await client.listTools()
+  if (json) {
+    output(true, result, "")
+    return
+  }
+  for (const tool of result.tools) {
+    process.stdout.write(
+      `${tool.name.padEnd(20)} ${tool.risk.padEnd(8)} ${tool.action}${tool.readOnly ? "" : "  (approval)"}\n`,
+    )
+  }
+}
+
 async function main(argv: readonly string[]): Promise<number> {
   const parsed = parseArgs(argv)
   const command = parsed.positionals[0]
@@ -603,6 +720,18 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     if (command === "audit") {
       await auditCommand(parsed)
+      return 0
+    }
+    if (command === "workspace") {
+      await workspaceCommand(parsed)
+      return 0
+    }
+    if (command === "journal") {
+      await journalCommand(parsed)
+      return 0
+    }
+    if (command === "tools") {
+      await toolsCommand(parsed)
       return 0
     }
     process.stderr.write(`Unknown command: ${command}\n\n`)

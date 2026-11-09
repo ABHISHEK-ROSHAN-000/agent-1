@@ -32,6 +32,14 @@ export interface PermissionDecision {
   readonly reason: string
 }
 
+export interface PermissionContext {
+  readonly action?: string
+  readonly risk?: ToolRisk
+  readonly resource?: string
+  readonly inGrant?: boolean
+  readonly sensitive?: boolean
+}
+
 export interface ApprovalRequest {
   readonly turnId: string
   readonly sessionId: string
@@ -39,6 +47,7 @@ export interface ApprovalRequest {
   readonly toolName: string
   readonly arguments: unknown
   readonly ruleId?: string | null
+  readonly resource?: string
 }
 
 export function canonicalJson(value: unknown): string {
@@ -123,10 +132,17 @@ export class PermissionService {
     return true
   }
 
-  async evaluate(toolName: string, toolArguments: unknown): Promise<PermissionDecision> {
-    const action = `tool.${toolName}`
-    const resource = "*"
-    const risk = toolRisk(toolName)
+  async evaluate(
+    toolName: string,
+    toolArguments: unknown,
+    context: PermissionContext = {},
+  ): Promise<PermissionDecision> {
+    const action = context.action ?? (toolName.includes(".") ? toolName : `tool.${toolName}`)
+    const resource = context.resource ?? "*"
+    const risk = context.risk ?? toolRisk(toolName)
+    if (context.sensitive) {
+      return { effect: "deny", ruleId: null, risk, reason: "Protected path" }
+    }
     if (risk === "unknown") {
       return { effect: "deny", ruleId: null, risk, reason: "Unknown tool default" }
     }
@@ -146,8 +162,11 @@ export class PermissionService {
     if (ask) {
       return { effect: "ask", ruleId: ask.id, risk, reason: ask.note ?? "Approval required" }
     }
-    if (risk === "read") {
-      return { effect: "allow", ruleId: null, risk, reason: "Read-only default" }
+    if (risk === "read" && context.inGrant) {
+      return { effect: "allow", ruleId: null, risk, reason: "Read inside granted workspace" }
+    }
+    if (risk === "external") {
+      return { effect: "allow", ruleId: null, risk, reason: "External read default" }
     }
     void toolArguments
     return { effect: "ask", ruleId: null, risk, reason: "Risk-class default" }
@@ -172,7 +191,7 @@ export class PermissionService {
     await this.audit({
       actor: "agent",
       action: "approval.requested",
-      resource: `tool.${input.toolName}`,
+      resource: input.resource ?? `tool.${input.toolName}`,
       decision: "pending",
       ruleId: input.ruleId ?? null,
       approvalId: approval.id,

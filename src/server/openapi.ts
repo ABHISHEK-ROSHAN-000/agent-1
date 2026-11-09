@@ -69,6 +69,55 @@ export const openApiDocument = {
         responses: { "200": { description: "New password returned once" } },
       },
     },
+    "/v1/tools": {
+      get: {
+        summary: "List available tools and risk classes",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Tools" } },
+      },
+    },
+    "/v1/workspaces": {
+      get: {
+        summary: "List workspace grants",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Workspaces" } },
+      },
+      post: {
+        summary: "Grant a folder for read or write",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "201": { description: "Workspace created" } },
+      },
+    },
+    "/v1/workspaces/{id}": {
+      delete: {
+        summary: "Remove a workspace grant",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Workspace removed" } },
+      },
+    },
+    "/v1/journal": {
+      get: {
+        summary: "List journaled operations",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Journal entries" } },
+      },
+    },
+    "/v1/journal/{id}": {
+      get: {
+        summary: "Get a journal entry",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Journal entry" } },
+      },
+    },
+    "/v1/journal/undo": {
+      post: {
+        summary: "Undo a journal batch",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Undo result" } },
+      },
+    },
     "/v1/rules": {
       get: {
         summary: "List permission rules",
