@@ -18,6 +18,12 @@ Commands:
   pair
   session create [--title <title>]
   session list
+  model list
+  model add --name <name> --kind cloud|local --base-url <url> --model <id> [--api-key <key>]
+  model test <id>
+  model default <id>
+  model remove <id>
+  chat --session <id> --message <text> [--model <profile-id>]
 
 Options:
   --data-dir <path>   Override the Agent-1 data directory
@@ -222,6 +228,175 @@ async function sessionCommand(parsed: ParsedArgs): Promise<void> {
   throw new Error("Usage: agent-1 session create|list")
 }
 
+async function modelCommand(parsed: ParsedArgs): Promise<void> {
+  const sub = parsed.positionals[1]
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+
+  if (sub === "list" || !sub) {
+    const result = await client.listModelProfiles()
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    if (result.profiles.length === 0) {
+      process.stdout.write("No model profiles. Add one with `agent-1 model add`.\n")
+      return
+    }
+    for (const profile of result.profiles) {
+      process.stdout.write(
+        `${profile.id}  ${profile.name}  ${profile.kind}  ${profile.modelId}  key=${profile.hasApiKey ? "yes" : "no"}  tools=${profile.supportsTools ? "yes" : "no"}\n`,
+      )
+    }
+    return
+  }
+
+  if (sub === "add") {
+    const name = flagString(parsed, "name")
+    const kind = flagString(parsed, "kind")
+    const baseUrl = flagString(parsed, "base-url")
+    const modelId = flagString(parsed, "model")
+    if (!name || (kind !== "cloud" && kind !== "local") || !baseUrl || !modelId) {
+      throw new Error(
+        "Usage: agent-1 model add --name <name> --kind cloud|local --base-url <url> --model <id> [--api-key <key>]",
+      )
+    }
+    const contextWindow = flagString(parsed, "context-window")
+    const maxOutputTokens = flagString(parsed, "max-output-tokens")
+    const apiKey = flagString(parsed, "api-key") ?? process.env.AGENT1_MODEL_API_KEY
+    const result = await client.createModelProfile({
+      name,
+      kind,
+      baseUrl,
+      modelId,
+      ...(contextWindow ? { contextWindow: Number(contextWindow) } : {}),
+      ...(maxOutputTokens ? { maxOutputTokens: Number(maxOutputTokens) } : {}),
+      ...(apiKey ? { apiKey } : {}),
+    })
+    output(json, result, `Created model profile ${result.profile.id} (${result.profile.name}).`)
+    return
+  }
+
+  const id = parsed.positionals[2]
+  if (!id) throw new Error(`Usage: agent-1 model ${sub} <id>`)
+
+  if (sub === "test") {
+    const result = await client.testModelProfile(id)
+    output(
+      json,
+      result,
+      `Model test: ${result.ok ? "ok" : "failed"}, tools=${result.supportsTools ? "yes" : "no"}, ${result.latencyMs}ms${result.text ? `, reply=${result.text}` : ""}`,
+    )
+    return
+  }
+  if (sub === "default") {
+    const result = await client.setDefaultModelProfile(id)
+    output(json, result, `Default model: ${result.profile.name} (${result.profile.id}).`)
+    return
+  }
+  if (sub === "remove") {
+    const result = await client.removeModelProfile(id)
+    output(json, result, `Removed model profile ${id}.`)
+    return
+  }
+  throw new Error("Usage: agent-1 model list|add|test|default|remove")
+}
+
+async function chatCommand(parsed: ParsedArgs): Promise<void> {
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password, timeoutMs: 120_000 })
+
+  let sessionId = flagString(parsed, "session")
+  if (!sessionId) {
+    const created = await client.createSession("CLI chat")
+    sessionId = String(created.session.id)
+    process.stdout.write(`Session: ${sessionId}\n`)
+  }
+  const message = flagString(parsed, "message") ?? parsed.positionals.slice(1).join(" ")
+  if (!message.trim()) {
+    throw new Error("Usage: agent-1 chat --session <id> --message <text> [--model <profile-id>]")
+  }
+  const modelProfileId = flagString(parsed, "model")
+  const started = await client.startMessage(sessionId, message, modelProfileId)
+  const stream = await client.turnStreamResponse(started.turn.id)
+  if (!stream.ok || !stream.body) throw new Error(`Turn stream failed (${stream.status})`)
+  const reader = stream.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let printedText = false
+  let finished = false
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let index = buffer.indexOf("\n\n")
+      while (index >= 0) {
+        const frame = buffer.slice(0, index)
+        buffer = buffer.slice(index + 2)
+        for (const line of frame.split(/\r?\n/)) {
+          if (!line.startsWith("data:")) continue
+          const data = line.slice(5).trim()
+          if (!data) continue
+          const event = JSON.parse(data) as {
+            type?: string
+            text?: string
+            toolName?: string
+            phase?: string
+            status?: string
+            message?: string
+          }
+          if (event.type === "delta" && event.text) {
+            printedText = true
+            process.stdout.write(event.text)
+          } else if (event.type === "tool") {
+            process.stdout.write(
+              `\n[tool ${event.phase ?? ""} ${event.toolName ?? ""}]\n`,
+            )
+          } else if (event.type === "error") {
+            process.stderr.write(`\n[turn error: ${event.message ?? "unknown"}]\n`)
+          } else if (event.type === "done") {
+            finished = true
+            if (!printedText && event.status === "completed") {
+              const current = await client.getTurn(started.turn.id)
+              const last = [...current.messages]
+                .reverse()
+                .find((entry) => (entry as { role?: string }).role === "assistant")
+              if (last && typeof (last as { text?: unknown }).text === "string") {
+                process.stdout.write((last as { text: string }).text)
+              }
+            }
+            process.stdout.write(`\n[turn ${event.status ?? "done"}]\n`)
+            return
+          }
+        }
+        index = buffer.indexOf("\n\n")
+      }
+    }
+    if (!finished) {
+      const current = await client.getTurn(started.turn.id)
+      if (!printedText) {
+        const last = [...current.messages]
+          .reverse()
+          .find((entry) => (entry as { role?: string }).role === "assistant")
+        if (last && typeof (last as { text?: unknown }).text === "string") {
+          process.stdout.write((last as { text: string }).text)
+        }
+      }
+      process.stdout.write(`\n[turn ${current.turn.status}]\n`)
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+}
+
 async function main(argv: readonly string[]): Promise<number> {
   const parsed = parseArgs(argv)
   const command = parsed.positionals[0]
@@ -254,6 +429,14 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     if (command === "session") {
       await sessionCommand(parsed)
+      return 0
+    }
+    if (command === "model") {
+      await modelCommand(parsed)
+      return 0
+    }
+    if (command === "chat") {
+      await chatCommand(parsed)
       return 0
     }
     process.stderr.write(`Unknown command: ${command}\n\n`)

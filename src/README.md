@@ -1,6 +1,6 @@
 # Source map
 
-Phase 1 modules are implemented. Later-phase directories are planned only.
+Phase 1 and Phase 2 modules are implemented. Later-phase directories are planned only.
 
 | Directory | Responsibility | Phase |
 |---|---|---|

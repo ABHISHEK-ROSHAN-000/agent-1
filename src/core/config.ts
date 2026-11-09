@@ -13,6 +13,7 @@ export interface AppConfig {
   readonly backupDir: string
   readonly secretsDir: string
   readonly secretsPath: string
+  readonly modelSecretsPath: string
   readonly stateDir: string
   readonly statePath: string
   readonly lockPath: string
@@ -68,6 +69,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     backupDir: path.join(dataDir, "backups"),
     secretsDir: path.join(dataDir, "secrets"),
     secretsPath: path.join(dataDir, "secrets", "auth.dpapi.json"),
+    modelSecretsPath: path.join(dataDir, "secrets", "model-keys.dpapi.json"),
     stateDir: path.join(dataDir, "state"),
     statePath: path.join(dataDir, "state", "service.json"),
     lockPath: path.join(dataDir, "state", "service.lock"),

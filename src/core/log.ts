@@ -13,11 +13,14 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 const REDACTED = "[REDACTED]"
 const SECRET_KEY = /password|secret|token|authorization|cookie|api[-_]?key/i
 const BEARER = /(Basic|Bearer)\s+[A-Za-z0-9+/=_-]+/g
+const API_KEY = /\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,})\b/g
 
 function redact(value: unknown, key = "", depth = 0): unknown {
   if (depth > 4) return "[TRUNCATED]"
   if (SECRET_KEY.test(key)) return REDACTED
-  if (typeof value === "string") return value.replace(BEARER, "$1 [REDACTED]")
+  if (typeof value === "string") {
+    return value.replace(BEARER, "$1 [REDACTED]").replace(API_KEY, "[REDACTED]")
+  }
   if (Array.isArray(value)) return value.map((entry) => redact(entry, key, depth + 1))
   if (value && typeof value === "object") {
     const output: Record<string, unknown> = {}

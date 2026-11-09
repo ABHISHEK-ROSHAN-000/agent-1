@@ -69,6 +69,48 @@ export const openApiDocument = {
         responses: { "200": { description: "New password returned once" } },
       },
     },
+    "/v1/model-profiles": {
+      get: {
+        summary: "List model profiles",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Model profiles" } },
+      },
+      post: {
+        summary: "Create a cloud or local model profile",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "201": { description: "Profile created" }, "400": { description: "Invalid profile" } },
+      },
+    },
+    "/v1/model-profiles/{id}": {
+      patch: {
+        summary: "Update a model profile",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Profile updated" } },
+      },
+      delete: {
+        summary: "Remove a model profile",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Profile removed" } },
+      },
+    },
+    "/v1/model-profiles/{id}/test": {
+      post: {
+        summary: "Probe a model profile for text and tool calling",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Probe result" } },
+      },
+    },
+    "/v1/model-profiles/{id}/default": {
+      post: {
+        summary: "Set the default model profile",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Default updated" } },
+      },
+    },
     "/v1/sessions": {
       get: {
         summary: "List sessions",
@@ -87,6 +129,44 @@ export const openApiDocument = {
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Session" }, "404": { description: "Not found" } },
+      },
+    },
+    "/v1/sessions/{id}/messages": {
+      get: {
+        summary: "List session messages",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Messages" } },
+      },
+      post: {
+        summary: "Send a user message and start a turn",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "202": { description: "Turn started" } },
+      },
+    },
+    "/v1/turns/{id}": {
+      get: {
+        summary: "Get a turn and its messages",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Turn" } },
+      },
+    },
+    "/v1/turns/{id}/stream": {
+      get: {
+        summary: "Live turn stream (deltas, tools, done)",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "text/event-stream" } },
+      },
+    },
+    "/v1/turns/{id}/cancel": {
+      post: {
+        summary: "Cancel a running turn",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Cancelled turn" } },
       },
     },
     "/v1/events": {

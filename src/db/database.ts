@@ -4,7 +4,17 @@ import type { SqlError } from "effect/sql/SqlError"
 import { SqliteClient, SqliteMigrator } from "@effect/sql-sqlite-bun"
 import { mkdirSync } from "node:fs"
 import path from "node:path"
-import type { EventRecord, Session } from "../shared/types"
+import type {
+  EventRecord,
+  Message,
+  MessageRole,
+  ModelProfile,
+  ModelProfileInput,
+  Session,
+  TokenUsage,
+  Turn,
+  TurnStatus,
+} from "../shared/types"
 import { newId } from "../core/ids"
 import { nowIso } from "../core/time"
 import { backupIfNeeded, schemaVersion } from "./backup"
@@ -15,6 +25,58 @@ interface SessionRow {
   readonly title: string
   readonly created_at: string
   readonly updated_at: string
+  readonly model_profile_id: string | null
+  readonly summary: string | null
+  readonly summary_through_seq: number | null
+}
+
+interface ModelProfileRow {
+  readonly id: string
+  readonly name: string
+  readonly kind: "cloud" | "local"
+  readonly base_url: string
+  readonly model_id: string
+  readonly context_window: number
+  readonly max_output_tokens: number
+  readonly cost_input_per_million: number
+  readonly cost_output_per_million: number
+  readonly supports_tools: number
+  readonly supports_streaming: number
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface MessageRow {
+  readonly id: string
+  readonly seq: number
+  readonly session_id: string
+  readonly turn_id: string | null
+  readonly role: "user" | "assistant" | "tool" | "system"
+  readonly text: string
+  readonly content_json: string
+  readonly created_at: string
+}
+
+interface TurnRow {
+  readonly id: string
+  readonly session_id: string
+  readonly status: string
+  readonly model_profile_id: string
+  readonly user_message_id: string
+  readonly step_count: number
+  readonly input_tokens: number
+  readonly output_tokens: number
+  readonly cost_usd: number
+  readonly error: string | null
+  readonly started_at: string
+  readonly updated_at: string
+  readonly completed_at: string | null
+}
+
+interface CheckpointRow {
+  readonly step: number
+  readonly state_json: string
+  readonly created_at: string
 }
 
 interface EventRow {
@@ -47,6 +109,22 @@ interface IdempotencyRow {
   readonly expires_at: string
 }
 
+export interface NewMessage {
+  readonly role: MessageRole
+  readonly text: string
+  readonly content: unknown
+}
+
+export interface TurnStepInput {
+  readonly step: number
+  readonly sessionId: string
+  readonly messages?: readonly NewMessage[]
+  readonly checkpoint: unknown
+  readonly usage?: TokenUsage
+  readonly status?: TurnStatus
+  readonly error?: string | null
+}
+
 export interface IdempotencyRecord {
   readonly key: string
   readonly method: string
@@ -77,6 +155,65 @@ function rowToSession(row: SessionRow): Session {
     title: row.title,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    modelProfileId: row.model_profile_id,
+    summary: row.summary,
+    summaryThroughSeq: row.summary_through_seq,
+  }
+}
+
+function rowToModelProfile(row: ModelProfileRow, hasApiKey: boolean): import("../shared/types").ModelProfile {
+  return {
+    id: row.id,
+    name: row.name,
+    kind: row.kind,
+    baseUrl: row.base_url,
+    modelId: row.model_id,
+    contextWindow: row.context_window,
+    maxOutputTokens: row.max_output_tokens,
+    costInputPerMillion: row.cost_input_per_million,
+    costOutputPerMillion: row.cost_output_per_million,
+    supportsTools: row.supports_tools === 1,
+    supportsStreaming: row.supports_streaming === 1,
+    hasApiKey,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function rowToMessage(row: MessageRow): import("../shared/types").Message {
+  let content: unknown = {}
+  try {
+    content = JSON.parse(row.content_json) as unknown
+  } catch {
+    content = {}
+  }
+  return {
+    id: row.id,
+    seq: row.seq,
+    sessionId: row.session_id,
+    turnId: row.turn_id,
+    role: row.role,
+    text: row.text,
+    content,
+    createdAt: row.created_at,
+  }
+}
+
+function rowToTurn(row: TurnRow): import("../shared/types").Turn {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    status: row.status as import("../shared/types").TurnStatus,
+    modelProfileId: row.model_profile_id,
+    userMessageId: row.user_message_id,
+    stepCount: row.step_count,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    costUsd: row.cost_usd,
+    error: row.error,
+    startedAt: row.started_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at,
   }
 }
 
@@ -215,7 +352,7 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<SessionRow>`
-          SELECT id, title, created_at, updated_at
+          SELECT id, title, created_at, updated_at, model_profile_id, summary, summary_through_seq
           FROM sessions
           ORDER BY updated_at DESC, id DESC
         `
@@ -228,7 +365,7 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<SessionRow>`
-          SELECT id, title, created_at, updated_at
+          SELECT id, title, created_at, updated_at, model_profile_id, summary, summary_through_seq
           FROM sessions
           WHERE id = ${id}
         `
@@ -408,6 +545,400 @@ export class Database {
           status = excluded.status,
           response = excluded.response,
           expires_at = excluded.expires_at
+      `.pipe(Effect.asVoid),
+    )
+  }
+
+  // ---------------------------------------------------------------------------
+  // Model profiles
+
+  async listModelProfiles(): Promise<ModelProfile[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<ModelProfileRow>`
+          SELECT id, name, kind, base_url, model_id, context_window, max_output_tokens,
+                 cost_input_per_million, cost_output_per_million, supports_tools,
+                 supports_streaming, created_at, updated_at
+          FROM model_profiles
+          ORDER BY name ASC, id ASC
+        `
+        return rows.map((row) => rowToModelProfile(row, false))
+      }),
+    )
+  }
+
+  async getModelProfile(id: string): Promise<ModelProfile | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<ModelProfileRow>`
+          SELECT id, name, kind, base_url, model_id, context_window, max_output_tokens,
+                 cost_input_per_million, cost_output_per_million, supports_tools,
+                 supports_streaming, created_at, updated_at
+          FROM model_profiles
+          WHERE id = ${id}
+        `
+        const row = rows[0]
+        return row ? rowToModelProfile(row, false) : null
+      }),
+    )
+  }
+
+  async createModelProfile(
+    input: Required<Pick<ModelProfileInput, "name" | "kind" | "baseUrl" | "modelId">> &
+      Pick<ModelProfileInput, "contextWindow" | "maxOutputTokens" | "costInputPerMillion" | "costOutputPerMillion"> & {
+        supportsTools: boolean
+      },
+  ): Promise<ModelProfile> {
+    const id = newId("mdl")
+    const now = nowIso()
+    const contextWindow = input.contextWindow ?? 32_768
+    const maxOutputTokens = input.maxOutputTokens ?? 4_096
+    const costInput = input.costInputPerMillion ?? 0
+    const costOutput = input.costOutputPerMillion ?? 0
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        yield* sql`
+          INSERT INTO model_profiles
+            (id, name, kind, base_url, model_id, context_window, max_output_tokens,
+             cost_input_per_million, cost_output_per_million, supports_tools,
+             supports_streaming, created_at, updated_at)
+          VALUES
+            (${id}, ${input.name}, ${input.kind}, ${input.baseUrl}, ${input.modelId},
+             ${contextWindow}, ${maxOutputTokens}, ${costInput}, ${costOutput},
+             ${input.supportsTools ? 1 : 0}, 1, ${now}, ${now})
+        `
+        return {
+          id,
+          name: input.name,
+          kind: input.kind,
+          baseUrl: input.baseUrl,
+          modelId: input.modelId,
+          contextWindow,
+          maxOutputTokens,
+          costInputPerMillion: costInput,
+          costOutputPerMillion: costOutput,
+          supportsTools: input.supportsTools,
+          supportsStreaming: true,
+          hasApiKey: false,
+          createdAt: now,
+          updatedAt: now,
+        }
+      }),
+    )
+  }
+
+  async updateModelProfile(
+    id: string,
+    input: Partial<
+      Required<Pick<ModelProfileInput, "name" | "kind" | "baseUrl" | "modelId">> & {
+        contextWindow: number
+        maxOutputTokens: number
+        costInputPerMillion: number
+        costOutputPerMillion: number
+        supportsTools: boolean
+      }
+    >,
+  ): Promise<ModelProfile | null> {
+    const current = await this.getModelProfile(id)
+    if (!current) return null
+    const next = {
+      name: input.name ?? current.name,
+      kind: input.kind ?? current.kind,
+      baseUrl: input.baseUrl ?? current.baseUrl,
+      modelId: input.modelId ?? current.modelId,
+      contextWindow: input.contextWindow ?? current.contextWindow,
+      maxOutputTokens: input.maxOutputTokens ?? current.maxOutputTokens,
+      costInputPerMillion: input.costInputPerMillion ?? current.costInputPerMillion,
+      costOutputPerMillion: input.costOutputPerMillion ?? current.costOutputPerMillion,
+      supportsTools: input.supportsTools ?? current.supportsTools,
+      now: nowIso(),
+    }
+    await this.query((sql) =>
+      sql`
+        UPDATE model_profiles SET
+          name = ${next.name},
+          kind = ${next.kind},
+          base_url = ${next.baseUrl},
+          model_id = ${next.modelId},
+          context_window = ${next.contextWindow},
+          max_output_tokens = ${next.maxOutputTokens},
+          cost_input_per_million = ${next.costInputPerMillion},
+          cost_output_per_million = ${next.costOutputPerMillion},
+          supports_tools = ${next.supportsTools ? 1 : 0},
+          updated_at = ${next.now}
+        WHERE id = ${id}
+      `.pipe(Effect.asVoid),
+    )
+    return this.getModelProfile(id)
+  }
+
+  async deleteModelProfile(id: string): Promise<void> {
+    await this.query((sql) => sql`DELETE FROM model_profiles WHERE id = ${id}`.pipe(Effect.asVoid))
+  }
+
+  async setSessionModelProfile(sessionId: string, modelProfileId: string | null): Promise<void> {
+    await this.query((sql) =>
+      sql`
+        UPDATE sessions SET model_profile_id = ${modelProfileId}, updated_at = ${nowIso()}
+        WHERE id = ${sessionId}
+      `.pipe(Effect.asVoid),
+    )
+  }
+
+  // ---------------------------------------------------------------------------
+  // Messages and turns
+
+  async getSessionMessages(sessionId: string, limit = 500): Promise<Message[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<MessageRow>`
+          SELECT id, seq, session_id, turn_id, role, text, content_json, created_at
+          FROM messages
+          WHERE session_id = ${sessionId}
+          ORDER BY seq ASC
+          LIMIT ${limit}
+        `
+        return rows.map(rowToMessage)
+      }),
+    )
+  }
+
+  async getTurn(turnId: string): Promise<Turn | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<TurnRow>`
+          SELECT id, session_id, status, model_profile_id, user_message_id, step_count,
+                 input_tokens, output_tokens, cost_usd, error, started_at, updated_at,
+                 completed_at
+          FROM turns
+          WHERE id = ${turnId}
+        `
+        const row = rows[0]
+        return row ? rowToTurn(row) : null
+      }),
+    )
+  }
+
+  async listTurns(sessionId: string, limit = 50): Promise<Turn[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<TurnRow>`
+          SELECT id, session_id, status, model_profile_id, user_message_id, step_count,
+                 input_tokens, output_tokens, cost_usd, error, started_at, updated_at,
+                 completed_at
+          FROM turns
+          WHERE session_id = ${sessionId}
+          ORDER BY started_at DESC
+          LIMIT ${limit}
+        `
+        return rows.map(rowToTurn)
+      }),
+    )
+  }
+
+  async createTurnWithUserMessage(
+    sessionId: string,
+    modelProfileId: string,
+    text: string,
+  ): Promise<{ turn: Turn; userMessage: Message }> {
+    const turnId = newId("turn")
+    const messageId = newId("msg")
+    const now = nowIso()
+    const content = { role: "user", content: text }
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        return yield* sql.withTransaction(
+          Effect.gen(function* () {
+            const inserted = yield* sql<{ seq: number }>`
+              INSERT INTO messages (id, session_id, turn_id, role, text, content_json, created_at)
+              VALUES (${messageId}, ${sessionId}, ${turnId}, 'user', ${text}, ${JSON.stringify(content)}, ${now})
+              RETURNING seq
+            `
+            const seq = inserted[0]?.seq
+            if (seq === undefined) throw new Error("Failed to persist user message")
+            yield* sql`
+              INSERT INTO turns
+                (id, session_id, status, model_profile_id, user_message_id, step_count,
+                 input_tokens, output_tokens, cost_usd, error, checkpoint_json,
+                 started_at, updated_at, completed_at)
+              VALUES
+                (${turnId}, ${sessionId}, 'queued', ${modelProfileId}, ${messageId}, 0,
+                 0, 0, 0, NULL, NULL, ${now}, ${now}, NULL)
+            `
+            yield* sql`UPDATE sessions SET updated_at = ${now} WHERE id = ${sessionId}`
+            const turn: Turn = {
+              id: turnId,
+              sessionId,
+              status: "queued",
+              modelProfileId,
+              userMessageId: messageId,
+              stepCount: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              costUsd: 0,
+              error: null,
+              startedAt: now,
+              updatedAt: now,
+              completedAt: null,
+            }
+            const userMessage: Message = {
+              id: messageId,
+              seq,
+              sessionId,
+              turnId,
+              role: "user",
+              text,
+              content,
+              createdAt: now,
+            }
+            return { turn, userMessage }
+          }),
+        )
+      }),
+    )
+  }
+
+  async saveTurnStep(turnId: string, input: TurnStepInput): Promise<Message[]> {
+    const now = nowIso()
+    const status = input.status ?? "running"
+    const terminal = status === "completed" || status === "failed" || status === "cancelled"
+    const usage = input.usage ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 }
+    const newMessages: Message[] = []
+
+    await this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          for (const message of input.messages ?? []) {
+            const id = newId("msg")
+            const inserted = yield* sql<{ seq: number }>`
+              INSERT INTO messages (id, session_id, turn_id, role, text, content_json, created_at)
+              VALUES (${id}, ${input.sessionId}, ${turnId}, ${message.role}, ${message.text},
+                      ${JSON.stringify(message.content)}, ${now})
+              RETURNING seq
+            `
+            const seq = inserted[0]?.seq
+            if (seq === undefined) throw new Error("Failed to persist turn message")
+            newMessages.push({
+              id,
+              seq,
+              sessionId: input.sessionId,
+              turnId,
+              role: message.role,
+              text: message.text,
+              content: message.content,
+              createdAt: now,
+            })
+          }
+
+          yield* sql`
+            UPDATE turns SET
+              status = ${status},
+              step_count = ${input.step},
+              input_tokens = ${usage.inputTokens},
+              output_tokens = ${usage.outputTokens},
+              cost_usd = ${usage.costUsd},
+              error = ${input.error ?? null},
+              checkpoint_json = ${JSON.stringify(input.checkpoint)},
+              updated_at = ${now},
+              completed_at = ${terminal ? now : null}
+            WHERE id = ${turnId}
+          `
+          yield* sql`
+            INSERT INTO turn_checkpoints (turn_id, step, state_json, created_at)
+            VALUES (${turnId}, ${input.step}, ${JSON.stringify(input.checkpoint)}, ${now})
+          `
+          yield* sql`UPDATE sessions SET updated_at = ${now} WHERE id = ${input.sessionId}`
+        }),
+      ),
+    )
+
+    return newMessages
+  }
+
+  async saveTurnCheckpoint(
+    turnId: string,
+    sessionId: string,
+    step: number,
+    checkpoint: unknown,
+    usage: TokenUsage,
+    status: TurnStatus = "running",
+  ): Promise<void> {
+    await this.saveTurnStep(turnId, {
+      step,
+      sessionId,
+      checkpoint,
+      usage,
+      status,
+    })
+  }
+
+  async setTurnStatus(turnId: string, status: TurnStatus, error: string | null = null): Promise<void> {
+    const now = nowIso()
+    const terminal = status === "completed" || status === "failed" || status === "cancelled"
+    await this.query((sql) =>
+      sql`
+        UPDATE turns SET status = ${status}, error = ${error}, updated_at = ${now},
+          completed_at = ${terminal ? now : null}
+        WHERE id = ${turnId}
+      `.pipe(Effect.asVoid),
+    )
+  }
+
+  async cancelTurn(turnId: string): Promise<Turn | null> {
+    const turn = await this.getTurn(turnId)
+    if (!turn) return null
+    if (turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled") {
+      return turn
+    }
+    await this.setTurnStatus(turnId, "cancelled")
+    return this.getTurn(turnId)
+  }
+
+  async getLatestCheckpoint(turnId: string): Promise<{ step: number; state: unknown; createdAt: string } | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<CheckpointRow>`
+          SELECT step, state_json, created_at
+          FROM turn_checkpoints
+          WHERE turn_id = ${turnId}
+          ORDER BY id DESC
+          LIMIT 1
+        `
+        const row = rows[0]
+        if (!row) return null
+        let state: unknown = {}
+        try {
+          state = JSON.parse(row.state_json) as unknown
+        } catch {
+          state = {}
+        }
+        return { step: row.step, state, createdAt: row.created_at }
+      }),
+    )
+  }
+
+  async recoverableTurns(): Promise<Turn[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<TurnRow>`
+          SELECT id, session_id, status, model_profile_id, user_message_id, step_count,
+                 input_tokens, output_tokens, cost_usd, error, started_at, updated_at,
+                 completed_at
+          FROM turns
+          WHERE status IN ('queued', 'running', 'resuming')
+          ORDER BY started_at ASC
+        `
+        return rows.map(rowToTurn)
+      }),
+    )
+  }
+
+  async setSessionSummary(sessionId: string, summary: string, throughSeq: number): Promise<void> {
+    await this.query((sql) =>
+      sql`
+        UPDATE sessions SET summary = ${summary}, summary_through_seq = ${throughSeq},
+          updated_at = ${nowIso()}
+        WHERE id = ${sessionId}
       `.pipe(Effect.asVoid),
     )
   }

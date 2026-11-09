@@ -4,6 +4,9 @@ import { Database } from "../db/database"
 import { AuthService } from "../auth/auth-service"
 import { SecretStore } from "../auth/secret-store"
 import { EventService } from "../events/service"
+import { ModelService } from "../models/model-service"
+import { TurnBus } from "../agent/turn-bus"
+import { TurnService } from "../agent/turn-service"
 import { App } from "../server/app"
 import { acquireLock } from "./lock"
 import { removeState, writeState } from "./state"
@@ -57,12 +60,18 @@ async function main(): Promise<void> {
     await auth.initialize()
     await auth.pruneExpired()
     events = new EventService(db, logger)
+    const models = new ModelService(db, logger, config.modelSecretsPath)
+    const turnBus = new TurnBus()
+    const turns = new TurnService(db, events, models, turnBus, logger)
 
     const app = new App({
       config,
       db,
       auth,
       events,
+      models,
+      turns,
+      turnBus,
       logger,
       startedAt: Date.now(),
       shutdown: (reason) => void shutdown(reason),
@@ -96,6 +105,11 @@ async function main(): Promise<void> {
       url: state.url,
       pid: process.pid,
       version: config.version,
+    })
+    void turns.recoverAll().catch((error) => {
+      logger.error("turn.recovery_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      })
     })
   } catch (error) {
     logger.error("service.start_failed", {

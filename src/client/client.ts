@@ -1,3 +1,5 @@
+import type { ModelProfile, ModelProfileInput, Turn } from "../shared/types"
+
 export interface ClientOptions {
   readonly baseUrl: string
   readonly password?: string
@@ -148,6 +150,79 @@ export class AgentOneClient {
 
   getSession(id: string): Promise<{ session: Record<string, unknown> }> {
     return this.request("GET", `/v1/sessions/${encodeURIComponent(id)}`)
+  }
+
+  listMessages(
+    sessionId: string,
+    limit = 100,
+  ): Promise<{ messages: Array<Record<string, unknown>> }> {
+    return this.request(
+      "GET",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/messages?limit=${limit}`,
+    )
+  }
+
+  startMessage(
+    sessionId: string,
+    content: string,
+    modelProfileId?: string,
+  ): Promise<{ turn: Turn; streamUrl: string }> {
+    return this.request("POST", `/v1/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      content,
+      ...(modelProfileId ? { modelProfileId } : {}),
+    })
+  }
+
+  getTurn(id: string): Promise<{ turn: Turn; messages: Array<Record<string, unknown>> }> {
+    return this.request("GET", `/v1/turns/${encodeURIComponent(id)}`)
+  }
+
+  cancelTurn(id: string): Promise<{ turn: Turn }> {
+    return this.request("POST", `/v1/turns/${encodeURIComponent(id)}/cancel`, {})
+  }
+
+  async turnStreamResponse(turnId: string, signal?: AbortSignal): Promise<Response> {
+    const headers: Record<string, string> = { accept: "text/event-stream" }
+    if (this.cookie) headers.cookie = `agent1_session=${this.cookie}`
+    else if (this.password) {
+      headers.authorization = `Basic ${Buffer.from(`agent-1:${this.password}`, "utf8").toString("base64")}`
+    }
+    return fetch(`${this.baseUrl}/v1/turns/${encodeURIComponent(turnId)}/stream`, {
+      headers,
+      signal,
+    })
+  }
+
+  listModelProfiles(): Promise<{ profiles: ModelProfile[] }> {
+    return this.request("GET", "/v1/model-profiles")
+  }
+
+  createModelProfile(input: ModelProfileInput): Promise<{ profile: ModelProfile }> {
+    return this.request("POST", "/v1/model-profiles", input)
+  }
+
+  updateModelProfile(
+    id: string,
+    input: Partial<ModelProfileInput> & { supportsTools?: boolean },
+  ): Promise<{ profile: ModelProfile }> {
+    return this.request("PATCH", `/v1/model-profiles/${encodeURIComponent(id)}`, input)
+  }
+
+  removeModelProfile(id: string): Promise<{ ok: true }> {
+    return this.request("DELETE", `/v1/model-profiles/${encodeURIComponent(id)}`)
+  }
+
+  testModelProfile(id: string): Promise<{
+    ok: boolean
+    text: string
+    supportsTools: boolean
+    latencyMs: number
+  }> {
+    return this.request("POST", `/v1/model-profiles/${encodeURIComponent(id)}/test`, {})
+  }
+
+  setDefaultModelProfile(id: string): Promise<{ ok: true; profile: ModelProfile }> {
+    return this.request("POST", `/v1/model-profiles/${encodeURIComponent(id)}/default`, {})
   }
 
   stop(): Promise<{ ok: true }> {

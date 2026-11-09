@@ -8,6 +8,11 @@ import type { Database } from "../db/database"
 import type { EventService } from "../events/service"
 import type { AuthContext } from "../shared/types"
 import { AuthService, SESSION_TTL_SECONDS } from "../auth/auth-service"
+import type { ModelService } from "../models/model-service"
+import { ModelProfileError } from "../models/model-service"
+import type { TurnService } from "../agent/turn-service"
+import type { TurnBus } from "../agent/turn-bus"
+import { createTurnStream } from "./turn-stream"
 import {
   clearSessionCookie,
   errorResponse,
@@ -31,6 +36,27 @@ const createSessionSchema = z.object({
   title: z.string().trim().min(1).max(200).optional(),
 })
 
+const createMessageSchema = z.object({
+  content: z.string().min(1).max(100_000),
+  modelProfileId: z.string().optional(),
+})
+
+const modelProfileSchema = z.object({
+  name: z.string().min(1).max(80),
+  kind: z.enum(["cloud", "local"]),
+  baseUrl: z.string().min(1).max(2_000),
+  modelId: z.string().min(1).max(200),
+  contextWindow: z.number().int().positive().optional(),
+  maxOutputTokens: z.number().int().positive().optional(),
+  costInputPerMillion: z.number().min(0).optional(),
+  costOutputPerMillion: z.number().min(0).optional(),
+  apiKey: z.string().max(10_000).optional(),
+})
+
+const updateModelProfileSchema = modelProfileSchema.partial().extend({
+  supportsTools: z.boolean().optional(),
+})
+
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 
 export interface AppDependencies {
@@ -38,6 +64,9 @@ export interface AppDependencies {
   readonly db: Database
   readonly auth: AuthService
   readonly events: EventService
+  readonly models: ModelService
+  readonly turns: TurnService
+  readonly turnBus: TurnBus
   readonly logger: Logger
   readonly startedAt: number
   readonly shutdown: (reason: string) => void | Promise<void>
@@ -68,6 +97,9 @@ function pairingPage(message: string): string {
 
 function issueHttpError(error: unknown): HttpError {
   if (error instanceof HttpError) return error
+  if (error instanceof ModelProfileError) {
+    return new HttpError(400, "model_profile_error", error.message)
+  }
   return new HttpError(500, "internal_error", "Internal server error")
 }
 
@@ -81,6 +113,9 @@ export class App {
   private readonly db: Database
   private readonly auth: AuthService
   private readonly events: EventService
+  private readonly models: ModelService
+  private readonly turns: TurnService
+  private readonly turnBus: TurnBus
   private readonly logger: Logger
   private readonly startedAt: number
   private readonly shutdown: (reason: string) => void | Promise<void>
@@ -90,6 +125,9 @@ export class App {
     this.db = dependencies.db
     this.auth = dependencies.auth
     this.events = dependencies.events
+    this.models = dependencies.models
+    this.turns = dependencies.turns
+    this.turnBus = dependencies.turnBus
     this.logger = dependencies.logger
     this.startedAt = dependencies.startedAt
     this.shutdown = dependencies.shutdown
@@ -162,7 +200,16 @@ export class App {
         uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
         eventSeq,
         dataDir: this.config.dataDir,
-        capabilities: ["auth", "sessions", "events", "pairing", "openapi"],
+        capabilities: [
+          "auth",
+          "sessions",
+          "events",
+          "pairing",
+          "openapi",
+          "model-profiles",
+          "turns",
+          "streaming",
+        ],
       })
     }
 
@@ -210,6 +257,103 @@ export class App {
 
     if (path === "/favicon.ico" && method === "GET") {
       return new Response(null, { status: 204 })
+    }
+
+    if (path === "/v1/model-profiles" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse({ profiles: await this.models.list() })
+    }
+
+    if (path === "/v1/model-profiles" && method === "POST") {
+      await this.requireAuth(request)
+      const parsed = modelProfileSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      const profile = await this.models.create(parsed.data)
+      return jsonResponse({ profile }, 201)
+    }
+
+    const modelProfileMatch = /^\/v1\/model-profiles\/([^/]+)(?:\/(test|default))?$/.exec(path)
+    if (modelProfileMatch) {
+      await this.requireAuth(request)
+      const id = decodeURIComponent(modelProfileMatch[1] ?? "")
+      const action = modelProfileMatch[2]
+      if (action === "test" && method === "POST") {
+        if (!(await this.models.get(id))) throw new HttpError(404, "model_not_found", "Model profile not found")
+        const result = await this.models.test(id)
+        return jsonResponse(result)
+      }
+      if (action === "default" && method === "POST") {
+        await this.models.setDefault(id)
+        const profile = await this.models.get(id)
+        return jsonResponse({ ok: true, profile })
+      }
+      if (method === "PATCH" && !action) {
+        const parsed = updateModelProfileSchema.safeParse(await readJson(request))
+        if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+        const profile = await this.models.update(id, parsed.data)
+        if (!profile) throw new HttpError(404, "model_not_found", "Model profile not found")
+        return jsonResponse({ profile })
+      }
+      if (method === "DELETE" && !action) {
+        const removed = await this.models.remove(id)
+        if (!removed) throw new HttpError(404, "model_not_found", "Model profile not found")
+        return jsonResponse({ ok: true })
+      }
+      throw new HttpError(405, "method_not_allowed", "Method not allowed")
+    }
+
+    const sessionMessagesMatch = /^\/v1\/sessions\/([^/]+)\/messages$/.exec(path)
+    if (sessionMessagesMatch) {
+      await this.requireAuth(request)
+      const sessionId = decodeURIComponent(sessionMessagesMatch[1] ?? "")
+      const session = await this.db.getSession(sessionId)
+      if (!session) throw new HttpError(404, "session_not_found", "Session not found")
+      if (method === "GET") {
+        const limitRaw = new URL(request.url).searchParams.get("limit")
+        const limit = limitRaw ? Math.min(500, Math.max(1, Number(limitRaw) || 100)) : 100
+        return jsonResponse({ messages: await this.turns.listMessages(sessionId, limit) })
+      }
+      if (method === "POST") {
+        const parsed = createMessageSchema.safeParse(await readJson(request))
+        if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+        const result = await this.turns.startTurn(
+          sessionId,
+          parsed.data.content,
+          parsed.data.modelProfileId,
+        )
+        return jsonResponse(
+          {
+            turn: result.turn,
+            streamUrl: `/v1/turns/${encodeURIComponent(result.turn.id)}/stream`,
+          },
+          202,
+        )
+      }
+      throw new HttpError(405, "method_not_allowed", "Method not allowed")
+    }
+
+    const turnMatch = /^\/v1\/turns\/([^/]+)(?:\/(stream|cancel))?$/.exec(path)
+    if (turnMatch) {
+      await this.requireAuth(request)
+      const turnId = decodeURIComponent(turnMatch[1] ?? "")
+      const action = turnMatch[2]
+      if (action === "stream" && method === "GET") {
+        const turn = await this.db.getTurn(turnId)
+        if (!turn) throw new HttpError(404, "turn_not_found", "Turn not found")
+        return createTurnStream(request, turnId, this.db, this.turnBus, this.logger)
+      }
+      if (action === "cancel" && method === "POST") {
+        const turn = await this.turns.cancel(turnId)
+        if (!turn) throw new HttpError(404, "turn_not_found", "Turn not found")
+        return jsonResponse({ turn })
+      }
+      if (method === "GET" && !action) {
+        const turn = await this.db.getTurn(turnId)
+        if (!turn) throw new HttpError(404, "turn_not_found", "Turn not found")
+        const messages = await this.turns.listMessages(turn.sessionId, 100)
+        return jsonResponse({ turn, messages })
+      }
+      throw new HttpError(405, "method_not_allowed", "Method not allowed")
     }
 
     if (path === "/v1/sessions" && method === "GET") {

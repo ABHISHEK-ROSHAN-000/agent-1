@@ -21,6 +21,7 @@ test("logger writes JSON lines and redacts secrets", async () => {
     cookie: "agent1_session=token",
     safe: "visible",
     nested: { token: "nested-secret" },
+    error: "provider rejected sk-live-secret-key-123456789",
   })
   const text = await readFile(file, "utf8")
   expect(text).toContain("test.event")
@@ -29,5 +30,6 @@ test("logger writes JSON lines and redacts secrets", async () => {
   expect(text).not.toContain("abc123")
   expect(text).not.toContain("agent1_session=token")
   expect(text).not.toContain("nested-secret")
+  expect(text).not.toContain("sk-live-secret-key-123456789")
   expect(text).toContain("[REDACTED]")
 })

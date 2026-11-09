@@ -3,6 +3,84 @@ export interface Session {
   readonly title: string
   readonly createdAt: string
   readonly updatedAt: string
+  readonly modelProfileId?: string | null
+  readonly summary?: string | null
+  readonly summaryThroughSeq?: number | null
+}
+
+export type ModelKind = "cloud" | "local"
+
+export interface ModelProfile {
+  readonly id: string
+  readonly name: string
+  readonly kind: ModelKind
+  readonly baseUrl: string
+  readonly modelId: string
+  readonly contextWindow: number
+  readonly maxOutputTokens: number
+  readonly costInputPerMillion: number
+  readonly costOutputPerMillion: number
+  readonly supportsTools: boolean
+  readonly supportsStreaming: boolean
+  readonly hasApiKey: boolean
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+export interface ModelProfileInput {
+  readonly name: string
+  readonly kind: ModelKind
+  readonly baseUrl: string
+  readonly modelId: string
+  readonly contextWindow?: number
+  readonly maxOutputTokens?: number
+  readonly costInputPerMillion?: number
+  readonly costOutputPerMillion?: number
+  readonly apiKey?: string
+}
+
+export type MessageRole = "user" | "assistant" | "tool" | "system"
+
+export interface Message {
+  readonly id: string
+  readonly seq: number
+  readonly sessionId: string
+  readonly turnId: string | null
+  readonly role: MessageRole
+  readonly text: string
+  readonly content: unknown
+  readonly createdAt: string
+}
+
+export type TurnStatus =
+  | "queued"
+  | "running"
+  | "interrupted"
+  | "resuming"
+  | "completed"
+  | "failed"
+  | "cancelled"
+
+export interface Turn {
+  readonly id: string
+  readonly sessionId: string
+  readonly status: TurnStatus
+  readonly modelProfileId: string
+  readonly userMessageId: string
+  readonly stepCount: number
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly costUsd: number
+  readonly error: string | null
+  readonly startedAt: string
+  readonly updatedAt: string
+  readonly completedAt: string | null
+}
+
+export interface TokenUsage {
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly costUsd: number
 }
 
 export interface EventRecord {
