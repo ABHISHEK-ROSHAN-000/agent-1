@@ -2,19 +2,35 @@ import { Effect } from "effect"
 import { SqlClient } from "effect/sql"
 import { SqliteMigrator } from "@effect/sql-sqlite-bun"
 
-export const LATEST_SCHEMA_VERSION = 7
+/**
+ * Development schema baseline.
+ *
+ * Agent-1 is pre-production. Phase 7 replaces the old v1-v7 migration chain
+ * with this single canonical schema. The development database is reset rather
+ * than migrated. Future phases add real migrations from this v1 baseline.
+ */
+export const LATEST_SCHEMA_VERSION = 1
 
 const initial = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
+  const now = new Date().toISOString()
 
   yield* sql`
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      provider_id TEXT,
+      model_id TEXT,
+      summary TEXT,
+      summary_through_seq INTEGER,
+      reasoning_effort TEXT,
+      memory_snapshot_json TEXT,
+      memory_snapshot_at TEXT
     )
   `
+
   yield* sql`
     CREATE TABLE IF NOT EXISTS events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,17 +87,6 @@ const initial = Effect.gen(function* () {
     )
   `
 
-  yield* Effect.void
-})
-
-const agentRuntime = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient
-
-  yield* sql`ALTER TABLE sessions ADD COLUMN provider_id TEXT`
-  yield* sql`ALTER TABLE sessions ADD COLUMN model_id TEXT`
-  yield* sql`ALTER TABLE sessions ADD COLUMN summary TEXT`
-  yield* sql`ALTER TABLE sessions ADD COLUMN summary_through_seq INTEGER`
-
   yield* sql`
     CREATE TABLE IF NOT EXISTS messages (
       seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,6 +103,34 @@ const agentRuntime = Effect.gen(function* () {
   yield* sql`CREATE INDEX IF NOT EXISTS messages_turn_idx ON messages (turn_id)`
 
   yield* sql`
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+      text,
+      content='messages',
+      content_rowid='seq',
+      tokenize='unicode61'
+    )
+  `
+  yield* sql`
+    CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+      INSERT INTO messages_fts(rowid, text) VALUES (new.seq, new.text);
+    END
+  `
+  yield* sql`
+    CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, text)
+        VALUES ('delete', old.seq, old.text);
+    END
+  `
+  yield* sql`
+    CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, text)
+        VALUES ('delete', old.seq, old.text);
+      INSERT INTO messages_fts(rowid, text) VALUES (new.seq, new.text);
+    END
+  `
+  yield* sql`INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')`
+
+  yield* sql`
     CREATE TABLE IF NOT EXISTS turns (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -110,7 +143,9 @@ const agentRuntime = Effect.gen(function* () {
       output_tokens INTEGER NOT NULL DEFAULT 0,
       cost_usd REAL NOT NULL DEFAULT 0,
       error TEXT,
+      error_details_json TEXT,
       checkpoint_json TEXT,
+      reasoning_effort TEXT,
       started_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       completed_at TEXT
@@ -129,12 +164,6 @@ const agentRuntime = Effect.gen(function* () {
     )
   `
   yield* sql`CREATE INDEX IF NOT EXISTS turn_checkpoints_turn_idx ON turn_checkpoints (turn_id, id)`
-
-  yield* Effect.void
-})
-
-const permissions = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient
 
   yield* sql`
     CREATE TABLE IF NOT EXISTS permission_rules (
@@ -188,29 +217,6 @@ const permissions = Effect.gen(function* () {
   `
   yield* sql`CREATE INDEX IF NOT EXISTS audit_log_at_idx ON audit_log (at)`
 
-  const now = new Date().toISOString()
-  const rules: Array<[string, string, string, string, number, string]> = [
-    ["rule_allow_test_echo", "tool.test_echo", "*", "allow", 10, "Read-only test echo tool"],
-    ["rule_allow_test_time", "tool.test_time", "*", "allow", 11, "Read-only test clock tool"],
-    ["rule_ask_test_confirm", "tool.test_confirm", "*", "ask", 30, "Approval-gated test tool"],
-    ["rule_ask_fs_writes", "fs.write", "*", "ask", 40, "Future filesystem writes"],
-    ["rule_ask_shell", "shell.exec", "*", "ask", 41, "Future shell commands"],
-    ["rule_ask_connectors", "connector.*", "*", "ask", 42, "Future connector actions"],
-  ]
-  for (const [id, action, resource, effect, position, note] of rules) {
-    yield* sql`
-      INSERT OR IGNORE INTO permission_rules
-        (id, action, resource, effect, position, ttl_seconds, expires_at, note, created_at, updated_at)
-      VALUES (${id}, ${action}, ${resource}, ${effect}, ${position}, NULL, NULL, ${note}, ${now}, ${now})
-    `
-  }
-
-  yield* Effect.void
-})
-
-const coreTools = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient
-
   yield* sql`
     CREATE TABLE IF NOT EXISTS workspaces (
       id TEXT PRIMARY KEY,
@@ -245,31 +251,6 @@ const coreTools = Effect.gen(function* () {
   yield* sql`CREATE INDEX IF NOT EXISTS journal_batch_idx ON journal (batch_id, id)`
   yield* sql`CREATE INDEX IF NOT EXISTS journal_turn_idx ON journal (turn_id, id)`
   yield* sql`CREATE INDEX IF NOT EXISTS journal_state_idx ON journal (state)`
-
-  const now = new Date().toISOString()
-  const rules: Array<[string, string, string, string, number, string]> = [
-    ["rule_allow_web_fetch", "web.fetch", "*", "allow", 50, "Fetch public web content with SSRF guard"],
-    ["rule_allow_web_search", "web.search", "*", "allow", 51, "Search with configured provider"],
-    ["rule_ask_fs_write", "fs.write", "*", "ask", 60, "File writes require approval"],
-    ["rule_ask_fs_mkdir", "fs.mkdir", "*", "ask", 61, "Directory creation requires approval"],
-    ["rule_ask_fs_moves", "fs.apply_moves", "*", "ask", 62, "Batch moves require approval"],
-    ["rule_ask_fs_undo", "fs.undo", "*", "ask", 63, "Undo requires approval"],
-    ["rule_deny_fs_delete", "fs.delete", "*", "deny", 64, "Hard delete is disabled"],
-    ["rule_ask_shell_exec", "shell.exec", "*", "ask", 65, "Shell commands require approval"],
-  ]
-  for (const [id, action, resource, effect, position, note] of rules) {
-    yield* sql`
-      INSERT OR IGNORE INTO permission_rules
-        (id, action, resource, effect, position, ttl_seconds, expires_at, note, created_at, updated_at)
-      VALUES (${id}, ${action}, ${resource}, ${effect}, ${position}, NULL, NULL, ${note}, ${now}, ${now})
-    `
-  }
-
-  yield* Effect.void
-})
-
-const providerModels = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient
 
   yield* sql`
     CREATE TABLE IF NOT EXISTS providers (
@@ -311,6 +292,7 @@ const providerModels = Effect.gen(function* () {
       tools_supported INTEGER NOT NULL DEFAULT 0,
       temperature_supported INTEGER NOT NULL DEFAULT 1,
       reasoning INTEGER NOT NULL DEFAULT 0,
+      reasoning_options_json TEXT NOT NULL DEFAULT '[]',
       cost_input REAL NOT NULL DEFAULT 0,
       cost_output REAL NOT NULL DEFAULT 0,
       cost_cache_read REAL NOT NULL DEFAULT 0,
@@ -326,33 +308,104 @@ const providerModels = Effect.gen(function* () {
   yield* sql`CREATE INDEX IF NOT EXISTS provider_models_name_idx ON provider_models (provider_id, name)`
   yield* sql`CREATE INDEX IF NOT EXISTS provider_models_enabled_idx ON provider_models (enabled, provider_id)`
 
-  yield* Effect.void
-})
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS memory_entries (
+      id TEXT PRIMARY KEY,
+      store TEXT NOT NULL CHECK (store IN ('user', 'memory')),
+      content TEXT NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `
+  yield* sql`CREATE UNIQUE INDEX IF NOT EXISTS memory_entries_exact_idx ON memory_entries (store, content)`
+  yield* sql`CREATE INDEX IF NOT EXISTS memory_entries_store_position_idx ON memory_entries (store, position)`
 
-const turnErrorDetails = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS memory_pending (
+      id TEXT PRIMARY KEY,
+      session_id TEXT,
+      turn_id TEXT,
+      store TEXT NOT NULL CHECK (store IN ('user', 'memory')),
+      action TEXT NOT NULL CHECK (action IN ('add', 'patch', 'remove')),
+      payload_json TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      origin TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'invalidated')),
+      matched_entry TEXT,
+      created_at TEXT NOT NULL,
+      decided_at TEXT,
+      decided_by TEXT,
+      reason TEXT
+    )
+  `
+  yield* sql`CREATE INDEX IF NOT EXISTS memory_pending_status_idx ON memory_pending (status, created_at)`
+  yield* sql`CREATE INDEX IF NOT EXISTS memory_pending_session_idx ON memory_pending (session_id, created_at)`
 
-  yield* sql`ALTER TABLE turns ADD COLUMN error_details_json TEXT`
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS memory_history (
+      id TEXT PRIMARY KEY,
+      store TEXT NOT NULL CHECK (store IN ('user', 'memory')),
+      action TEXT NOT NULL,
+      before_json TEXT NOT NULL,
+      after_json TEXT NOT NULL,
+      pending_id TEXT,
+      actor TEXT NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL,
+      undone_at TEXT,
+      undo_history_id TEXT
+    )
+  `
+  yield* sql`CREATE INDEX IF NOT EXISTS memory_history_store_idx ON memory_history (store, created_at)`
+  yield* sql`CREATE INDEX IF NOT EXISTS memory_history_pending_idx ON memory_history (pending_id)`
 
-  yield* Effect.void
-})
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS memory_review_runs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
+      trigger TEXT NOT NULL,
+      provider_id TEXT,
+      model_id TEXT,
+      turns_since_memory INTEGER NOT NULL DEFAULT 0,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      started_at TEXT NOT NULL,
+      completed_at TEXT
+    )
+  `
+  yield* sql`CREATE INDEX IF NOT EXISTS memory_review_runs_session_idx ON memory_review_runs (session_id, started_at)`
 
-const reasoningEffort = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient
-
-  yield* sql`ALTER TABLE provider_models ADD COLUMN reasoning_options_json TEXT NOT NULL DEFAULT '[]'`
-  yield* sql`ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT`
-  yield* sql`ALTER TABLE turns ADD COLUMN reasoning_effort TEXT`
+  const rules: Array<[string, string, string, string, number, string]> = [
+    ["rule_allow_test_echo", "tool.test_echo", "*", "allow", 10, "Read-only test echo tool"],
+    ["rule_allow_test_time", "tool.test_time", "*", "allow", 11, "Read-only test clock tool"],
+    ["rule_allow_memory", "memory.write", "*", "allow", 20, "Memory follows the owner-approved Hermes default"],
+    ["rule_ask_test_confirm", "tool.test_confirm", "*", "ask", 30, "Approval-gated test tool"],
+    ["rule_ask_fs_writes", "fs.write", "*", "ask", 40, "Future filesystem writes"],
+    ["rule_ask_shell", "shell.exec", "*", "ask", 41, "Future shell commands"],
+    ["rule_ask_connectors", "connector.*", "*", "ask", 42, "Future connector actions"],
+    ["rule_allow_web_fetch", "web.fetch", "*", "allow", 50, "Fetch public web content with SSRF guard"],
+    ["rule_allow_web_search", "web.search", "*", "allow", 51, "Search with configured provider"],
+    ["rule_ask_fs_write", "fs.write", "*", "ask", 60, "File writes require approval"],
+    ["rule_ask_fs_mkdir", "fs.mkdir", "*", "ask", 61, "Directory creation requires approval"],
+    ["rule_ask_fs_moves", "fs.apply_moves", "*", "ask", 62, "Batch moves require approval"],
+    ["rule_ask_fs_undo", "fs.undo", "*", "ask", 63, "Undo requires approval"],
+    ["rule_deny_fs_delete", "fs.delete", "*", "deny", 64, "Hard delete is disabled"],
+    ["rule_ask_shell_exec", "shell.exec", "*", "ask", 65, "Shell commands require approval"],
+  ]
+  for (const [id, action, resource, effect, position, note] of rules) {
+    yield* sql`
+      INSERT OR IGNORE INTO permission_rules
+        (id, action, resource, effect, position, ttl_seconds, expires_at, note, created_at, updated_at)
+      VALUES (${id}, ${action}, ${resource}, ${effect}, ${position}, NULL, NULL, ${note}, ${now}, ${now})
+    `
+  }
 
   yield* Effect.void
 })
 
 export const migrationLoader = SqliteMigrator.fromRecord({
   "0001_initial": initial,
-  "0002_agent_runtime": agentRuntime,
-  "0003_permissions": permissions,
-  "0004_core_tools": coreTools,
-  "0005_provider_models": providerModels,
-  "0006_turn_error_details": turnErrorDetails,
-  "0007_reasoning_effort": reasoningEffort,
 })

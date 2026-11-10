@@ -5,7 +5,7 @@ import { VERSION } from "./version"
 
 export const PRODUCT_NAME = "Agent-1"
 export const AUTH_USERNAME = "agent-1"
-export const PHASE = "Phase 6 — remote access"
+export const PHASE = "Phase 7 — memory"
 
 export interface AppConfig {
   readonly dataDir: string

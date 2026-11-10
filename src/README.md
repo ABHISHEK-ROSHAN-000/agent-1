@@ -1,20 +1,20 @@
 # Source map
 
-Phase 1 through Phase 6.1 modules are implemented. Later-phase directories are planned only.
+Phase 1 through Phase 6.1 modules are implemented. Phase 7 step 1 adds the fresh v1 schema, memory tables, FTS5 index, and development reset path; memory behavior is next.
 
 | Directory | Responsibility | Phase |
 |---|---|---|
 | `core/` | version, paths, config, IDs, JSON, logging | 0–1 |
 | `cli/` | command-line client | 0 |
 | `daemon/` | detached lifecycle, lock, state file, graceful shutdown | 1 |
-| `db/` | SQLite WAL, migrations, backups | 1 |
+| `db/` | SQLite WAL, fresh v1 schema, backups, development reset | 1, 7 |
 | `server/` | `/v1` API, auth middleware, pairing, SSE, static PWA, OpenAPI | 1–6 |
 | `events/` | durable event log and replay | 1 |
 | `agent/` | turn loop, prompts, checkpoints, compaction, budgets | 2 |
 | `models/` | provider catalog, models.dev metadata, credentials, catalog capabilities | 2, 6.1 |
 | `permissions/` | rule engine, approval queue, audit log | 3 |
 | `tools/` | filesystem, shell, web search/fetch, journal, undo | 4 |
-| `memory/` | USER + NOTES stores, pending writes, session search | 7 |
+| `memory/` | USER + NOTES stores, pending writes, session search | 7 (schema ready; behavior next) |
 | `connectors/` | Gmail, Google Calendar, Google Drive | 8 |
 | `mcp/` | guarded MCP host and pinned tool manifests | 9 |
 | `scheduler/` | awake-only agent schedules and briefings | 10 |

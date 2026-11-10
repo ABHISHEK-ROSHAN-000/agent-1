@@ -613,7 +613,8 @@ export class Database {
     const previousVersion = schemaVersion(options.dbPath)
     if (previousVersion > LATEST_SCHEMA_VERSION) {
       throw new Error(
-        `Database schema v${previousVersion} is newer than this daemon supports (v${LATEST_SCHEMA_VERSION})`,
+        `Database schema v${previousVersion} is newer than this daemon supports (v${LATEST_SCHEMA_VERSION}). ` +
+          "This pre-production database must be reset: stop the daemon and run `bun run db:reset -- --yes`.",
       )
     }
     backupIfNeeded(options.dbPath, options.backupDir, LATEST_SCHEMA_VERSION)
