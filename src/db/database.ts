@@ -25,6 +25,15 @@ import type {
 } from "../shared/types"
 import { newId } from "../core/ids"
 import { nowIso } from "../core/time"
+import type {
+  CommitMemoryMutation,
+  MemoryEntry,
+  MemoryHistoryRecord,
+  MemoryPendingRecord,
+  MemoryPendingStatus,
+  MemoryStoreName,
+  NewMemoryPending,
+} from "../memory/types"
 import { backupIfNeeded, schemaVersion } from "./backup"
 import { LATEST_SCHEMA_VERSION, migrationLoader } from "./migrations"
 
@@ -212,6 +221,46 @@ interface AuditRow {
   readonly approval_id: string | null
   readonly turn_id: string | null
   readonly details_json: string
+}
+
+interface MemoryEntryRow {
+  readonly id: string
+  readonly store: MemoryStoreName
+  readonly content: string
+  readonly position: number
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface MemoryPendingRow {
+  readonly id: string
+  readonly session_id: string | null
+  readonly turn_id: string | null
+  readonly store: MemoryStoreName
+  readonly action: "add" | "patch" | "remove"
+  readonly payload_json: string
+  readonly summary: string
+  readonly origin: string
+  readonly status: MemoryPendingStatus
+  readonly matched_entry: string | null
+  readonly created_at: string
+  readonly decided_at: string | null
+  readonly decided_by: string | null
+  readonly reason: string | null
+}
+
+interface MemoryHistoryRow {
+  readonly id: string
+  readonly store: MemoryStoreName
+  readonly action: string
+  readonly before_json: string
+  readonly after_json: string
+  readonly pending_id: string | null
+  readonly actor: string
+  readonly note: string | null
+  readonly created_at: string
+  readonly undone_at: string | null
+  readonly undo_history_id: string | null
 }
 
 interface EventRow {
@@ -563,6 +612,72 @@ function rowToAudit(row: AuditRow): AuditEntry {
     approvalId: row.approval_id,
     turnId: row.turn_id,
     details,
+  }
+}
+
+function jsonStringArray(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []
+  } catch {
+    return []
+  }
+}
+
+function rowToMemoryEntry(row: MemoryEntryRow): MemoryEntry {
+  return {
+    id: row.id,
+    store: row.store,
+    content: row.content,
+    position: row.position,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function rowToMemoryPending(row: MemoryPendingRow): MemoryPendingRecord {
+  let payload: unknown = {}
+  try {
+    payload = JSON.parse(row.payload_json) as unknown
+  } catch {
+    payload = {}
+  }
+  const parsed = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {}
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    turnId: row.turn_id,
+    store: row.store,
+    action: row.action,
+    payload: {
+      action: row.action,
+      ...(typeof parsed.content === "string" ? { content: parsed.content } : {}),
+      ...(typeof parsed.oldText === "string" ? { oldText: parsed.oldText } : {}),
+    },
+    summary: row.summary,
+    origin: row.origin,
+    status: row.status,
+    matchedEntry: row.matched_entry,
+    createdAt: row.created_at,
+    decidedAt: row.decided_at,
+    decidedBy: row.decided_by,
+    reason: row.reason,
+  }
+}
+
+function rowToMemoryHistory(row: MemoryHistoryRow): MemoryHistoryRecord {
+  return {
+    id: row.id,
+    store: row.store,
+    action: row.action,
+    before: jsonStringArray(row.before_json),
+    after: jsonStringArray(row.after_json),
+    pendingId: row.pending_id,
+    actor: row.actor,
+    note: row.note,
+    createdAt: row.created_at,
+    undoneAt: row.undone_at,
+    undoHistoryId: row.undo_history_id,
   }
 }
 
@@ -1936,5 +2051,204 @@ export class Database {
       decision: entry.decision,
       details: entry.details,
     })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Memory
+
+  async listMemoryEntries(store?: MemoryStoreName): Promise<MemoryEntry[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        if (store) {
+          const rows = yield* sql<MemoryEntryRow>`
+            SELECT id, store, content, position, created_at, updated_at
+            FROM memory_entries
+            WHERE store = ${store}
+            ORDER BY position, id
+          `
+          return rows.map(rowToMemoryEntry)
+        }
+        const rows = yield* sql<MemoryEntryRow>`
+          SELECT id, store, content, position, created_at, updated_at
+          FROM memory_entries
+          ORDER BY store, position, id
+        `
+        return rows.map(rowToMemoryEntry)
+      }),
+    )
+  }
+
+  async commitMemoryMutation(input: CommitMemoryMutation): Promise<MemoryHistoryRecord> {
+    const id = newId("memh")
+    const now = nowIso()
+    await this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          yield* sql`DELETE FROM memory_entries WHERE store = ${input.store}`
+          for (const [position, content] of input.entries.entries()) {
+            yield* sql`
+              INSERT INTO memory_entries (id, store, content, position, created_at, updated_at)
+              VALUES (${newId("mem")}, ${input.store}, ${content}, ${position}, ${now}, ${now})
+            `
+          }
+          yield* sql`
+            INSERT INTO memory_history
+              (id, store, action, before_json, after_json, pending_id, actor, note,
+               created_at, undone_at, undo_history_id)
+            VALUES
+              (${id}, ${input.store}, ${input.action}, ${JSON.stringify(input.before)},
+               ${JSON.stringify(input.after)}, ${input.pendingId ?? null}, ${input.actor},
+               ${input.note ?? null}, ${now}, NULL, NULL)
+          `
+          if (input.pendingId && input.pendingDecision) {
+            yield* sql`
+              UPDATE memory_pending
+              SET status = ${input.pendingDecision}, decided_at = ${now},
+                  decided_by = ${input.pendingDecidedBy ?? input.actor}, reason = ${input.note ?? null}
+              WHERE id = ${input.pendingId} AND status = 'pending'
+            `
+          }
+          if (input.undoHistoryId) {
+            yield* sql`
+              UPDATE memory_history
+              SET undone_at = ${now}, undo_history_id = ${id}
+              WHERE id = ${input.undoHistoryId} AND undone_at IS NULL
+            `
+          }
+        }),
+      ),
+    )
+    return {
+      id,
+      store: input.store,
+      action: input.action,
+      before: input.before,
+      after: input.after,
+      pendingId: input.pendingId ?? null,
+      actor: input.actor,
+      note: input.note ?? null,
+      createdAt: now,
+      undoneAt: null,
+      undoHistoryId: null,
+    }
+  }
+
+  async createMemoryPending(input: NewMemoryPending): Promise<MemoryPendingRecord> {
+    const id = newId("memp")
+    const now = nowIso()
+    const payload = JSON.stringify(input.payload)
+    await this.query((sql) =>
+      sql`
+        INSERT INTO memory_pending
+          (id, session_id, turn_id, store, action, payload_json, summary, origin, status,
+           matched_entry, created_at, decided_at, decided_by, reason)
+        VALUES
+          (${id}, ${input.sessionId ?? null}, ${input.turnId ?? null}, ${input.store},
+           ${input.action}, ${payload}, ${input.summary}, ${input.origin}, 'pending',
+           ${input.matchedEntry ?? null}, ${now}, NULL, NULL, NULL)
+      `.pipe(Effect.asVoid),
+    )
+    return {
+      id,
+      sessionId: input.sessionId ?? null,
+      turnId: input.turnId ?? null,
+      store: input.store,
+      action: input.action,
+      payload: input.payload,
+      summary: input.summary,
+      origin: input.origin,
+      status: "pending",
+      matchedEntry: input.matchedEntry ?? null,
+      createdAt: now,
+      decidedAt: null,
+      decidedBy: null,
+      reason: null,
+    }
+  }
+
+  async getMemoryPending(id: string): Promise<MemoryPendingRecord | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<MemoryPendingRow>`
+          SELECT id, session_id, turn_id, store, action, payload_json, summary, origin, status,
+                 matched_entry, created_at, decided_at, decided_by, reason
+          FROM memory_pending
+          WHERE id = ${id}
+        `
+        const row = rows[0]
+        return row ? rowToMemoryPending(row) : null
+      }),
+    )
+  }
+
+  async listMemoryPending(status?: MemoryPendingStatus, limit = 100): Promise<MemoryPendingRecord[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = status
+          ? yield* sql<MemoryPendingRow>`
+              SELECT id, session_id, turn_id, store, action, payload_json, summary, origin, status,
+                     matched_entry, created_at, decided_at, decided_by, reason
+              FROM memory_pending
+              WHERE status = ${status}
+              ORDER BY created_at DESC, rowid DESC
+              LIMIT ${limit}
+            `
+          : yield* sql<MemoryPendingRow>`
+              SELECT id, session_id, turn_id, store, action, payload_json, summary, origin, status,
+                     matched_entry, created_at, decided_at, decided_by, reason
+              FROM memory_pending
+              ORDER BY created_at DESC, rowid DESC
+              LIMIT ${limit}
+            `
+        return rows.map(rowToMemoryPending)
+      }),
+    )
+  }
+
+  async decideMemoryPending(
+    id: string,
+    status: "approved" | "rejected" | "expired" | "invalidated",
+    decidedBy: string,
+    reason: string | null,
+  ): Promise<MemoryPendingRecord | null> {
+    const now = nowIso()
+    await this.query((sql) =>
+      sql`
+        UPDATE memory_pending
+        SET status = ${status}, decided_at = ${now}, decided_by = ${decidedBy}, reason = ${reason}
+        WHERE id = ${id} AND status = 'pending'
+      `.pipe(Effect.asVoid),
+    )
+    return this.getMemoryPending(id)
+  }
+
+  async listMemoryHistory(limit = 100): Promise<MemoryHistoryRecord[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<MemoryHistoryRow>`
+          SELECT id, store, action, before_json, after_json, pending_id, actor, note,
+                 created_at, undone_at, undo_history_id
+          FROM memory_history
+          ORDER BY created_at DESC, rowid DESC
+          LIMIT ${limit}
+        `
+        return rows.map(rowToMemoryHistory)
+      }),
+    )
+  }
+
+  async getMemoryHistory(id: string): Promise<MemoryHistoryRecord | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<MemoryHistoryRow>`
+          SELECT id, store, action, before_json, after_json, pending_id, actor, note,
+                 created_at, undone_at, undo_history_id
+          FROM memory_history
+          WHERE id = ${id}
+        `
+        const row = rows[0]
+        return row ? rowToMemoryHistory(row) : null
+      }),
+    )
   }
 }

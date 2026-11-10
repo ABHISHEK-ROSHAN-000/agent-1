@@ -1,6 +1,6 @@
 # Source map
 
-Phase 1 through Phase 6.1 modules are implemented. Phase 7 step 1 adds the fresh v1 schema, memory tables, FTS5 index, and development reset path; memory behavior is next.
+Phase 1 through Phase 6.1 modules are implemented. Phase 7 steps 1–2 add the fresh v1 schema, memory tables/FTS5, bounded memory store, exact matching, atomic mutations, history/undo, and pending destructive changes. The memory tool, scanner, background review, search tool, API, and UI are next.
 
 | Directory | Responsibility | Phase |
 |---|---|---|
@@ -14,7 +14,7 @@ Phase 1 through Phase 6.1 modules are implemented. Phase 7 step 1 adds the fresh
 | `models/` | provider catalog, models.dev metadata, credentials, catalog capabilities | 2, 6.1 |
 | `permissions/` | rule engine, approval queue, audit log | 3 |
 | `tools/` | filesystem, shell, web search/fetch, journal, undo | 4 |
-| `memory/` | USER + NOTES stores, pending writes, session search | 7 (schema ready; behavior next) |
+| `memory/` | USER + NOTES stores, matching, history/undo, pending writes, session search | 7 (core ready; tool/API/UI next) |
 | `connectors/` | Gmail, Google Calendar, Google Drive | 8 |
 | `mcp/` | guarded MCP host and pinned tool manifests | 9 |
 | `scheduler/` | awake-only agent schedules and briefings | 10 |
