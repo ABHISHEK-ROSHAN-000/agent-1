@@ -70,7 +70,7 @@ async function main(): Promise<void> {
     events = new EventService(db, logger)
     const providers = new ProviderService(db, logger, config.modelSecretsPath)
     await providers.initialize()
-    const models = new ModelService(providers, logger)
+    const models = new ModelService(providers)
     const permissions = new PermissionService(db, logger)
     await permissions.expireApprovals()
     const workspace = new WorkspaceService(db, logger, config.dataDir)

@@ -64,15 +64,6 @@ describe("provider and model catalog API", () => {
       modelList.models.some((model) => model.providerId === "local-test" && model.modelId === "fake-model"),
     ).toBe(true)
 
-    const tested = await fetch(`${daemon.state.url}/v1/models/local-test/fake-model/test`, {
-      method: "POST",
-      headers: auth,
-      body: "{}",
-    })
-    expect(tested.status).toBe(200)
-    const testResult = (await tested.json()) as { ok: boolean; supportsTools: boolean }
-    expect(testResult.ok).toBe(true)
-    expect(testResult.supportsTools).toBe(true)
 
     const updated = await fetch(`${daemon.state.url}/v1/models/local-test/fake-model`, {
       method: "PATCH",

@@ -80,7 +80,7 @@ src/server/   /v1 API, auth middleware, SSE, OpenAPI
 src/client/   typed API client
 src/test/     integration helpers
 src/agent/    turn loop, streaming, checkpoints, recovery
-src/models/   provider catalog, models.dev metadata, credentials, capability probe
+src/models/   provider catalog, models.dev metadata, credentials, catalog capabilities
 src/permissions/ rules, approvals, audit
 src/tools/    workspaces, filesystem, journal/undo, shell, web
 src/remote/   OpenTunnel lifecycle, PROXY v2 bridge, visitor limits
@@ -103,13 +103,13 @@ The full plan is at `C:\Users\ABHISHEK\.opencode\plan\PLAN.md` (v0.4). Evidence:
 
 ```text
 bun run check
-77 pass, 0 fail, 430 expect() calls, 30 files
+84 pass, 0 fail, 453 expect() calls, 32 files
 
 bun run test:e2e
 6 pass, 0 fail, 61 expect() calls, 2 browser suites
 ```
 
-Coverage includes Phase 1–4, OpenCode-style web surfaces, static serving/CSP, login and pairing, home/new-session/session flows, streaming chat, approval-gated real file moves and journal undo, files/context panels, Pierre tree/diff review, mobile layout, system light/dark theme, offline/reconnecting/update banners, PWA manifest/service-worker checks, visual pixel baselines, OpenTunnel remote pairing, PROXY v2 visitor forwarding, per-visitor limits, remote cookie/host checks, provider credentials, models.dev catalog parsing, environment-key detection, model testing, default selection, and per-session model switching. The 500-file injected crash/resume/undo test remains at the tool/journal layer.
+Coverage includes Phase 1–4, OpenCode-style web surfaces, static serving/CSP, login and pairing, home/new-session/session flows, streaming chat, approval-gated real file moves and journal undo, files/context panels, Pierre tree/diff review, mobile layout, system light/dark theme, offline/reconnecting/update banners, PWA manifest/service-worker checks, visual pixel baselines, OpenTunnel remote pairing, PROXY v2 visitor forwarding, per-visitor limits, remote cookie/host checks, provider credentials, models.dev catalog parsing, environment-key detection, default selection, output-limit fitting, provider retry/error diagnostics, and per-session model switching. The 500-file injected crash/resume/undo test remains at the tool/journal layer.
 
 ## Limits
 

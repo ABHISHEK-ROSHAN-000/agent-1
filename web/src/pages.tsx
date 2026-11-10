@@ -524,6 +524,7 @@ export function SessionPage() {
     try {
       const handle = streamTurn(turnId, (event) => {
         if (event.type === "delta") setLiveText((current) => current + event.text)
+        else if (event.type === "retry") toast.info(`Retrying (${event.attempt}): ${event.message}`)
         else if (event.type === "error") setTurnError(event.message)
         else if (event.type === "done") {
           if (event.status === "completed") toast.success("Turn completed")
@@ -982,16 +983,6 @@ export function ModelsPage() {
     }
   }
 
-  const test = async (model: CatalogModel) => {
-    try {
-      const result = await api.testModel(model.providerId, model.modelId)
-      toast.success(`Model test OK � tools ${result.supportsTools ? "yes" : "no"} � ${result.latencyMs}ms`)
-      await refresh()
-    } catch (error) {
-      toast.error(errorMessage(error))
-    }
-  }
-
   const makeDefault = async (model: CatalogModel) => {
     try {
       await api.setDefaultModel({ providerId: model.providerId, modelId: model.modelId })
@@ -1055,7 +1046,6 @@ export function ModelsPage() {
                           <button class="button button-ghost button-small" type="button" onClick={() => void favorite(model)}>
                             {model.favorite ? "Favorited" : "Favorite"}
                           </button>
-                          <button class="button button-secondary button-small" type="button" onClick={() => void test(model)}>Test</button>
                           <button class="button button-ghost button-small" type="button" onClick={() => void makeDefault(model)}>Default</button>
                         </div>
                       </div>

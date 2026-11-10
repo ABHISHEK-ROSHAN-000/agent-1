@@ -18,6 +18,7 @@ import type {
   Session,
   TokenUsage,
   Turn,
+  TurnErrorDetails,
   TurnStatus,
   Workspace,
   WorkspaceAccess,
@@ -129,6 +130,7 @@ interface TurnRow {
   readonly output_tokens: number
   readonly cost_usd: number
   readonly error: string | null
+  readonly error_details_json: string | null
   readonly started_at: string
   readonly updated_at: string
   readonly completed_at: string | null
@@ -253,6 +255,7 @@ export interface TurnStepInput {
   readonly usage?: TokenUsage
   readonly status?: TurnStatus
   readonly error?: string | null
+  readonly errorDetails?: TurnErrorDetails | null
 }
 
 export interface IdempotencyRecord {
@@ -379,7 +382,27 @@ function rowToMessage(row: MessageRow): import("../shared/types").Message {
   }
 }
 
+function parseTurnErrorDetails(value: string | null): TurnErrorDetails | undefined {
+  if (!value) return undefined
+  try {
+    const parsed = JSON.parse(value) as Partial<TurnErrorDetails>
+    if (typeof parsed.kind !== "string" || typeof parsed.message !== "string") return undefined
+    return {
+      kind: parsed.kind,
+      message: parsed.message,
+      ...(typeof parsed.status === "number" ? { status: parsed.status } : {}),
+      ...(typeof parsed.providerMessage === "string"
+        ? { providerMessage: parsed.providerMessage }
+        : {}),
+      ...(typeof parsed.retryAfterMs === "number" ? { retryAfterMs: parsed.retryAfterMs } : {}),
+    }
+  } catch {
+    return undefined
+  }
+}
+
 function rowToTurn(row: TurnRow): Turn {
+  const errorDetails = parseTurnErrorDetails(row.error_details_json)
   return {
     id: row.id,
     sessionId: row.session_id,
@@ -392,6 +415,7 @@ function rowToTurn(row: TurnRow): Turn {
     outputTokens: row.output_tokens,
     costUsd: row.cost_usd,
     error: row.error,
+    ...(errorDetails ? { errorDetails } : {}),
     startedAt: row.started_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
@@ -1188,7 +1212,7 @@ export class Database {
       Effect.gen(function* () {
         const rows = yield* sql<TurnRow>`
           SELECT id, session_id, status, provider_id, model_id, user_message_id, step_count,
-                 input_tokens, output_tokens, cost_usd, error, started_at, updated_at,
+                 input_tokens, output_tokens, cost_usd, error, error_details_json, started_at, updated_at,
                  completed_at
           FROM turns
           WHERE id = ${turnId}
@@ -1204,7 +1228,7 @@ export class Database {
       Effect.gen(function* () {
         const rows = yield* sql<TurnRow>`
           SELECT id, session_id, status, provider_id, model_id, user_message_id, step_count,
-                 input_tokens, output_tokens, cost_usd, error, started_at, updated_at,
+                 input_tokens, output_tokens, cost_usd, error, error_details_json, started_at, updated_at,
                  completed_at
           FROM turns
           WHERE session_id = ${sessionId}
@@ -1320,6 +1344,7 @@ export class Database {
               output_tokens = ${usage.outputTokens},
               cost_usd = ${usage.costUsd},
               error = ${input.error ?? null},
+              error_details_json = ${input.errorDetails ? JSON.stringify(input.errorDetails) : null},
               checkpoint_json = ${JSON.stringify(input.checkpoint)},
               updated_at = ${now},
               completed_at = ${terminal ? now : null}
@@ -1354,13 +1379,19 @@ export class Database {
     })
   }
 
-  async setTurnStatus(turnId: string, status: TurnStatus, error: string | null = null): Promise<void> {
+  async setTurnStatus(
+    turnId: string,
+    status: TurnStatus,
+    error: string | null = null,
+    errorDetails: TurnErrorDetails | null = null,
+  ): Promise<void> {
     const now = nowIso()
     const terminal = status === "completed" || status === "failed" || status === "cancelled"
     await this.query((sql) =>
       sql`
-        UPDATE turns SET status = ${status}, error = ${error}, updated_at = ${now},
-          completed_at = ${terminal ? now : null}
+        UPDATE turns SET status = ${status}, error = ${error},
+          error_details_json = ${errorDetails ? JSON.stringify(errorDetails) : null},
+          updated_at = ${now}, completed_at = ${terminal ? now : null}
         WHERE id = ${turnId}
       `.pipe(Effect.asVoid),
     )
@@ -1404,7 +1435,7 @@ export class Database {
       Effect.gen(function* () {
         const rows = yield* sql<TurnRow>`
           SELECT id, session_id, status, provider_id, model_id, user_message_id, step_count,
-                 input_tokens, output_tokens, cost_usd, error, started_at, updated_at,
+                 input_tokens, output_tokens, cost_usd, error, error_details_json, started_at, updated_at,
                  completed_at
           FROM turns
           WHERE status IN ('queued', 'running', 'resuming', 'waiting_approval')

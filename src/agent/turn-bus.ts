@@ -9,8 +9,22 @@ export type TurnStreamEvent =
       readonly toolName: string
       readonly toolCallId: string
     }
+  | {
+      readonly type: "retry"
+      readonly attempt: number
+      readonly delayMs: number
+      readonly message: string
+      readonly kind: string
+      readonly status?: number
+    }
   | { readonly type: "done"; readonly status: TurnStatus }
-  | { readonly type: "error"; readonly message: string }
+  | {
+      readonly type: "error"
+      readonly message: string
+      readonly kind?: string
+      readonly status?: number
+      readonly retryAfterMs?: number
+    }
 
 type Listener = (event: TurnStreamEvent) => void
 

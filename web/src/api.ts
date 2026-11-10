@@ -44,6 +44,13 @@ export interface Turn {
     | "failed"
     | "cancelled"
   error: string | null
+  errorDetails?: {
+    kind: string
+    message: string
+    status?: number
+    providerMessage?: string
+    retryAfterMs?: number
+  } | null
 }
 
 export interface Approval {
@@ -339,12 +346,7 @@ export const api = {
       `/v1/models/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`,
       input,
     ),
-  testModel: (providerId: string, modelId: string) =>
-    request<{ ok: boolean; text: string; supportsTools: boolean; latencyMs: number }>(
-      "POST",
-      `/v1/models/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}/test`,
-      {},
-    ),
+
   tools: () => request<{ tools: ToolInfo[] }>("GET", "/v1/tools"),
   audit: (limit = 100) => request<{ entries: unknown[] }>("GET", `/v1/audit?limit=${limit}`),
 }
@@ -353,8 +355,22 @@ export type TurnStreamEvent =
   | { type: "status"; status: Turn["status"] }
   | { type: "delta"; text: string }
   | { type: "tool"; phase: "start" | "done"; toolName: string; toolCallId: string }
+  | {
+      type: "retry"
+      attempt: number
+      delayMs: number
+      message: string
+      kind: string
+      status?: number
+    }
   | { type: "done"; status: Turn["status"] }
-  | { type: "error"; message: string }
+  | {
+      type: "error"
+      message: string
+      kind?: string
+      status?: number
+      retryAfterMs?: number
+    }
 
 export interface TurnStreamHandle {
   abort(): void

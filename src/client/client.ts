@@ -316,19 +316,6 @@ export class AgentOneClient {
     )
   }
 
-  testModel(providerId: string, modelId: string): Promise<{
-    ok: boolean
-    text: string
-    supportsTools: boolean
-    latencyMs: number
-  }> {
-    return this.request(
-      "POST",
-      `/v1/models/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}/test`,
-      {},
-    )
-  }
-
   listRules(): Promise<{ rules: PermissionRule[] }> {
     return this.request("GET", "/v1/rules")
   }

@@ -11,7 +11,7 @@ Phase 1 through Phase 6.1 modules are implemented. Later-phase directories are p
 | `server/` | `/v1` API, auth middleware, pairing, SSE, static PWA, OpenAPI | 1–6 |
 | `events/` | durable event log and replay | 1 |
 | `agent/` | turn loop, prompts, checkpoints, compaction, budgets | 2 |
-| `models/` | provider catalog, models.dev metadata, credentials, capability probe | 2, 6.1 |
+| `models/` | provider catalog, models.dev metadata, credentials, catalog capabilities | 2, 6.1 |
 | `permissions/` | rule engine, approval queue, audit log | 3 |
 | `tools/` | filesystem, shell, web search/fetch, journal, undo | 4 |
 | `memory/` | USER + NOTES stores, pending writes, session search | 7 |

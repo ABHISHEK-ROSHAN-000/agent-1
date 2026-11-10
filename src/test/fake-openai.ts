@@ -20,6 +20,7 @@ interface ChatRequest {
 export interface FakeOpenAI {
   readonly url: string
   readonly requests: ChatRequest[]
+  failNext(status?: number, headers?: Record<string, string>): void
   close(): void
 }
 
@@ -97,6 +98,7 @@ function sseChunk(model: string, delta: Record<string, unknown>, finishReason: s
 
 export function startFakeOpenAI(): FakeOpenAI {
   const requests: ChatRequest[] = []
+  let failure: { status: number; headers: Record<string, string> } | undefined
   let server: ReturnType<typeof Bun.serve>
   server = Bun.serve({
     hostname: "127.0.0.1",
@@ -109,6 +111,17 @@ export function startFakeOpenAI(): FakeOpenAI {
       }
       const body = (await request.json()) as ChatRequest
       requests.push(body)
+      if (failure) {
+        const current = failure
+        failure = undefined
+        return Response.json(
+          { error: { message: "Fake provider failure" } },
+          {
+            status: current.status,
+            headers: { "content-type": "application/json", ...current.headers },
+          },
+        )
+      }
       const model = body.model ?? "fake-model"
       const messages = body.messages ?? []
       const last = messages[messages.length - 1]
@@ -122,33 +135,28 @@ export function startFakeOpenAI(): FakeOpenAI {
         .join("\n")
       const hasToolResult = last?.role === "tool" || last?.role === "tool_result"
       const toolNames = body.tools?.map((entry) => entry.function?.name ?? "") ?? []
-      const wantsProbe = toolNames.includes("probe") && /probe/i.test(userText)
       const wantsEcho = /test_echo|echo/i.test(userText) && toolNames.includes("test_echo")
       const wantsConfirm = /confirm/i.test(userText) && toolNames.includes("test_confirm")
       const wantsLoop = /loop/i.test(userText) && toolNames.includes("test_echo")
       const slow = /slow/i.test(userText)
-      const isProbeText = /reply with the single word: ready/i.test(userText)
       const isSummarize = /summarize the earlier conversation/i.test(userText) || /summarize/i.test(systemText)
       const applyMatch = /apply moves:\s*(\{[\s\S]*\})/i.exec(userText)
       const stream = body.stream === true
 
       let text = `Fake response: ${userText.slice(0, 200)}`
-      if (isProbeText) text = "ready"
-      else if (isSummarize) text = "Earlier conversation summary: the user discussed setup and preferences."
+      if (isSummarize) text = "Earlier conversation summary: the user discussed setup and preferences."
       else if (hasToolResult) text = "The tool returned a result. Fake final answer."
-      else if (wantsProbe) text = ""
 
       let tool: { name: string; args: Record<string, unknown> } | undefined
       if (applyMatch && toolNames.includes("fs_apply_moves") && !hasToolResult) {
         tool = { name: "fs_apply_moves", args: JSON.parse(applyMatch[1]!) as Record<string, unknown> }
-      } else if (wantsProbe) tool = { name: "probe", args: { value: "ok" } }
-      else if (wantsLoop) tool = { name: "test_echo", args: { message: "loop" } }
+      } else if (wantsLoop) tool = { name: "test_echo", args: { message: "loop" } }
       else if (wantsConfirm && !hasToolResult) {
         tool = { name: "test_confirm", args: { note: "confirm from fake" } }
       } else if (wantsEcho && !hasToolResult) {
         tool = { name: "test_echo", args: { message: "hello from fake" } }
       }
-      if (isProbeText || isSummarize) tool = undefined
+      if (isSummarize) tool = undefined
 
       if (!stream) {
         if (tool) return Response.json(toolCompletionBody(model, tool.name, tool.args))
@@ -212,6 +220,9 @@ export function startFakeOpenAI(): FakeOpenAI {
   return {
     url: `http://127.0.0.1:${server.port}/v1`,
     requests,
+    failNext(status = 500, headers = {}) {
+      failure = { status, headers }
+    },
     close: () => server.stop(true),
   }
 }

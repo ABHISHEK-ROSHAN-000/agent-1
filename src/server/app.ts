@@ -684,14 +684,6 @@ export class App {
       return jsonResponse({ model: await this.providers.setDefault(parsed.data) })
     }
 
-    const modelTestMatch = /^\/v1\/models\/([^/]+)\/(.+)\/test$/.exec(path)
-    if (modelTestMatch && method === "POST") {
-      await this.requireAuth(request)
-      const providerId = decodeURIComponent(modelTestMatch[1] ?? "")
-      const modelId = decodeURIComponent(modelTestMatch[2] ?? "")
-      return jsonResponse(await this.models.test(providerId, modelId))
-    }
-
     const modelActionMatch = /^\/v1\/models\/([^/]+)\/(.+)$/.exec(path)
     if (modelActionMatch) {
       await this.requireAuth(request)

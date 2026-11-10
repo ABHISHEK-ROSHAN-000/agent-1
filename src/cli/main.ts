@@ -752,6 +752,8 @@ async function chatCommand(parsed: ParsedArgs): Promise<void> {
             phase?: string
             status?: string
             message?: string
+            attempt?: number
+            delayMs?: number
           }
           if (event.type === "delta" && event.text) {
             printedText = true
@@ -759,6 +761,10 @@ async function chatCommand(parsed: ParsedArgs): Promise<void> {
           } else if (event.type === "tool") {
             process.stdout.write(
               `\n[tool ${event.phase ?? ""} ${event.toolName ?? ""}]\n`,
+            )
+          } else if (event.type === "retry") {
+            process.stderr.write(
+              `\n[retry ${event.attempt ?? "?"} in ${Math.ceil((event.delayMs ?? 0) / 1_000)}s: ${event.message ?? "provider error"}]\n`,
             )
           } else if (event.type === "error") {
             process.stderr.write(`\n[turn error: ${event.message ?? "unknown"}]\n`)

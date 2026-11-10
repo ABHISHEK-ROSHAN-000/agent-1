@@ -89,10 +89,11 @@ function ModelPicker(props: {
 }) {
   const [open, setOpen] = createSignal(false)
   const [query, setQuery] = createSignal("")
+  const [active, setActive] = createSignal("")
   let root: HTMLDivElement | undefined
 
-  const selected = () =>
-    props.models.find((model) => `${model.providerId}/${model.modelId}` === props.value)
+  const key = (model: CatalogModel) => `${model.providerId}/${model.modelId}`
+  const selected = () => props.models.find((model) => key(model) === props.value)
   const filtered = () => {
     const search = query().trim().toLowerCase()
     return props.models.filter(
@@ -111,6 +112,35 @@ function ModelPicker(props: {
     return [...map.entries()]
   })
 
+  const toggle = () => {
+    const next = !open()
+    if (next) {
+      setQuery("")
+      setActive(props.value ?? "")
+    }
+    setOpen(next)
+  }
+
+  const choose = (model: CatalogModel) => {
+    props.onChange?.(key(model))
+    setOpen(false)
+    setQuery("")
+  }
+
+  const move = (direction: 1 | -1) => {
+    const items = filtered()
+    if (items.length === 0) return
+    const index = items.findIndex((model) => key(model) === active())
+    const next =
+      index === -1
+        ? direction === 1
+          ? 0
+          : items.length - 1
+        : (index + direction + items.length) % items.length
+    const model = items[next]
+    if (model) setActive(key(model))
+  }
+
   onMount(() => {
     const close = (event: PointerEvent) => {
       if (root && !root.contains(event.target as Node)) setOpen(false)
@@ -120,80 +150,62 @@ function ModelPicker(props: {
   })
 
   return (
-    <div
-      ref={root}
-      class="composer-control"
-      style={{ position: "relative", display: "inline-flex", "align-items": "center", cursor: "pointer" }}
-    >
+    <div ref={root} class="composer-control model-picker">
       <button
         type="button"
+        class="model-picker-trigger"
         disabled={props.disabled || props.models.length === 0}
-        onClick={() => setOpen((value) => !value)}
-        style={{ background: "transparent", border: "0", color: "inherit", "font": "inherit", cursor: "inherit", padding: "0" }}
+        onClick={toggle}
       >
-        {selected()?.name ?? "No model"} ▾
+        {selected()?.name ?? "No model"} <span class="model-picker-caret" aria-hidden="true" />
       </button>
       <Show when={open()}>
-        <div
-          style={{
-            position: "absolute",
-            bottom: "calc(100% + 8px)",
-            left: "0",
-            width: "min(360px, calc(100vw - 28px))",
-            "max-height": "360px",
-            overflow: "auto",
-            background: "var(--surface)",
-            border: "1px solid var(--border)",
-            "border-radius": "10px",
-            padding: "8px",
-            "z-index": "80",
-            "box-shadow": "0 16px 40px rgb(0 0 0 / 30%)",
-          }}
-        >
+        <div class="model-picker-panel">
           <input
-            class="form-input"
-            style={{ "margin-bottom": "8px" }}
+            class="form-input model-picker-search"
             value={query()}
-            onInput={(event) => setQuery(event.currentTarget.value)}
+            onInput={(event) => {
+              setQuery(event.currentTarget.value)
+              setActive(filtered()[0] ? key(filtered()[0]!) : "")
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown") {
+                event.preventDefault()
+                move(1)
+              } else if (event.key === "ArrowUp") {
+                event.preventDefault()
+                move(-1)
+              } else if (event.key === "Enter") {
+                const model = filtered().find((item) => key(item) === active())
+                if (model) {
+                  event.preventDefault()
+                  choose(model)
+                }
+              } else if (event.key === "Escape") {
+                event.preventDefault()
+                setOpen(false)
+              }
+            }}
             placeholder="Search models"
-            autofocus
+            ref={(element) => queueMicrotask(() => element.focus())}
           />
-          <Show when={groups().length > 0} fallback={<div class="tiny muted">No matching models</div>}>
+          <Show when={groups().length > 0} fallback={<div class="model-picker-empty">No matching models</div>}>
             <For each={groups()}>
               {([providerId, models]) => (
-                <div style={{ "margin-bottom": "8px" }}>
-                  <div class="tiny muted" style={{ padding: "4px 6px", "text-transform": "uppercase" }}>
-                    {providerId}
-                  </div>
+                <div class="model-picker-group">
+                  <div class="model-picker-provider">{providerId}</div>
                   <For each={models}>
                     {(model) => (
                       <button
                         type="button"
-                        onClick={() => {
-                          props.onChange?.(`${model.providerId}/${model.modelId}`)
-                          setOpen(false)
-                          setQuery("")
-                        }}
-                        style={{
-                          display: "flex",
-                          width: "100%",
-                          gap: "8px",
-                          "align-items": "center",
-                          "justify-content": "space-between",
-                          padding: "7px 8px",
-                          border: "0",
-                          "border-radius": "6px",
-                          background:
-                            props.value === `${model.providerId}/${model.modelId}`
-                              ? "var(--surface-raised)"
-                              : "transparent",
-                          color: "inherit",
-                          cursor: "pointer",
-                          "text-align": "left",
-                        }}
+                        class="model-picker-option"
+                        data-active={active() === key(model) ? "" : undefined}
+                        data-selected={props.value === key(model) ? "" : undefined}
+                        onMouseEnter={() => setActive(key(model))}
+                        onClick={() => choose(model)}
                       >
                         <span class="truncate">{model.name}</span>
-                        <span class="row" style={{ gap: "4px", "flex-shrink": "0" }}>
+                        <span class="model-picker-tags">
                           {model.supportsTools ? <span class="tag green">tools</span> : undefined}
                           {model.costInputPerMillion === 0 && model.costOutputPerMillion === 0 ? (
                             <span class="tag">free</span>
@@ -211,7 +223,6 @@ function ModelPicker(props: {
     </div>
   )
 }
-
 export function Composer(props: {
   onSubmit: (text: string) => void | Promise<void>
   onStop?: () => void

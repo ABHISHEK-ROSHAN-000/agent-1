@@ -7,6 +7,14 @@ import {
 import type { Logger } from "../core/log"
 import type { ModelService, ResolvedModel } from "../models/model-service"
 import type { ProviderService } from "../models/provider-service"
+import {
+  ProviderTurnError,
+  isOneShotRetryable,
+  isRetryableProviderError,
+  providerErrorInfo,
+  retryDelayMs,
+} from "./provider-error"
+import { outputLimit } from "./token-budget"
 import type { Database, NewMessage } from "../db/database"
 import type { EventService } from "../events/service"
 import type { Message, ModelSelection, Session, TokenUsage, Turn } from "../shared/types"
@@ -42,6 +50,8 @@ export interface TurnServiceOptions {
   readonly maxSteps?: number
   readonly maxWallMs?: number
   readonly maxCostUsd?: number
+  readonly maxRetries?: number
+  readonly retryBaseMs?: number
 }
 
 function textFromContent(content: unknown): string {
@@ -75,6 +85,8 @@ export class TurnService {
   private readonly maxSteps: number
   private readonly maxWallMs: number
   private readonly maxCostUsd: number
+  private readonly maxRetries: number
+  private readonly retryBaseMs: number
 
   constructor(
     private readonly db: Database,
@@ -90,6 +102,8 @@ export class TurnService {
     this.maxSteps = options.maxSteps ?? Number(process.env.AGENT1_TURN_MAX_STEPS ?? "8")
     this.maxWallMs = options.maxWallMs ?? Number(process.env.AGENT1_TURN_MAX_WALL_MS ?? "120000")
     this.maxCostUsd = options.maxCostUsd ?? Number(process.env.AGENT1_TURN_MAX_COST_USD ?? "0")
+    this.maxRetries = options.maxRetries ?? Number(process.env.AGENT1_TURN_MAX_RETRIES ?? "10")
+    this.retryBaseMs = options.retryBaseMs ?? Number(process.env.AGENT1_TURN_RETRY_BASE_MS ?? "2000")
   }
 
   async startTurn(
@@ -390,21 +404,37 @@ export class TurnService {
         this.bus.publish(turnId, { type: "status", status: "running" })
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const info = providerErrorInfo(error)
+      const message = info.message
       const turn = await this.db.getTurn(turnId).catch(() => null)
       if (controller.signal.aborted || turn?.status === "cancelled") {
         await this.db.setTurnStatus(turnId, "cancelled").catch(() => {})
         this.bus.publish(turnId, { type: "done", status: "cancelled" })
       } else {
-        this.logger.error("turn.failed", { turnId, error: message })
+        this.logger.error("turn.failed", {
+          turnId,
+          error: message,
+          kind: info.kind,
+          status: info.status,
+        })
         if (turn) {
-          await this.db.setTurnStatus(turnId, "failed", message).catch(() => {})
+          await this.db.setTurnStatus(turnId, "failed", message, info).catch(() => {})
           await this.events.append("turn.failed", turn.sessionId, {
             turnId,
             error: message,
+            kind: info.kind,
+            status: info.status,
+            providerMessage: info.providerMessage,
+            retryAfterMs: info.retryAfterMs,
           }).catch(() => {})
         }
-        this.bus.publish(turnId, { type: "error", message })
+        this.bus.publish(turnId, {
+          type: "error",
+          message,
+          kind: info.kind,
+          status: info.status,
+          retryAfterMs: info.retryAfterMs,
+        })
         this.bus.publish(turnId, { type: "done", status: "failed" })
       }
     } finally {
@@ -578,46 +608,104 @@ export class TurnService {
     signal: AbortSignal,
   ): Promise<StepResult> {
     const model = this.models.createModel(resolved)
-    const result = streamText({
-      model,
-      system: this.systemPrompt(session, resolved.model),
-      messages,
-      ...(resolved.model.supportsTools ? { tools: this.tools.definitions() } : {}),
-      stopWhen: stepCountIs(1),
-      maxOutputTokens: resolved.model.maxOutputTokens,
-      ...(resolved.model.supportsTemperature ? { temperature: 0 } : {}),
-      maxRetries: 0,
-      abortSignal: signal,
-    })
+    const system = this.systemPrompt(session, resolved.model)
+    const maxOutputTokens = outputLimit(
+      resolved.model,
+      { estimated: tokenEstimate(messages) + Math.ceil(system.length / 4) },
+      0.01,
+    )
+    let attempt = 0
+    while (true) {
+      let outputStarted = false
+      try {
+        const result = streamText({
+          model,
+          system,
+          messages,
+          ...(resolved.model.supportsTools ? { tools: this.tools.definitions() } : {}),
+          stopWhen: stepCountIs(1),
+          maxOutputTokens,
+          ...(resolved.model.supportsTemperature ? { temperature: 0 } : {}),
+          maxRetries: 0,
+          abortSignal: signal,
+        })
 
-    for await (const part of result.fullStream) {
-      if (part.type === "text-delta") {
-        this.bus.publish(turnId, { type: "delta", text: part.text })
-      } else if (part.type === "error") {
-        throw part.error instanceof Error ? part.error : new Error(String(part.error))
+        for await (const part of result.fullStream) {
+          if (part.type === "text-delta" && part.text.length > 0) {
+            outputStarted = true
+            this.bus.publish(turnId, { type: "delta", text: part.text })
+          } else if (part.type === "tool-call" || part.type === "tool-input-start") {
+            outputStarted = true
+          } else if (part.type === "error") {
+            throw part.error instanceof Error ? part.error : new Error(String(part.error))
+          }
+        }
+
+        const [responseMessages, toolCalls, usage, text] = await Promise.all([
+          result.responseMessages,
+          result.toolCalls,
+          result.usage,
+          result.text,
+        ])
+        return {
+          responseMessages: responseMessages as ModelMessage[],
+          toolCalls: toolCalls.map((call) => ({
+            toolCallId: call.toolCallId,
+            toolName: call.toolName,
+            input: call.input,
+          })),
+          text,
+          usage: {
+            inputTokens: usage.inputTokens ?? 0,
+            outputTokens: usage.outputTokens ?? 0,
+            costUsd: 0,
+          },
+        }
+      } catch (error) {
+        const info = providerErrorInfo(error)
+        if (
+          signal.aborted ||
+          outputStarted ||
+          !isRetryableProviderError(error) ||
+          attempt >= this.maxRetries
+        ) {
+          throw new ProviderTurnError(info, error)
+        }
+        attempt++
+        const delayMs = retryDelayMs(attempt, info, this.retryBaseMs)
+        this.logger.warn("turn.retry_scheduled", {
+          turnId,
+          attempt,
+          delayMs,
+          kind: info.kind,
+          status: info.status,
+        })
+        this.bus.publish(turnId, {
+          type: "retry",
+          attempt,
+          delayMs,
+          message: info.message,
+          kind: info.kind,
+          ...(info.status === undefined ? {} : { status: info.status }),
+        })
+        await this.waitRetry(delayMs, signal)
       }
     }
+  }
 
-    const [responseMessages, toolCalls, usage, text] = await Promise.all([
-      result.responseMessages,
-      result.toolCalls,
-      result.usage,
-      result.text,
-    ])
-    return {
-      responseMessages: responseMessages as ModelMessage[],
-      toolCalls: toolCalls.map((call) => ({
-        toolCallId: call.toolCallId,
-        toolName: call.toolName,
-        input: call.input,
-      })),
-      text,
-      usage: {
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
-        costUsd: 0,
-      },
-    }
+  private async waitRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Aborted")
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort)
+        resolve()
+      }, delayMs)
+      const onAbort = () => {
+        clearTimeout(timer)
+        reject(signal.reason instanceof Error ? signal.reason : new Error("Aborted"))
+      }
+      signal.addEventListener("abort", onAbort, { once: true })
+    })
   }
 
   private async buildHistory(session: Session, model: ResolvedModel["model"]): Promise<ModelMessage[]> {
@@ -647,22 +735,29 @@ export class TurnService {
     resolved: ResolvedModel,
   ): Promise<string> {
     const fallback = `Earlier conversation was compacted (${texts.length} messages).`
-    try {
-      const model = this.models.createModel(resolved)
-      const result = await generateText({
-        model,
-        system:
-          "Summarize the earlier conversation for use as context. Keep decisions, user preferences, open tasks, and facts. Be concise.",
-        prompt: texts.join("\n\n").slice(0, 24_000),
-        maxOutputTokens: 400,
-        ...(resolved.model.supportsTemperature ? { temperature: 0 } : {}),
-        maxRetries: 0,
-        abortSignal: AbortSignal.timeout(20_000),
-      })
-      return result.text.trim() || fallback
-    } catch {
-      return fallback
+    const model = this.models.createModel(resolved)
+    for (let attempt = 0; attempt <= 3; attempt++) {
+      try {
+        const result = await generateText({
+          model,
+          system:
+            "Summarize the earlier conversation for use as context. Keep decisions, user preferences, open tasks, and facts. Be concise.",
+          prompt: texts.join("\n\n").slice(0, 24_000),
+          maxOutputTokens: 400,
+          ...(resolved.model.supportsTemperature ? { temperature: 0 } : {}),
+          maxRetries: 0,
+          abortSignal: AbortSignal.timeout(20_000),
+        })
+        return result.text.trim() || fallback
+      } catch (error) {
+        if (attempt >= 3 || !isOneShotRetryable(error)) return fallback
+        const info = providerErrorInfo(error)
+        const delayMs = retryDelayMs(attempt + 1, info, this.retryBaseMs)
+        this.logger.warn("turn.summary_retry", { attempt: attempt + 1, delayMs, kind: info.kind })
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+      }
     }
+    return fallback
   }
 
   private systemPrompt(session: Session, model: ResolvedModel["model"]): string {
@@ -702,9 +797,14 @@ export class TurnService {
   }
 
   private async fail(turn: Turn, message: string): Promise<void> {
-    await this.db.setTurnStatus(turn.id, "failed", message)
-    await this.events.append("turn.failed", turn.sessionId, { turnId: turn.id, error: message })
-    this.bus.publish(turn.id, { type: "error", message })
+    const details = { kind: "budget", message }
+    await this.db.setTurnStatus(turn.id, "failed", message, details)
+    await this.events.append("turn.failed", turn.sessionId, {
+      turnId: turn.id,
+      error: message,
+      kind: details.kind,
+    })
+    this.bus.publish(turn.id, { type: "error", message, kind: details.kind })
     this.bus.publish(turn.id, { type: "done", status: "failed" })
   }
 }

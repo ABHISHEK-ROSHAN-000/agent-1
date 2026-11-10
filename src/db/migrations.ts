@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import { SqlClient } from "effect/sql"
 import { SqliteMigrator } from "@effect/sql-sqlite-bun"
 
-export const LATEST_SCHEMA_VERSION = 5
+export const LATEST_SCHEMA_VERSION = 6
 
 const initial = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -329,10 +329,19 @@ const providerModels = Effect.gen(function* () {
   yield* Effect.void
 })
 
+const turnErrorDetails = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`ALTER TABLE turns ADD COLUMN error_details_json TEXT`
+
+  yield* Effect.void
+})
+
 export const migrationLoader = SqliteMigrator.fromRecord({
   "0001_initial": initial,
   "0002_agent_runtime": agentRuntime,
   "0003_permissions": permissions,
   "0004_core_tools": coreTools,
   "0005_provider_models": providerModels,
+  "0006_turn_error_details": turnErrorDetails,
 })

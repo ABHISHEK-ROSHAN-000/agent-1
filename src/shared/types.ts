@@ -90,6 +90,14 @@ export type TurnStatus =
   | "failed"
   | "cancelled"
 
+export interface TurnErrorDetails {
+  readonly kind: string
+  readonly message: string
+  readonly status?: number
+  readonly providerMessage?: string
+  readonly retryAfterMs?: number
+}
+
 export interface Turn {
   readonly id: string
   readonly sessionId: string
@@ -102,6 +110,7 @@ export interface Turn {
   readonly outputTokens: number
   readonly costUsd: number
   readonly error: string | null
+  readonly errorDetails?: TurnErrorDetails | null
   readonly startedAt: string
   readonly updatedAt: string
   readonly completedAt: string | null

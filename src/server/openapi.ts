@@ -275,17 +275,6 @@ export const openApiDocument = {
         responses: { "200": { description: "Default updated" } },
       },
     },
-    "/v1/models/{providerId}/{modelId}/test": {
-      post: {
-        summary: "Probe a provider model for text and tools",
-        security: [{ basicAuth: [] }, { sessionCookie: [] }],
-        parameters: [
-          { name: "providerId", in: "path", required: true, schema: { type: "string" } },
-          { name: "modelId", in: "path", required: true, schema: { type: "string" } },
-        ],
-        responses: { "200": { description: "Probe result" } },
-      },
-    },
     "/v1/sessions": {
       get: {
         summary: "List sessions",

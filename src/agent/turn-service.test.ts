@@ -26,7 +26,10 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true, maxRetries: 5 })
 })
 
-async function setup(contextWindow = 8_192) {
+async function setup(
+  contextWindow = 8_192,
+  retry: { maxRetries?: number; retryBaseMs?: number } = { maxRetries: 3, retryBaseMs: 10 },
+) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "agent-1-turn-"))
   dirs.push(dir)
   const db = await Database.open({
@@ -54,7 +57,7 @@ async function setup(contextWindow = 8_192) {
       },
     ],
   })
-  const modelService = new ModelService(providerService, logger)
+  const modelService = new ModelService(providerService)
   const events = new EventService(db, logger)
   const permissions = new PermissionService(db, logger)
   const workspace = new WorkspaceService(db, logger, dir)
@@ -64,6 +67,7 @@ async function setup(contextWindow = 8_192) {
   const turns = new TurnService(db, events, modelService, providerService, permissions, tools, bus, logger, {
     maxSteps: 4,
     maxWallMs: 10_000,
+    ...retry,
   })
   const session = await db.createSession("Test chat")
   return {
@@ -83,11 +87,7 @@ async function setup(contextWindow = 8_192) {
 
 describe("Turn runtime", () => {
   test("completes a streaming chat turn and persists messages", async () => {
-    const { db, modelService, turns, session } = await setup()
-    const tested = await modelService.test("test-provider", "fake-model")
-    expect(tested.ok).toBe(true)
-    expect(tested.supportsTools).toBe(true)
-
+    const { db, turns, session } = await setup()
     const started = await turns.startTurn(session.id, "Hello there")
     expect(started.turn.status).toBe("queued")
     const completed = await waitFor(async () => {
@@ -113,6 +113,37 @@ describe("Turn runtime", () => {
     const messages = await turns.listMessages(session.id)
     expect(messages.some((message) => message.role === "tool")).toBe(true)
     expect(messages.some((message) => message.text.includes("Fake final answer"))).toBe(true)
+  })
+
+  test("retries a transient provider failure before output", async () => {
+    const { db, fake, turns, session, bus } = await setup()
+    const streamEvents: string[] = []
+    fake.failNext(500)
+    const started = await turns.startTurn(session.id, "Hello after retry")
+    const off = bus.subscribe(started.turn.id, (event) => streamEvents.push(event.type))
+    const completed = await waitFor(async () => {
+      const turn = await db.getTurn(started.turn.id)
+      return turn && (turn.status === "completed" || turn.status === "failed") ? turn : undefined
+    }, 10_000)
+    off()
+    expect(completed.status).toBe("completed")
+    expect(fake.requests.length).toBeGreaterThanOrEqual(2)
+    expect(streamEvents).toContain("retry")
+  })
+
+  test("does not retry a deterministic 400 response", async () => {
+    const { db, fake, turns, session } = await setup()
+    fake.failNext(400)
+    const started = await turns.startTurn(session.id, "Hello no retry")
+    const completed = await waitFor(async () => {
+      const turn = await db.getTurn(started.turn.id)
+      return turn && (turn.status === "completed" || turn.status === "failed") ? turn : undefined
+    }, 10_000)
+    expect(completed.status).toBe("failed")
+    expect(fake.requests).toHaveLength(1)
+    expect(completed.error).toContain("HTTP 400")
+    expect(completed.errorDetails?.kind).toBe("invalid-request")
+    expect(completed.errorDetails?.status).toBe(400)
   })
 
   test("compacts a long session into a stored summary", async () => {
