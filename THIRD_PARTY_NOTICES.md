@@ -13,9 +13,18 @@ The full MIT license is preserved at `web/src/opencode/LICENSE`.
 
 Vendored areas include design tokens, base styles, app surface CSS, icon catalog
 data, and presentation patterns from `packages/ui`, `packages/session-ui`, and
-`packages/app`. Agent-1 adds its own data layer, routes, authentication,
-permission behavior, wordmark, and product names. OpenCode branding, logos, and
-telemetry are not used.
+`packages/app`, plus the terminal QR encoder in `src/cli/qr.ts` from
+`packages/util/src/qr.ts`. Agent-1 adds its own data layer, routes,
+authentication, permission behavior, wordmark, and product names. OpenCode
+branding, logos, and telemetry are not used.
+
+The QR encoder follows Project Nayuki's MIT-licensed QR Code generator.
+
+## OpenTunnel
+
+Remote access uses `@opentunnel/client` `0.6.2` from
+https://github.com/anomalyco/opentunnel, licensed MIT. Agent-1 uses
+OpenTunnel's standard/default profile and storage exactly as OpenCode does.
 
 ## Pierre
 

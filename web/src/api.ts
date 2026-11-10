@@ -116,6 +116,16 @@ export interface ModelProfile {
   updatedAt: string
 }
 
+export interface RemoteStatus {
+  enabled: boolean
+  accepted: boolean
+  state: "off" | "starting" | "ready" | "error"
+  route: string
+  url?: string
+  error?: string
+  urls: string[]
+}
+
 export interface ContextInfo {
   session: Session
   model: ModelProfile | null
@@ -166,6 +176,8 @@ export const api = {
       status: string
       version: string
       phase: string
+      urls: string[]
+      remote: RemoteStatus
       capabilities: string[]
       eventSeq: number
       uptimeSeconds: number

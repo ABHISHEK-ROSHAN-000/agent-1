@@ -190,8 +190,23 @@ export interface LoginResult {
 }
 
 export interface PairingResult {
-  readonly token: string
+  readonly code: string
+  readonly url: string
+  readonly urls: readonly string[]
   readonly expiresAt: string
+  readonly expiresIn: number
+}
+
+export type RemoteTunnelState = "off" | "starting" | "ready" | "error"
+
+export interface RemoteStatus {
+  readonly enabled: boolean
+  readonly accepted: boolean
+  readonly state: RemoteTunnelState
+  readonly route: string
+  readonly url?: string
+  readonly error?: string
+  readonly urls: readonly string[]
 }
 
 export interface HealthInfo {

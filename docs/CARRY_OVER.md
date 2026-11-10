@@ -18,7 +18,7 @@ Electron 40.10.2 was the only version whose binary downloaded reliably in this e
 
 ## 3. DPAPI
 
-Windows DPAPI works for the shared password and the OpenTunnel identity. Store encrypted blobs under the per-user data directory. Never print or export them.
+Windows DPAPI works for the shared password, model API keys, and connector secrets. Store encrypted blobs under the per-user data directory. OpenTunnel's own default identity storage is used instead of wrapping it in DPAPI, because Phase 6 explicitly matches OpenCode's default profile behavior.
 
 ## 4. OpenTunnel route behavior
 
@@ -26,7 +26,7 @@ A real route and pairing link were confirmed, then disabled. The hosted service 
 
 ## 5. PROXY v2
 
-Tunnelled requests arrive from loopback. The visitor address is available only through the PROXY protocol. Per-visitor rate limits must trust the PROXY data only from the local ingress process, with a secret, and must strip spoofed headers.
+Tunnelled requests arrive from loopback. The visitor address is available only through the PROXY protocol. Phase 6 runs a loopback PROXY v2 HTTP bridge, strips spoofed visitor headers, and enforces per-visitor limits at that bridge. The daemon still authorizes every request independently; public host/URL is never authentication.
 
 ## 6. Crash test design
 

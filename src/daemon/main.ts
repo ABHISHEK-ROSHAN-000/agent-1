@@ -11,6 +11,7 @@ import { JournalService } from "../tools/journal-service"
 import { ToolService } from "../tools/tool-service"
 import { TurnBus } from "../agent/turn-bus"
 import { TurnService } from "../agent/turn-service"
+import { RemoteService } from "../remote/remote-service"
 import { App } from "../server/app"
 import { acquireLock } from "./lock"
 import { removeState, writeState } from "./state"
@@ -30,6 +31,7 @@ async function main(): Promise<void> {
   let server: ReturnType<typeof Bun.serve> | undefined
   let events: EventService | undefined
   let stopping = false
+  let remoteService: RemoteService | undefined
 
   const shutdown = async (reason: string): Promise<void> => {
     if (stopping) return
@@ -40,6 +42,7 @@ async function main(): Promise<void> {
     } catch {
       // The database may already be closing.
     }
+    await remoteService?.stop()
     try {
       server?.stop(true)
     } catch {
@@ -73,6 +76,7 @@ async function main(): Promise<void> {
     const tools = new ToolService(workspace, journal, logger)
     const turnBus = new TurnBus()
     const turns = new TurnService(db, events, models, permissions, tools, turnBus, logger)
+    remoteService = new RemoteService(db, logger, () => `127.0.0.1:${server?.port ?? 0}`)
 
     const app = new App({
       config,
@@ -86,6 +90,7 @@ async function main(): Promise<void> {
       workspace,
       journal,
       tools,
+      remote: remoteService,
       logger,
       startedAt: Date.now(),
       shutdown: (reason) => void shutdown(reason),
@@ -109,6 +114,7 @@ async function main(): Promise<void> {
       startedAt: new Date().toISOString(),
     }
     writeState(config.statePath, state)
+    await remoteService.initialize()
     await events.append("service.started", null, {
       version: config.version,
       phase: PHASE,

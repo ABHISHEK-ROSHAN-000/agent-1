@@ -13,6 +13,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       positionals.push(...argv.slice(index + 1))
       break
     }
+    if (arg === "-h" || arg === "-y") {
+      flags.set(arg === "-h" ? "help" : "yes", true)
+      continue
+    }
     if (arg.startsWith("--")) {
       const equals = arg.indexOf("=")
       if (equals > 0) {
@@ -21,7 +25,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       }
       const name = arg.slice(2)
       const next = argv[index + 1]
-      if (next === undefined || next.startsWith("--")) {
+      if (next === undefined || next.startsWith("--") || next === "-h" || next === "-y") {
         flags.set(name, true)
       } else {
         flags.set(name, next)

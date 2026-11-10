@@ -21,6 +21,7 @@ import type { WorkspaceService } from "../tools/workspace-service"
 import { WorkspaceError } from "../tools/workspace-service"
 import type { JournalService } from "../tools/journal-service"
 import { JournalError } from "../tools/journal-service"
+import type { RemoteService } from "../remote/remote-service"
 import { createTurnStream } from "./turn-stream"
 import { serveWeb } from "./static"
 import {
@@ -31,6 +32,7 @@ import {
   isHostAllowed,
   isOriginAllowed,
   jsonResponse,
+  normalizeHost,
   parseCookies,
   readJson,
   sessionCookie,
@@ -136,6 +138,7 @@ export interface AppDependencies {
   readonly workspace: WorkspaceService
   readonly journal: JournalService
   readonly tools: ToolService
+  readonly remote: RemoteService
   readonly logger: Logger
   readonly startedAt: number
   readonly shutdown: (reason: string) => void | Promise<void>
@@ -150,6 +153,10 @@ function pairingPage(message: string): string {
 <p>${message}</p>
 </body>
 </html>`
+}
+
+export function loggedPath(pathname: string): string {
+  return pathname.startsWith("/auth/connect/") ? "/auth/connect/[redacted]" : pathname
 }
 
 function issueHttpError(error: unknown): HttpError {
@@ -186,6 +193,7 @@ export class App {
   private readonly workspace: WorkspaceService
   private readonly journal: JournalService
   private readonly tools: ToolService
+  private readonly remote: RemoteService
   private readonly logger: Logger
   private readonly startedAt: number
   private readonly shutdown: (reason: string) => void | Promise<void>
@@ -202,6 +210,7 @@ export class App {
     this.workspace = dependencies.workspace
     this.journal = dependencies.journal
     this.tools = dependencies.tools
+    this.remote = dependencies.remote
     this.logger = dependencies.logger
     this.startedAt = dependencies.startedAt
     this.shutdown = dependencies.shutdown
@@ -213,7 +222,7 @@ export class App {
     const url = new URL(request.url)
     let response: Response
     try {
-      if (!isHostAllowed(request.headers.get("host"), this.config.allowedHosts)) {
+      if (!isHostAllowed(request.headers.get("host"), this.allowedHosts())) {
         throw new HttpError(403, "host_not_allowed", "Host header is not allowed")
       }
       response = await this.route(request, url, requestId)
@@ -223,7 +232,7 @@ export class App {
         this.logger.error("http.failed", {
           requestId,
           method: request.method,
-          path: url.pathname,
+          path: loggedPath(url.pathname),
           error: error instanceof Error ? error.message : String(error),
         })
       }
@@ -240,7 +249,7 @@ export class App {
     this.logger.info("http.request", {
       requestId,
       method: request.method,
-      path: url.pathname,
+      path: loggedPath(url.pathname),
       status: response.status,
       durationMs: Math.round(performance.now() - started),
     })
@@ -274,6 +283,8 @@ export class App {
         uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
         eventSeq,
         dataDir: this.config.dataDir,
+        urls: this.pairingUrls(this.requestOrigin(request, url.origin)),
+        remote: await this.remote.status(),
         capabilities: [
           "auth",
           "sessions",
@@ -289,8 +300,30 @@ export class App {
           "workspaces",
           "journal",
           "tools",
+          "remote",
         ],
       })
+    }
+
+    if (path === "/v1/remote" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse(await this.remote.status())
+    }
+
+    if (path === "/v1/remote/accept" && method === "POST") {
+      await this.requireAuth(request)
+      await this.remote.accept()
+      return jsonResponse(await this.remote.status())
+    }
+
+    if (path === "/v1/remote/enable" && method === "POST") {
+      await this.requireAuth(request)
+      return jsonResponse(await this.remote.enable())
+    }
+
+    if (path === "/v1/remote/disable" && method === "POST") {
+      await this.requireAuth(request)
+      return jsonResponse(await this.remote.disable())
     }
 
     if (path === "/v1/auth/login" && method === "POST") {
@@ -304,16 +337,24 @@ export class App {
       return jsonResponse(
         { ok: true },
         200,
-        { "set-cookie": clearSessionCookie(this.config.secureCookies) },
+        { "set-cookie": clearSessionCookie(this.secureFor(request)) },
       )
     }
 
     if (path === "/v1/auth/pair" && method === "POST") {
       await this.requireAuth(request)
       const pairing = await this.auth.createPairingToken()
-      const pairUrl = `${url.origin}/pair?token=${encodeURIComponent(pairing.token)}`
+      const urls = this.pairingUrls(this.requestOrigin(request, url.origin))
+      const primary = urls[0] ?? url.origin
+      const pairUrl = `${primary}/pair?token=${encodeURIComponent(pairing.token)}`
       await this.events.append("auth.pair_created", null, { expiresAt: pairing.expiresAt })
-      return jsonResponse({ url: pairUrl, expiresAt: pairing.expiresAt })
+      return jsonResponse({
+        code: pairing.token,
+        url: pairUrl,
+        urls,
+        expiresAt: pairing.expiresAt,
+        expiresIn: Math.max(1, Math.ceil((Date.parse(pairing.expiresAt) - Date.now()) / 1000)),
+      })
     }
 
     if (path === "/v1/auth/rotate" && method === "POST") {
@@ -323,12 +364,23 @@ export class App {
       return jsonResponse(
         { password },
         200,
-        { "set-cookie": clearSessionCookie(this.config.secureCookies) },
+        { "set-cookie": clearSessionCookie(this.secureFor(request)) },
       )
     }
 
     if (path === "/pair" && method === "GET") {
       return this.pair(request, url)
+    }
+
+    const connectMatch = /^\/auth\/connect\/([^/]+)$/.exec(path)
+    if (connectMatch && method === "GET") {
+      let code: string
+      try {
+        code = decodeURIComponent(connectMatch[1] ?? "")
+      } catch {
+        throw new HttpError(400, "invalid_pairing_link", "Invalid pairing link")
+      }
+      return this.connectPairing(request, code)
     }
 
     if (path === "/v1/tools" && method === "GET") {
@@ -675,7 +727,7 @@ export class App {
 
     let token: { token: string; expiresAt: string } | null
     try {
-      token = await this.auth.login(parsed.data.password)
+      token = await this.auth.login(parsed.data.password, this.loginRateKey(request))
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("Too many login attempts")) {
         throw new HttpError(429, "rate_limited", error.message)
@@ -691,12 +743,70 @@ export class App {
     return jsonResponse(
       { ok: true, expiresAt: token.expiresAt },
       200,
-      { "set-cookie": sessionCookie(token.token, SESSION_TTL_SECONDS, this.config.secureCookies) },
+      { "set-cookie": sessionCookie(token.token, SESSION_TTL_SECONDS, this.secureFor(request)) },
     )
+  }
+
+  private allowedHosts(): string[] {
+    return [...this.config.allowedHosts, ...this.remote.allowedHosts()]
+  }
+
+  private isRemoteRequest(request: Request): boolean {
+    const host = normalizeHost(request.headers.get("host") ?? "")
+    if (!host) return false
+    if (this.remote.isRemoteHost(host)) return true
+    if (!this.config.publicUrl) return false
+    try {
+      return new URL(this.config.publicUrl).hostname.toLowerCase() === host
+    } catch {
+      return false
+    }
+  }
+
+  private secureFor(request: Request): boolean {
+    return this.config.secureCookies || this.isRemoteRequest(request)
+  }
+
+  private loginRateKey(request: Request): string {
+    if (!this.isRemoteRequest(request)) return "local"
+    const visitor = request.headers.get("x-agent1-visitor")
+    return visitor ? `remote:${visitor}` : `remote:${normalizeHost(request.headers.get("host") ?? "") ?? "unknown"}`
+  }
+
+  private requestOrigin(request: Request, fallback: string): string {
+    const host = normalizeHost(request.headers.get("host") ?? "")
+    if (!host) return fallback
+    const remoteUrl = this.remote.publicUrl()
+    if (remoteUrl && this.remote.isRemoteHost(host)) return remoteUrl
+    if (this.config.publicUrl) {
+      try {
+        if (new URL(this.config.publicUrl).hostname.toLowerCase() === host) return this.config.publicUrl
+      } catch {
+        // The config parser already validates public URLs.
+      }
+    }
+    return fallback
+  }
+
+  private pairingUrls(origin: string): string[] {
+    const urls = new Set<string>([origin])
+    if (this.config.publicUrl) urls.add(this.config.publicUrl)
+    const remoteUrl = this.remote.publicUrl()
+    if (remoteUrl) urls.add(remoteUrl)
+    return [...urls]
   }
 
   private async pair(request: Request, url: URL): Promise<Response> {
     const token = url.searchParams.get("token")
+    if (!token) return htmlResponse(pairingPage("Missing pairing token."), 400)
+    return this.consumePairing(request, token)
+  }
+
+  private async connectPairing(request: Request, code: string): Promise<Response> {
+    return this.consumePairing(request, code)
+  }
+
+  private async consumePairing(request: Request, token: string): Promise<Response> {
     if (!token) return htmlResponse(pairingPage("Missing pairing token."), 400)
     const session = await this.auth.consumePairingToken(token)
     if (!session) return htmlResponse(pairingPage("This pairing link is invalid, expired, or already used."), 400)
@@ -705,7 +815,7 @@ export class App {
       status: 303,
       headers: {
         location: "/",
-        "set-cookie": sessionCookie(session.token, SESSION_TTL_SECONDS, this.config.secureCookies),
+        "set-cookie": sessionCookie(session.token, SESSION_TTL_SECONDS, this.secureFor(request)),
       },
     })
   }
@@ -769,7 +879,7 @@ export class App {
     if (
       auth.kind === "cookie" &&
       request.method.toUpperCase() !== "GET" &&
-      !isOriginAllowed(request.headers.get("origin"), this.config.allowedHosts)
+      !isOriginAllowed(request.headers.get("origin"), this.allowedHosts())
     ) {
       throw new HttpError(403, "origin_not_allowed", "Origin is not allowed")
     }

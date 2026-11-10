@@ -197,6 +197,10 @@ describe("Phase 1 HTTP API", () => {
 
     const pairing = await instance.client.pair()
     const pendingPairing = await instance.client.pair()
+    expect(pairing.code).toBeString()
+    expect(pairing.urls).toContain(instance.state.url)
+    expect(pairing.expiresIn).toBeGreaterThan(0)
+    expect((await instance.client.remote()).state).toBe("off")
     const paired = await fetch(pairing.url, { redirect: "manual" })
     expect(paired.status).toBe(303)
     expect(paired.headers.get("set-cookie")).toContain("agent1_session=")

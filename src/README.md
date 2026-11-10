@@ -1,6 +1,6 @@
 # Source map
 
-Phase 1 through Phase 4 modules are implemented. Later-phase directories are planned only.
+Phase 1 through Phase 6 modules are implemented. Later-phase directories are planned only.
 
 | Directory | Responsibility | Phase |
 |---|---|---|
@@ -8,7 +8,7 @@ Phase 1 through Phase 4 modules are implemented. Later-phase directories are pla
 | `cli/` | command-line client | 0 |
 | `daemon/` | detached lifecycle, lock, state file, graceful shutdown | 1 |
 | `db/` | SQLite WAL, migrations, backups | 1 |
-| `server/` | `/v1` API, auth middleware, SSE, static PWA, OpenAPI | 1 |
+| `server/` | `/v1` API, auth middleware, pairing, SSE, static PWA, OpenAPI | 1–6 |
 | `events/` | durable event log and replay | 1 |
 | `agent/` | turn loop, prompts, checkpoints, compaction, budgets | 2 |
 | `models/` | cloud and local provider profiles, capability probe | 2 |
@@ -19,7 +19,7 @@ Phase 1 through Phase 4 modules are implemented. Later-phase directories are pla
 | `mcp/` | guarded MCP host and pinned tool manifests | 9 |
 | `scheduler/` | awake-only agent schedules and briefings | 10 |
 | `skills/` | skill loading, learning review, curator, ledger | 11 |
-| `remote/` | OpenTunnel lifecycle and PROXY ingress | 6 |
+| `remote/` | OpenTunnel lifecycle, PROXY v2 bridge, visitor limits | 6 |
 | `tui/` | OpenTUI + Solid client | 12 |
 | `client/` | generated typed API client | 1 |
 | `shared/` | shared API and event types | 1 |

@@ -39,7 +39,8 @@ bun src/cli/main.ts service start
 ```
 
 Open the URL printed by `service start`, or run `bun src/cli/main.ts pair` for a
-one-time pairing link and terminal QR code.
+one-time pairing link. Use `bun src/cli/main.ts pair --remote` to expose the
+public HTTPS tunnel URL and print the remote QR payload.
 
 For development:
 
@@ -52,17 +53,24 @@ bun src/cli/main.ts service start
 bun run web:dev
 ```
 
-The Vite dev server proxies `/v1` and `/pair` to
+The Vite dev server proxies `/v1`, `/pair`, and `/auth/connect` to
 `AGENT1_DEV_SERVER_URL` (default `http://127.0.0.1:49499`). QR camera scanning
 requires a secure context (`localhost` or HTTPS).
 
 To verify pairing manually:
 
-1. Run `bun src/cli/main.ts pair` and leave the terminal QR visible.
-2. Open `/login` from `localhost` or an HTTPS remote URL.
-3. Choose **Scan QR code** and point the camera at the terminal QR.
+1. For a remote phone connection, run `agent-1 pair --remote` (or
+   `agent-1 pair --remote --yes`). This enables OpenTunnel and prints the public
+   `/auth/connect/<code>` link and remote QR payload.
+2. On the phone, open the printed public URL/link first. A normal camera cannot
+   open the JSON QR payload directly.
+3. From the Agent-1 login screen, choose **Scan QR code** and scan the terminal
+   QR with the in-app scanner.
 4. If no camera is available, use **Upload a QR image instead** with a screenshot
-   of the terminal QR. Both paths redeem the same one-time pairing link.
+   of the terminal QR.
+
+`agent-1 pair` without `--remote` prints local links and the SSH-forwarding hint,
+matching OpenCode. It intentionally does not print a loopback QR code.
 
 ## Surfaces
 

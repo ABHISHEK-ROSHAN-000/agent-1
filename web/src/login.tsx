@@ -104,6 +104,20 @@ export function LoginPage() {
     }
     setError(undefined)
     try {
+      if (value.startsWith("{")) {
+        const payload = JSON.parse(value) as { code?: unknown; urls?: unknown }
+        if (
+          typeof payload.code !== "string" ||
+          !Array.isArray(payload.urls) ||
+          payload.urls.length === 0 ||
+          !payload.urls.every((entry) => typeof entry === "string")
+        ) {
+          throw new Error("Pairing QR payload is invalid")
+        }
+        const target = payload.urls[0] as string
+        window.location.assign(new URL(`/auth/connect/${encodeURIComponent(payload.code)}`, target).href)
+        return
+      }
       if (value.startsWith("http://") || value.startsWith("https://")) {
         const url = new URL(value)
         if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Unsupported link")

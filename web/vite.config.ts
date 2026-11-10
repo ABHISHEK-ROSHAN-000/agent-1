@@ -36,7 +36,7 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: "/index.html",
-        navigateFallbackDenylist: [/^\/v1\//, /^\/pair/],
+        navigateFallbackDenylist: [/^\/v1\//, /^\/pair/, /^\/auth\/connect\//],
         globPatterns: [
           "**/*.{css,html,svg,woff2,ttf}",
           "assets/index-*.js",
@@ -62,6 +62,7 @@ export default defineConfig({
     proxy: {
       "/v1": process.env.AGENT1_DEV_SERVER_URL ?? "http://127.0.0.1:49499",
       "/pair": process.env.AGENT1_DEV_SERVER_URL ?? "http://127.0.0.1:49499",
+      "/auth/connect": process.env.AGENT1_DEV_SERVER_URL ?? "http://127.0.0.1:49499",
     },
   },
   build: {

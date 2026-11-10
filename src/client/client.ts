@@ -6,6 +6,7 @@ import type {
   ModelProfile,
   ModelProfileInput,
   PermissionRule,
+  RemoteStatus,
   Turn,
   Workspace,
 } from "../shared/types"
@@ -109,7 +110,17 @@ export class AgentOneClient {
     return this.request("GET", "/v1/health")
   }
 
-  info(): Promise<Record<string, unknown>> {
+  info(): Promise<{
+    status: string
+    product: string
+    version: string
+    phase: string
+    uptimeSeconds: number
+    eventSeq: number
+    urls: string[]
+    remote: RemoteStatus
+    [key: string]: unknown
+  }> {
     return this.request("GET", "/v1/info")
   }
 
@@ -137,8 +148,30 @@ export class AgentOneClient {
     }
   }
 
-  async pair(): Promise<{ url: string; expiresAt: string }> {
+  async pair(): Promise<{
+    code: string
+    url: string
+    urls: string[]
+    expiresAt: string
+    expiresIn: number
+  }> {
     return this.request("POST", "/v1/auth/pair", {})
+  }
+
+  remote(): Promise<RemoteStatus> {
+    return this.request("GET", "/v1/remote")
+  }
+
+  acceptRemote(): Promise<RemoteStatus> {
+    return this.request("POST", "/v1/remote/accept", {})
+  }
+
+  enableRemote(): Promise<RemoteStatus> {
+    return this.request("POST", "/v1/remote/enable", {})
+  }
+
+  disableRemote(): Promise<RemoteStatus> {
+    return this.request("POST", "/v1/remote/disable", {})
   }
 
   async rotatePassword(): Promise<{ password: string }> {

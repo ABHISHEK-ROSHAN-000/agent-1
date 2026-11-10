@@ -1,11 +1,13 @@
+import { EOL } from "node:os"
+import { createInterface } from "node:readline/promises"
 import { parseArgs, flagString, hasFlag, type ParsedArgs } from "./args"
+import { renderUnicodeCompact } from "./qr"
 import { CLI_NAME, PRODUCT_NAME, VERSION } from "../core/version"
 import { ensureDataDirs, resolveConfig, type AppConfig } from "../core/config"
 import { SecretStore } from "../auth/secret-store"
 import { AgentOneClient } from "../client/client"
 import { autostartStatus, disableAutostart, enableAutostart } from "../daemon/autostart"
-import { startService, stopService, serviceStatus } from "../daemon/service"
-import * as QRCode from "qrcode-terminal"
+import { startService, stopService, serviceStatus, type StatusResult } from "../daemon/service"
 
 const HELP = `${PRODUCT_NAME} ${VERSION}
 
@@ -16,7 +18,8 @@ Commands:
   service autostart on|off|status
   status
   auth show|rotate
-  pair
+  pair [--remote] [--url <url>] [--yes]
+  remote on [--yes]|off|status
   session create [--title <title>]
   session list
   model list
@@ -199,20 +202,236 @@ async function authCommand(parsed: ParsedArgs): Promise<void> {
   throw new Error("Usage: agent-1 auth show|rotate")
 }
 
+const PAIR_HELP = `Usage: ${CLI_NAME} pair [--remote] [--url <url>] [--yes]
+
+Print one-time links to connect a browser or app.
+
+Options:
+  --remote          Pair through the OpenTunnel remote address, enabling remote
+                    access if needed (exposes the server to the internet)
+  --url <url>       Use an external HTTP(S) server URL in pairing links
+  --yes, -y         Accept exposing the server to the internet when --remote
+                    enables remote access for the first time
+  --json            Print machine-readable JSON
+`
+
+const remoteWarning = [
+  "This will expose your Agent-1 server to the internet.",
+  "Traffic is end-to-end encrypted, and access requires your server password.",
+  "To pair locally instead, run `agent-1 pair` without the --remote flag.",
+].join(EOL)
+
+function pairingAddress(value: string): string {
+  const url = new URL(value)
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new Error("Invalid pairing URL")
+  }
+  return url.href.replace(/\/+$/, "")
+}
+
+function isLoopback(hostname: string): boolean {
+  return hostname === "localhost" || hostname.endsWith(".localhost") || hostname.startsWith("127.") || hostname === "[::1]"
+}
+
+async function ensureRunning(config: AppConfig): Promise<StatusResult & { state: NonNullable<StatusResult["state"]> }> {
+  let status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) {
+    ensureDataDirs(config)
+    const started = await startService(config)
+    status = { status: "running", state: started.state, healthy: true }
+  }
+  return status as StatusResult & { state: NonNullable<StatusResult["state"]> }
+}
+
+async function waitForRemote(client: AgentOneClient): Promise<{ url: string; urls: string[] }> {
+  const deadline = Date.now() + 3 * 60_000
+  let lastError: string | undefined
+  while (Date.now() < deadline) {
+    try {
+      const status = await client.remote()
+      if (status.url) return { url: status.url, urls: [...status.urls] }
+      lastError = status.error
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+    }
+    await Bun.sleep(1_000)
+  }
+  throw new Error(
+    [
+      "Timed out waiting for the remote tunnel; run `agent-1 pair --remote` again to retry.",
+      lastError ? `Last error: ${lastError}` : "",
+    ]
+      .filter(Boolean)
+      .join(EOL),
+  )
+}
+
+async function confirmRemote(): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return false
+  const terminal = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    const answer = await terminal.question("Expose your server to the internet? [Y/n] ")
+    return answer.trim().toLowerCase() !== "n" && answer.trim().toLowerCase() !== "no"
+  } finally {
+    terminal.close()
+  }
+}
+
 async function pairCommand(parsed: ParsedArgs): Promise<void> {
   const config = configFor(parsed)
+  const remoteFlag = hasFlag(parsed, "remote")
+  const yes = hasFlag(parsed, "yes") || hasFlag(parsed, "y") || parsed.positionals.includes("-y")
+  const rawUrl = flagString(parsed, "url")
+  const hasUrl = hasFlag(parsed, "url")
+  if (remoteFlag && hasUrl) throw new Error("--remote cannot be combined with --url")
+  if (hasUrl && !rawUrl) throw new Error("--url requires an HTTP(S) URL")
+  const url = rawUrl ? pairingAddress(rawUrl) : undefined
+  const status = await ensureRunning(config)
   const password = await passwordFor(config)
-  const status = await serviceStatus(config)
-  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
   const client = new AgentOneClient({ baseUrl: status.state.url, password })
-  const pairing = await client.pair()
-  if (hasFlag(parsed, "json")) {
-    output(true, pairing, "")
-  } else {
-    process.stdout.write(`Pairing link: ${pairing.url}\nExpires: ${pairing.expiresAt}\n\n`)
-    QRCode.generate(pairing.url, { small: true })
-    process.stdout.write("\nScan the QR code with the Agent-1 login screen, or paste the link.\n")
+  let remote = await client.remote()
+
+  if (remoteFlag) {
+    if (!remote.accepted && !remote.enabled) {
+      process.stderr.write(remoteWarning + EOL)
+      if (!yes) {
+        if (!process.stdin.isTTY || !process.stdout.isTTY) {
+          process.stderr.write("Run interactively or pass --yes to continue." + EOL)
+          process.exitCode = 1
+          return
+        }
+        if (!(await confirmRemote())) {
+          process.stderr.write("Remote access was not enabled. To pair locally, run `agent-1 pair`." + EOL)
+          return
+        }
+      }
+      await client.acceptRemote()
+    }
+    if (!remote.enabled || remote.state === "error" || remote.state === "off") await client.enableRemote()
+    remote = await client.remote()
+    if (!remote.url) {
+      process.stderr.write("Setting up remote access; this can take a minute..." + EOL)
+      remote = await waitForRemote(client).then((value) => ({ ...remote, url: value.url, urls: value.urls }))
+    }
   }
+
+  const pairing = await client.pair()
+  const urls = remoteFlag
+    ? pairing.urls.filter((value) => !isLoopback(new URL(value).hostname))
+    : url
+      ? [url]
+      : pairing.urls
+  if (remoteFlag && urls.length === 0) throw new Error("Remote tunnel did not expose a public URL")
+  const links = urls.map((base) => new URL(`/auth/connect/${encodeURIComponent(pairing.code)}`, base).href)
+  const remoteUrls = urls.filter((value) => !isLoopback(new URL(value).hostname))
+  const minutes = Math.max(1, Math.round(pairing.expiresIn / 60))
+
+  if (hasFlag(parsed, "json")) {
+    output(true, { ...pairing, links, remoteUrls }, "")
+    return
+  }
+
+  const lines = [
+    "",
+    `  Open a link to connect. Links work once and expire in ${minutes} minutes.`,
+    "",
+    ...(links.length ? links.map((link) => `  ${link}`) : ["  (no server URLs)"]),
+  ]
+  if (remoteUrls.length) {
+    lines.push(
+      "",
+      ...renderUnicodeCompact(JSON.stringify({ code: pairing.code, urls: remoteUrls }), { border: 2 })
+        .split("\n")
+        .map((line) => "  " + line),
+    )
+  }
+  lines.push("")
+  process.stdout.write(lines.join(EOL) + EOL)
+
+  if (!remoteFlag && !hasUrl) {
+    const endpoint = new URL(status.state.url)
+    if (isLoopback(endpoint.hostname)) {
+      process.stderr.write(
+        [
+          "  Over SSH? Forward the port, then open the link on your machine:",
+          `  ssh -L ${endpoint.port}:${endpoint.hostname}:${endpoint.port} <host>`,
+          `  If port ${endpoint.port} is busy locally, forward another port and use it in the link.`,
+          "",
+          "  To connect from other devices, run `agent-1 pair --remote`.",
+          "",
+        ].join(EOL),
+      )
+    }
+  }
+}
+
+async function remoteCommand(parsed: ParsedArgs): Promise<void> {
+  const sub = parsed.positionals[1] ?? "status"
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  if (sub === "on") {
+    const status = await ensureRunning(config)
+    const password = await passwordFor(config)
+    const client = new AgentOneClient({ baseUrl: status.state.url, password })
+    let remote = await client.remote()
+    const yes = hasFlag(parsed, "yes") || hasFlag(parsed, "y") || parsed.positionals.includes("-y")
+    if (!remote.accepted && !remote.enabled) {
+      process.stderr.write(remoteWarning + EOL)
+      if (!yes) {
+        if (!process.stdin.isTTY || !process.stdout.isTTY) {
+          process.stderr.write("Run interactively or pass --yes to continue." + EOL)
+          process.exitCode = 1
+          return
+        }
+        if (!(await confirmRemote())) {
+          process.stderr.write("Remote access was not enabled." + EOL)
+          return
+        }
+      }
+      await client.acceptRemote()
+    }
+    if (!remote.enabled || remote.state === "error" || remote.state === "off") await client.enableRemote()
+    remote = await client.remote()
+    if (!remote.url) {
+      process.stderr.write("Setting up remote access; this can take a minute..." + EOL)
+      remote = await waitForRemote(client).then((value) => ({ ...remote, url: value.url, urls: value.urls }))
+    }
+    output(json, remote, [`Remote access: ${remote.state}`, `URL: ${remote.url ?? "—"}`, ""].join(EOL))
+    return
+  }
+  if (sub === "status") {
+    const status = await serviceStatus(config)
+    if (status.status !== "running" || !status.state) {
+      const stopped = { enabled: false, accepted: false, state: "off" as const, route: "", urls: [] }
+      output(json, stopped, "Remote access: stopped")
+      return
+    }
+    const password = await passwordFor(config)
+    const remote = await new AgentOneClient({ baseUrl: status.state.url, password }).remote()
+    if (json) {
+      output(true, remote, "")
+      return
+    }
+    process.stdout.write(
+      [
+        `Remote access: ${remote.enabled ? remote.state : "disabled"}`,
+        `Accepted: ${remote.accepted ? "yes" : "no"}`,
+        `Route: ${remote.route || "—"}`,
+        `URL: ${remote.url ?? "—"}`,
+        ...(remote.error ? [`Error: ${remote.error}`] : []),
+        "",
+      ].join(EOL),
+    )
+    return
+  }
+  if (sub === "off") {
+    const status = await ensureRunning(config)
+    const password = await passwordFor(config)
+    const remote = await new AgentOneClient({ baseUrl: status.state.url, password }).disableRemote()
+    output(json, remote, "Remote access disabled.")
+    return
+  }
+  throw new Error("Usage: agent-1 remote on|off|status")
 }
 
 async function sessionCommand(parsed: ParsedArgs): Promise<void> {
@@ -682,6 +901,10 @@ async function main(argv: readonly string[]): Promise<number> {
     process.stdout.write(`${CLI_NAME} ${VERSION}\n`)
     return 0
   }
+  if (command === "pair" && (hasFlag(parsed, "help") || parsed.positionals.includes("-h"))) {
+    process.stdout.write(PAIR_HELP)
+    return 0
+  }
   if (!command || command === "help" || hasFlag(parsed, "help") || command === "-h") {
     printHelp()
     return 0
@@ -702,6 +925,10 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     if (command === "pair") {
       await pairCommand(parsed)
+      return 0
+    }
+    if (command === "remote") {
+      await remoteCommand(parsed)
       return 0
     }
     if (command === "session") {
@@ -749,4 +976,5 @@ async function main(argv: readonly string[]): Promise<number> {
   }
 }
 
-process.exitCode = await main(process.argv.slice(2))
+const exitCode = await main(process.argv.slice(2))
+if (process.exitCode === undefined) process.exitCode = exitCode

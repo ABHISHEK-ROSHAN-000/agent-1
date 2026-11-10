@@ -246,7 +246,10 @@ describe("Agent-1 web UI", () => {
     await pairedPage.locator(".scan-dialog").waitFor()
     await pairedPage.screenshot({ path: "test-results/qr-upload-dark.png", fullPage: true })
     expect(await Bun.file("test-results/qr-upload-dark.png").exists()).toBe(true)
-    const qr = await QRCode.toBuffer(pairing.url, { type: "png", width: 420, margin: 2 })
+    const qr = await QRCode.toBuffer(
+      JSON.stringify({ code: pairing.code, urls: [daemon.state.url] }),
+      { type: "png", width: 420, margin: 2 },
+    )
     await pairedPage.setInputFiles('input[type="file"]', {
       name: "pairing.png",
       mimeType: "image/png",

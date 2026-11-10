@@ -3,7 +3,7 @@ export const openApiDocument = {
   info: {
     title: "Agent-1 API",
     version: "0.1.0",
-    description: "Local personal assistant daemon. Phase 5: auth, sessions, tools, and the web client.",
+    description: "Local personal assistant daemon. Phase 6: auth, sessions, tools, web client, and remote access.",
   },
   servers: [{ url: "http://127.0.0.1:{port}", variables: { port: { default: "0" } } }],
   components: {
@@ -57,9 +57,44 @@ export const openApiDocument = {
     },
     "/v1/auth/pair": {
       post: {
-        summary: "Create a one-time pairing link",
+        summary: "Create one-time pairing code and links",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
-        responses: { "200": { description: "Pairing URL and expiry" } },
+        responses: { "200": { description: "Pairing code, URLs, and expiry" } },
+      },
+    },
+    "/auth/connect/{code}": {
+      get: {
+        summary: "Redeem a one-time pairing code and set a session cookie",
+        parameters: [{ name: "code", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "303": { description: "Session created" }, "400": { description: "Invalid or expired code" } },
+      },
+    },
+    "/v1/remote": {
+      get: {
+        summary: "Get remote tunnel status",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Remote status" } },
+      },
+    },
+    "/v1/remote/accept": {
+      post: {
+        summary: "Persist remote-access consent",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Remote status" } },
+      },
+    },
+    "/v1/remote/enable": {
+      post: {
+        summary: "Enable and start remote access",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Remote status" } },
+      },
+    },
+    "/v1/remote/disable": {
+      post: {
+        summary: "Disable remote access and close the tunnel",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Remote status" } },
       },
     },
     "/v1/auth/rotate": {
