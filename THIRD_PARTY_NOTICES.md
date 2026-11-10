@@ -20,6 +20,12 @@ branding, logos, and telemetry are not used.
 
 The QR encoder follows Project Nayuki's MIT-licensed QR Code generator.
 
+## Clack
+
+Interactive CLI prompts use `@clack/prompts` and `@clack/core` `1.0.0-alpha.1`,
+licensed MIT (https://github.com/bombshell-dev/clack). These are pinned to the
+same versions used by OpenCode.
+
 ## models.dev
 
 `src/models/catalog/models-dev.json` is a pinned snapshot of provider and model

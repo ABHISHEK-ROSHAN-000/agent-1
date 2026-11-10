@@ -1,5 +1,14 @@
 import { EOL } from "node:os"
 import { createInterface } from "node:readline/promises"
+import {
+  cancel,
+  intro,
+  isCancel,
+  outro,
+  password as passwordPrompt,
+  select,
+  spinner,
+} from "@clack/prompts"
 import { parseArgs, flagString, hasFlag, type ParsedArgs } from "./args"
 import { renderUnicodeCompact } from "./qr"
 import { CLI_NAME, PRODUCT_NAME, VERSION } from "../core/version"
@@ -177,26 +186,10 @@ async function serviceCommand(parsed: ParsedArgs): Promise<void> {
   throw new Error("Usage: agent-1 service start|stop|status|restart|autostart")
 }
 
-async function promptLine(question: string, secret = false): Promise<string> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error("This action needs an interactive terminal")
-  }
-  const terminal = createInterface({ input: process.stdin, output: process.stdout, terminal: true })
-  if (secret) {
-    process.stdout.write(question)
-    ;(terminal as unknown as { _writeToOutput?: (value: string) => void })._writeToOutput = () => undefined
-    try {
-      const answer = await terminal.question("")
-      process.stdout.write("\n")
-      return answer
-    } finally {
-      terminal.close()
-    }
-  }
-  try {
-    return await terminal.question(question)
-  } finally {
-    terminal.close()
+class CliCancelled extends Error {
+  constructor() {
+    super("Cancelled")
+    this.name = "CliCancelled"
   }
 }
 
@@ -210,26 +203,96 @@ async function providerClient(parsed: ParsedArgs): Promise<{
   return { client: new AgentOneClient({ baseUrl: status.state.url, password }), config }
 }
 
+const PROVIDER_PRIORITY = ["openrouter", "openai", "lmstudio", "ollama"]
+
+function orderedProviders<T extends { id: string; name: string }>(providers: readonly T[]): T[] {
+  return [...providers].sort((left, right) => {
+    const leftIndex = PROVIDER_PRIORITY.indexOf(left.id)
+    const rightIndex = PROVIDER_PRIORITY.indexOf(right.id)
+    if (leftIndex >= 0 || rightIndex >= 0) {
+      if (leftIndex < 0) return 1
+      if (rightIndex < 0) return -1
+      return leftIndex - rightIndex
+    }
+    return left.name.localeCompare(right.name)
+  })
+}
+
+function cancelled(): never {
+  cancel("Cancelled")
+  throw new CliCancelled()
+}
+
 async function chooseProvider(
   client: AgentOneClient,
   target: string | undefined,
-): Promise<{ id: string; name: string; environment: readonly string[]; credentials: readonly { id: string; label: string; active: boolean }[] }> {
+): Promise<{
+  id: string
+  name: string
+  kind: "cloud" | "local"
+  environment: readonly string[]
+  credentials: readonly { id: string; label: string; active: boolean }[]
+}> {
   const providers = (await client.listProviders()).providers
   if (target) {
     const normalized = target.toLowerCase()
     const match = providers.find(
-      (provider) => provider.id === target || provider.name.toLowerCase() === normalized || provider.id === normalized,
+      (provider) =>
+        provider.id === target ||
+        provider.name.toLowerCase() === normalized ||
+        provider.id === normalized,
     )
     if (!match) throw new Error(`Provider not found: ${target}`)
     return match
   }
-  if (!process.stdin.isTTY) throw new Error("Pass a provider ID or name when running without an interactive terminal")
-  process.stdout.write(
-    providers.map((provider) => `${provider.id.padEnd(14)} ${provider.name}${provider.connected ? " (connected)" : ""}`).join(EOL) + EOL,
-  )
-  const answer = (await promptLine("Provider: ")).trim()
-  if (!answer) throw new Error("Provider is required")
-  return chooseProvider(client, answer)
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("Pass a provider ID or name when running without an interactive terminal")
+  }
+  const answer = await select({
+    message: "Select provider",
+    initialValue: orderedProviders(providers)[0]?.id,
+    options: orderedProviders(providers).map((provider) => ({
+      value: provider.id,
+      label: provider.name,
+      hint: provider.connected
+        ? `connected · ${provider.source}`
+        : `${provider.modelCount} models`,
+    })),
+    maxItems: 10,
+  })
+  if (isCancel(answer)) cancelled()
+  return providers.find((provider) => provider.id === answer)!
+}
+
+async function chooseCredential(
+  provider: {
+    name: string
+    credentials: readonly { id: string; label: string; active: boolean }[]
+  },
+  requested: string | undefined,
+  action: string,
+): Promise<{ id: string; label: string; active: boolean }> {
+  const match = requested
+    ? provider.credentials.find((credential) => credential.id === requested || credential.label === requested)
+    : provider.credentials.length === 1
+      ? provider.credentials[0]
+      : undefined
+  if (match) return match
+  if (requested) throw new Error("Credential not found")
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("Pass a credential ID or label when running without an interactive terminal")
+  }
+  if (provider.credentials.length === 0) throw new Error(`No stored credentials for ${provider.name}`)
+  const answer = await select({
+    message: `Select credential to ${action}`,
+    options: provider.credentials.map((credential) => ({
+      value: credential.id,
+      label: credential.label,
+      hint: credential.active ? "active" : undefined,
+    })),
+  })
+  if (isCancel(answer)) cancelled()
+  return provider.credentials.find((credential) => credential.id === answer)!
 }
 
 async function authCommand(parsed: ParsedArgs): Promise<void> {
@@ -289,39 +352,60 @@ async function authCommand(parsed: ParsedArgs): Promise<void> {
 
   if (sub === "login") {
     const { client } = await providerClient(parsed)
+    const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
+    if (interactive) intro("Connect a provider")
     const provider = await chooseProvider(client, parsed.positionals[2])
     let key = ""
-    if (process.stdin.isTTY && process.stdout.isTTY) {
-      const hint = provider.environment.length > 0 ? ` (leave blank to use ${provider.environment.join(", ")})` : ""
-      key = await promptLine(`API key${hint}: `, true)
+    if (interactive && (provider.kind === "cloud" || provider.environment.length > 0)) {
+      const hint =
+        provider.environment.length > 0
+          ? ` (leave blank to use ${provider.environment.join(", ")})`
+          : ""
+      const answer = await passwordPrompt({
+        message: `Enter your ${provider.name} API key${hint}`,
+        mask: "*",
+        validate: (value) =>
+          !value && provider.kind === "cloud" && provider.environment.length === 0
+            ? "API key is required"
+            : undefined,
+      })
+      if (isCancel(answer)) cancelled()
+      key = answer
     }
-    const result = await client.connectProvider(provider.id, key || undefined)
-    output(json, result, `Connected to ${result.provider.name}.`)
+    const progress = interactive ? spinner() : undefined
+    progress?.start("Saving credential...")
+    try {
+      const result = await client.connectProvider(provider.id, key || undefined)
+      progress?.stop(`Connected to ${result.provider.name}`)
+      if (interactive) outro("Done")
+      output(json, result, `Connected to ${result.provider.name}.`)
+    } catch (error) {
+      progress?.stop("Authentication failed", 1)
+      throw error
+    }
     return
   }
 
   if (sub === "logout") {
     const { client } = await providerClient(parsed)
+    const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
+    if (interactive) intro("Log out of a provider")
     const provider = await chooseProvider(client, parsed.positionals[2])
-    const requested = parsed.positionals[3]
-    const credential =
-      provider.credentials.find((item) => item.id === requested || item.label === requested) ??
-      (provider.credentials.length === 1 ? provider.credentials[0] : undefined)
-    if (!credential) throw new Error("Pass a credential ID or label")
+    const credential = await chooseCredential(provider, parsed.positionals[3], "remove")
     const result = await client.removeProviderCredential(provider.id, credential.id)
+    if (interactive) outro("Done")
     output(json, result, `Removed ${credential.label} from ${result.provider.name}.`)
     return
   }
 
   if (sub === "switch") {
     const { client } = await providerClient(parsed)
+    const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
+    if (interactive) intro("Switch provider credential")
     const provider = await chooseProvider(client, parsed.positionals[2])
-    const requested = parsed.positionals[3]
-    const credential =
-      provider.credentials.find((item) => item.id === requested || item.label === requested) ??
-      (provider.credentials.length === 1 ? provider.credentials[0] : undefined)
-    if (!credential) throw new Error("Pass a credential ID or label")
+    const credential = await chooseCredential(provider, parsed.positionals[3], "activate")
     const result = await client.activateProviderCredential(provider.id, credential.id)
+    if (interactive) outro("Done")
     output(json, result, `Active credential for ${result.provider.name}: ${credential.label}.`)
     return
   }
@@ -1046,6 +1130,7 @@ async function main(argv: readonly string[]): Promise<number> {
     printHelp(process.stderr)
     return 1
   } catch (error) {
+    if (error instanceof CliCancelled) return 130
     process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`)
     return 1
   }
