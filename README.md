@@ -1,6 +1,6 @@
 # Agent-1
 
-**Status:** Phase 5 complete — the Solid web client/PWA is available from the local daemon with an OpenCode-derived visual foundation.
+**Status:** Phase 5 and 5.1 complete — the Solid web client/PWA is available from the local daemon with an OpenCode-derived visual foundation, Pierre tree/diff review, and PWA lifecycle banners.
 
 Agent-1 is a local, single-user personal assistant daemon for Windows. It will run in the background at sign-in, own sessions, tools, permissions, memory, and the remote tunnel, and serve thin clients: a web app/PWA, a desktop window and tray, and a TUI.
 
@@ -87,19 +87,19 @@ e2e/          Browser and ConPTY tests (Phase 13)
 
 ## Plan
 
-The full plan is at `C:\Users\ABHISHEK\.opencode\plan\PLAN.md` (v0.4). Evidence: [`P1_RESULTS.md`](P1_RESULTS.md), [`P2_RESULTS.md`](P2_RESULTS.md), [`P3_RESULTS.md`](P3_RESULTS.md), [`P4_RESULTS.md`](P4_RESULTS.md), and [`P5_RESULTS.md`](P5_RESULTS.md). The plan covers the product decisions, architecture, permission model, memory and learning design, connectors, MCP guardrails, phases, testing gate, and the installer-last sequence.
+The full plan is at `C:\Users\ABHISHEK\.opencode\plan\PLAN.md` (v0.4). Evidence: [`P1_RESULTS.md`](P1_RESULTS.md), [`P2_RESULTS.md`](P2_RESULTS.md), [`P3_RESULTS.md`](P3_RESULTS.md), [`P4_RESULTS.md`](P4_RESULTS.md), [`P5_RESULTS.md`](P5_RESULTS.md), and [`P5_1_RESULTS.md`](P5_1_RESULTS.md). The plan covers the product decisions, architecture, permission model, memory and learning design, connectors, MCP guardrails, phases, testing gate, and the installer-last sequence.
 
 ## Tests
 
 ```text
 bun run check
-66 pass, 0 fail, 370 expect() calls, 27 files
+66 pass, 0 fail, 372 expect() calls, 27 files
 
 bun run test:e2e
-4 pass, 0 fail, 8 expect() calls, 1 browser suite
+6 pass, 0 fail, 61 expect() calls, 2 browser suites
 ```
 
-Coverage includes Phase 1–4 plus OpenCode-style web surfaces, static serving/CSP, login and pairing, home/new-session/session flows, streaming chat, approval-gated real file moves and journal undo, files/context panels, mobile layout, system light/dark theme, PWA manifest/service-worker checks, and CLI QR pairing. The 500-file injected crash/resume/undo test remains at the tool/journal layer.
+Coverage includes Phase 1–4 plus OpenCode-style web surfaces, static serving/CSP, login and pairing, home/new-session/session flows, streaming chat, approval-gated real file moves and journal undo, files/context panels, Pierre tree/diff review, mobile layout, system light/dark theme, offline/reconnecting/update banners, PWA manifest/service-worker checks, visual pixel baselines, and CLI/QR pairing. The 500-file injected crash/resume/undo test remains at the tool/journal layer.
 
 ## Limits
 
@@ -107,13 +107,13 @@ Coverage includes Phase 1–4 plus OpenCode-style web surfaces, static serving/C
 - OpenCode-only surfaces such as plugins, terminal, voice, multi-server, worktrees, LSP, sharing, and provider-account management are not included.
 - The TUI and Electron desktop wrapper are later.
 - The 500-file crash test is at the tool/journal layer with an injected failure; the browser suite covers a real approval-gated file move and undo, but not a browser-driven 500-file batch.
-- QR camera scanning requires a secure context (`localhost` or HTTPS). The browser suite checks the QR entry point and CLI QR output but cannot emulate a real camera QR scan.
+- QR camera scanning requires a secure context (`localhost` or HTTPS). The browser suite verifies QR image-upload pairing and CLI QR output; a physical camera scan remains a manual check.
 - Web search requires `AGENT1_SEARCH_URL`; there is no default search provider.
 - Shell is non-interactive; SSRF protection uses DNS/redirect checks but Windows per-process egress is a later hardening item.
 - The API binds to loopback only. Remote access is Phase 6.
 - The OpenAPI document is a hand-written contract for the current routes; generated clients/codegen are later.
 - Autostart uses the per-user Startup folder because Task Scheduler registration was denied in the non-elevated development environment. The installer can add a Task Scheduler backend.
-- No memory, connectors, MCP, scheduler, TUI, or desktop wrapper yet. The PWA shell is cached; full offline mode and update-required/asleep banners are later.
+- No memory, connectors, MCP, scheduler, TUI, or desktop wrapper yet. The PWA shell, primary script, fonts, and icons are cached; language/theme chunks are runtime-cached on demand. Offline, reconnecting, asleep, and update-available banners are implemented.
 
 ## License
 

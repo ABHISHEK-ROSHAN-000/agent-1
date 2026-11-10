@@ -38,6 +38,17 @@ function ScannerModal(props: { onClose: () => void; onResult: (value: string) =>
     scanner?.destroy()
   })
 
+  const scanFile = async (file: File | undefined) => {
+    if (!file) return
+    try {
+      const result = await QrScanner.scanImage(file, { returnDetailedScanResult: true })
+      props.onResult(result.data)
+      props.onClose()
+    } catch {
+      setError("No readable QR code was found in that image.")
+    }
+  }
+
   return (
     <div class="scan-modal" onClick={(event) => event.target === event.currentTarget && props.onClose()}>
       <div class="scan-dialog">
@@ -56,6 +67,14 @@ function ScannerModal(props: { onClose: () => void; onResult: (value: string) =>
         <p class="connect-hint" style={{ "margin": "12px 0 0", "text-align": "center" }}>
           Point the camera at the QR code printed by <span class="mono">agent-1 pair</span>.
         </p>
+        <label class="scan-upload">
+          <input
+            type="file"
+            accept="image/*"
+            onChange={(event) => void scanFile(event.currentTarget.files?.[0])}
+          />
+          Upload a QR image instead
+        </label>
       </div>
     </div>
   )

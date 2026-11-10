@@ -26,6 +26,8 @@ test("serves the app shell and immutable hashed assets with security headers", (
   expect(shell.headers.get("content-type")).toContain("text/html")
   expect(shell.headers.get("cache-control")).toBe("no-store")
   expect(shell.headers.get("content-security-policy")).toContain("script-src 'self'")
+  expect(shell.headers.get("content-security-policy")).toContain("img-src 'self' data: blob:")
+  expect(shell.headers.get("content-security-policy")).toContain("worker-src 'self' blob:")
 
   const asset = serveWeb(root, "/assets/app.js")
   expect(asset.status).toBe(200)

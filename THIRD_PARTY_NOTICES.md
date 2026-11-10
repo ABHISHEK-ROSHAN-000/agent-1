@@ -17,6 +17,18 @@ data, and presentation patterns from `packages/ui`, `packages/session-ui`, and
 permission behavior, wordmark, and product names. OpenCode branding, logos, and
 telemetry are not used.
 
+## Pierre
+
+The file tree and code/diff viewer use these Apache-2.0 packages:
+
+- `@pierre/trees` `1.0.0-beta.6`
+- `@pierre/diffs` `1.6.1`
+- `@pierre/highlights` `0.2.0`
+
+Their license texts are preserved at `web/src/opencode/PIERRE-*-LICENSE.md`.
+`@pierre/trees` also includes MIT-licensed ideas/code derived from
+`@headless-tree/core`; see the upstream NOTICE for attribution.
+
 ## Fonts
 
 The web client bundles or references fonts under the SIL Open Font License 1.1:

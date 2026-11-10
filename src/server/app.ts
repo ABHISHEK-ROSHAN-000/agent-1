@@ -1,3 +1,5 @@
+import { readdirSync, statSync } from "node:fs"
+import path from "node:path"
 import { z } from "zod"
 import type { AppConfig } from "../core/config"
 import { PHASE, PRODUCT_NAME } from "../core/config"
@@ -89,6 +91,38 @@ const workspaceSchema = z.object({
 const journalUndoSchema = z.object({ batchId: z.string().min(1).optional() })
 
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
+
+function workspaceFilePaths(root: string, limit = 5_000, maxDepth = 12): string[] {
+  const files: string[] = []
+  const walk = (directory: string, depth: number) => {
+    if (files.length >= limit || depth > maxDepth) return
+    let entries
+    try {
+      entries = readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (files.length >= limit) return
+      if (entry.name === ".git" || entry.name === "node_modules") continue
+      const full = path.join(directory, entry.name)
+      if (entry.isSymbolicLink()) continue
+      if (entry.isDirectory()) {
+        walk(full, depth + 1)
+        continue
+      }
+      if (!entry.isFile()) continue
+      try {
+        if (!statSync(full).isFile()) continue
+      } catch {
+        continue
+      }
+      files.push(path.relative(root, full).split(path.sep).join("/"))
+    }
+  }
+  walk(root, 0)
+  return files
+}
 
 export interface AppDependencies {
   readonly config: AppConfig
@@ -331,6 +365,12 @@ export class App {
       if (!workspace) throw new HttpError(404, "workspace_not_found", "Workspace not found")
       const requested = url.searchParams.get("path") ?? workspace.path
       const resolved = await this.workspace.requireInsideGrant(requested, workspace.path)
+      if (kind === "tree" && url.searchParams.get("recursive") === "1") {
+        return jsonResponse({
+          root: workspace.path,
+          paths: workspaceFilePaths(workspace.path),
+        })
+      }
       if (kind === "tree") {
         return jsonResponse(await this.tools.execute("fs_list", { path: resolved }, {}))
       }

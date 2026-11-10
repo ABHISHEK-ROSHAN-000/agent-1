@@ -16,6 +16,8 @@ daemon API and all approvals go back through the daemon.
 - `vite-plugin-pwa` for the manifest and service worker
 - `solid-sonner` for transient notifications
 - `marked` + DOMPurify for sanitized assistant Markdown
+- `@pierre/trees`, `@pierre/diffs`, and `@pierre/highlights` for the OpenCode-style
+  file tree and code/diff review surfaces
 - Vendored OpenCode presentation tokens, CSS, and icon renderer at pinned commit
   `30e7a4d573cb8f83d186cef682569cb5758ad8f3`
 
@@ -54,6 +56,14 @@ The Vite dev server proxies `/v1` and `/pair` to
 `AGENT1_DEV_SERVER_URL` (default `http://127.0.0.1:49499`). QR camera scanning
 requires a secure context (`localhost` or HTTPS).
 
+To verify pairing manually:
+
+1. Run `bun src/cli/main.ts pair` and leave the terminal QR visible.
+2. Open `/login` from `localhost` or an HTTPS remote URL.
+3. Choose **Scan QR code** and point the camera at the terminal QR.
+4. If no camera is available, use **Upload a QR image instead** with a screenshot
+   of the terminal QR. Both paths redeem the same one-time pairing link.
+
 ## Surfaces
 
 - OpenCode-style connect screen: pairing link, QR scan, password fallback.
@@ -62,10 +72,14 @@ requires a secure context (`localhost` or HTTPS).
 - Approval inbox and inline approval cards with exact arguments.
 - Review panel: pending approvals, journal batches, and undo.
 - Context panel: model, token, turn, cost, and context-window stats.
-- Files panel: read-only workspace tree and text preview.
+- Files panel: `@pierre/trees` workspace tree and `@pierre/diffs` file viewer.
+- Review panel: `@pierre/diffs` file/diff previews for journaled changes.
 - Rules, workspaces, journal, model profiles, and settings.
 - System light/dark theme with a manual override.
-- Installable PWA with a network-only API policy.
+- Offline, reconnecting, asleep, and update-available status banners.
+- Installable PWA with a network-only API policy and prompt-based updates.
+- Visual regression screenshots for login, home, new session, session, files,
+  review diff, settings, offline state, and mobile/light layouts.
 
 The visual port deliberately does not include OpenCode's multi-server UI,
 plugins, terminal, voice, worktrees, LSP, sharing, provider accounts, or its
@@ -77,6 +91,16 @@ client/server protocol. Those features have no Agent-1 backend yet.
 bun run web:typecheck
 bun run web:build
 bun run test:e2e     # builds web/dist and runs Playwright against a real daemon
+bun test e2e/visual.test.ts
+```
+
+The visual suite compares against `e2e/visual-baseline/`. Regenerate baselines
+only after an intentional visual change:
+
+```powershell
+$env:UPDATE_VISUAL_BASELINES = "1"
+bun test e2e/visual.test.ts
+Remove-Item Env:UPDATE_VISUAL_BASELINES
 ```
 
 The browser suite uses the installed Edge or Chrome executable. It covers

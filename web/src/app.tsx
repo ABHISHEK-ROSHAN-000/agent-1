@@ -1,4 +1,4 @@
-import { Match, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js"
+import { Match, Show, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { A, useLocation, useNavigate } from "@solidjs/router"
 import { useQuery, useQueryClient } from "@tanstack/solid-query"
 import { ApiError, api, subscribeEvents } from "./api"
@@ -32,6 +32,9 @@ function Shell(props: { children?: unknown; eventSeq?: number }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [connection, setConnection] = createSignal("connecting")
+  const [online, setOnline] = createSignal(typeof navigator === "undefined" ? true : navigator.onLine)
+  const [asleep, setAsleep] = createSignal(false)
+  const [updateReady, setUpdateReady] = createSignal(false)
   const [menuOpen, setMenuOpen] = createSignal(false)
   const [variant, setVariant] = createSignal(0)
   const sessionsQuery = useQuery(() => ({
@@ -64,7 +67,61 @@ function Shell(props: { children?: unknown; eventSeq?: number }) {
       setConnection,
       props.eventSeq ?? 0,
     )
-    onCleanup(stop)
+    const onOnline = () => {
+      setOnline(true)
+      setAsleep(false)
+    }
+    const onOffline = () => setOnline(false)
+    window.addEventListener("online", onOnline)
+    window.addEventListener("offline", onOffline)
+
+    const checkHealth = async () => {
+      if (!navigator.onLine) return
+      try {
+        await api.health()
+        setAsleep(false)
+      } catch {
+        setAsleep(true)
+      }
+    }
+    const healthTimer = setInterval(checkHealth, 20_000)
+    void checkHealth()
+
+    let registration: ServiceWorkerRegistration | undefined
+    let updateTimer: ReturnType<typeof setInterval> | undefined
+    const checkUpdate = async () => {
+      try {
+        registration = registration ?? (await navigator.serviceWorker?.getRegistration())
+        if (!registration) return
+        if (registration.waiting) setUpdateReady(true)
+        await registration.update()
+        if (registration.waiting) setUpdateReady(true)
+      } catch {
+        // Update checks are best effort.
+      }
+    }
+    if ("serviceWorker" in navigator) {
+      void navigator.serviceWorker.ready.then((ready) => {
+        registration = ready
+        if (ready.waiting) setUpdateReady(true)
+        ready.addEventListener("updatefound", () => {
+          const installing = ready.installing
+          installing?.addEventListener("statechange", () => {
+            if (installing.state === "installed" && navigator.serviceWorker.controller) setUpdateReady(true)
+          })
+        })
+      })
+      void checkUpdate()
+      updateTimer = setInterval(checkUpdate, 60_000)
+    }
+
+    onCleanup(() => {
+      stop()
+      window.removeEventListener("online", onOnline)
+      window.removeEventListener("offline", onOffline)
+      clearInterval(healthTimer)
+      if (updateTimer) clearInterval(updateTimer)
+    })
   })
 
   createEffect(() => {
@@ -154,6 +211,46 @@ function Shell(props: { children?: unknown; eventSeq?: number }) {
           </div>
         ) : null}
       </header>
+      <Show when={!online() || asleep() || connection() === "reconnecting" || updateReady()}>
+        <div class="status-banners">
+          <Show when={!online()}>
+            <div class="status-banner offline">
+              <span class="status-dot" />
+              <span>Offline — the cached shell is available. Actions will resume when the connection returns.</span>
+            </div>
+          </Show>
+          <Show when={online() && asleep()}>
+            <div class="status-banner asleep">
+              <span class="status-dot" />
+              <span>Agent-1 is asleep or unreachable. Retrying when the computer wakes.</span>
+            </div>
+          </Show>
+          <Show when={online() && !asleep() && connection() === "reconnecting"}>
+            <div class="status-banner reconnecting">
+              <span class="status-dot" />
+              <span>Reconnecting to Agent-1…</span>
+            </div>
+          </Show>
+          <Show when={updateReady()}>
+            <div class="status-banner update">
+              <span class="status-dot" />
+              <span>A new Agent-1 build is ready.</span>
+              <button
+                class="button button-secondary button-small"
+                type="button"
+                onClick={() => {
+                  void navigator.serviceWorker?.getRegistration().then((registration) => {
+                    registration?.waiting?.postMessage({ type: "SKIP_WAITING" })
+                    setTimeout(() => window.location.reload(), 250)
+                  })
+                }}
+              >
+                Reload
+              </button>
+            </div>
+          </Show>
+        </div>
+      </Show>
       <div class="workspace">
         <main class="main-surface" data-variant={variant()}>
           {props.children as never}
@@ -163,16 +260,51 @@ function Shell(props: { children?: unknown; eventSeq?: number }) {
   )
 }
 
+function Unavailable(props: { offline: boolean; onRetry: () => void }) {
+  return (
+    <div class="connect-page">
+      <div class="connect-content">
+        <div class="connect-header">
+          <h1>{props.offline ? "Offline" : "Agent-1 is not reachable"}</h1>
+          <p>
+            {props.offline
+              ? "The cached Agent-1 shell is available. The daemon will reconnect when this device is online."
+              : "The local daemon did not answer."}
+          </p>
+        </div>
+        <button class="button button-secondary button-large" type="button" onClick={props.onRetry}>
+          Retry
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export function Root(props: { children?: unknown }) {
   const location = useLocation()
   const navigate = useNavigate()
   const isLogin = () => location.pathname === "/login"
+  const [online, setOnline] = createSignal(typeof navigator === "undefined" ? true : navigator.onLine)
   const info = useQuery(() => ({
     queryKey: ["info"],
     queryFn: api.info,
     retry: false,
     staleTime: Infinity,
   }))
+
+  onMount(() => {
+    const handleOnline = () => {
+      setOnline(true)
+      void info.refetch()
+    }
+    const handleOffline = () => setOnline(false)
+    window.addEventListener("online", handleOnline)
+    window.addEventListener("offline", handleOffline)
+    onCleanup(() => {
+      window.removeEventListener("online", handleOnline)
+      window.removeEventListener("offline", handleOffline)
+    })
+  })
 
   createEffect(() => {
     if (isLogin()) return
@@ -184,36 +316,14 @@ export function Root(props: { children?: unknown }) {
 
   return (
     <Switch
-      fallback={
-        <div class="connect-page">
-          <div class="connect-content">
-            <div class="connect-header">
-              <h1>Agent-1 is not reachable</h1>
-              <p>The local daemon did not answer.</p>
-            </div>
-            <button class="button button-secondary button-large" type="button" onClick={() => navigate("/login")}>
-              Go to login
-            </button>
-          </div>
-        </div>
-      }
+      fallback={<Unavailable offline={!online()} onRetry={() => void info.refetch()} />}
     >
       <Match when={isLogin()}>{props.children as never}</Match>
       <Match when={info.isLoading}>
         <Splash />
       </Match>
       <Match when={info.isError}>
-        <div class="connect-page">
-          <div class="connect-content">
-            <div class="connect-header">
-              <h1>Agent-1 is not reachable</h1>
-              <p>The local daemon did not answer.</p>
-            </div>
-            <button class="button button-secondary button-large" type="button" onClick={() => navigate("/login")}>
-              Go to login
-            </button>
-          </div>
-        </div>
+        <Unavailable offline={!online()} onRetry={() => void info.refetch()} />
       </Match>
       <Match when={info.isSuccess}>
         <Shell eventSeq={info.data?.eventSeq}>{props.children}</Shell>

@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core"
+import QRCode from "qrcode"
 import { startFakeOpenAI, type FakeOpenAI } from "../src/test/fake-openai"
 import { startTestDaemon, type TestDaemon } from "../src/test/helpers"
 
@@ -127,14 +128,16 @@ describe("Agent-1 web UI", () => {
       button?.click()
     })
     await page.locator(".side-content select").selectOption({ label: "Web fixture · read" })
-    await visible("hello.txt")
-    await page.evaluate(() => {
-      const button = [...document.querySelectorAll("button")].find(
-        (entry) => entry.textContent?.trim() === "hello.txt",
-      )
-      button?.click()
-    })
-    await visible("Web file content")
+    await page.locator(".pierre-tree-host file-tree-container").waitFor()
+    const treeBox = await page.locator(".pierre-tree-host").boundingBox()
+    expect(treeBox).not.toBeNull()
+    const fileResponse = page.waitForResponse(
+      (response) => response.url().includes("/file?") && response.status() === 200,
+      { timeout: 15_000 },
+    )
+    await page.mouse.click(treeBox!.x + 100, treeBox!.y + 44)
+    await fileResponse
+    await page.locator(".files-preview").waitFor()
     await page.screenshot({ path: "test-results/files-dark.png", fullPage: true })
 
     await page.evaluate(() => {
@@ -167,6 +170,13 @@ describe("Agent-1 web UI", () => {
     })
     await visible("Undo batch", page, 15_000)
     await page.evaluate(() => {
+      const summary = document.querySelector(".journal-details summary") as HTMLElement | null
+      summary?.click()
+    })
+    await page.locator(".journal-file .pierre-file-host").waitFor({ timeout: 15_000 })
+    await page.waitForTimeout(500)
+    await page.screenshot({ path: "test-results/review-diff-dark.png", fullPage: true })
+    await page.evaluate(() => {
       const button = [...document.querySelectorAll("button")].find(
         (entry) => entry.textContent?.trim() === "Undo batch",
       )
@@ -182,6 +192,12 @@ describe("Agent-1 web UI", () => {
     await page.locator(".page-title").waitFor()
     await page.screenshot({ path: "test-results/settings-dark.png", fullPage: true })
 
+    await page.evaluate(() => window.dispatchEvent(new Event("offline")))
+    await visible("Offline")
+    await page.screenshot({ path: "test-results/offline-banner-dark.png", fullPage: true })
+    await page.evaluate(() => window.dispatchEvent(new Event("online")))
+    await page.locator(".status-banner.offline").waitFor({ state: "hidden" })
+
     const manifest = await page.request.get(`${daemon.state.url}/manifest.webmanifest`)
     expect(manifest.status()).toBe(200)
     const sw = await page.request.get(`${daemon.state.url}/sw.js`)
@@ -195,6 +211,25 @@ describe("Agent-1 web UI", () => {
       return Boolean(registration)
     })
     expect(serviceWorkerReady).toBe(true)
+
+    for (const screenshot of [
+      "login-dark.png",
+      "home-dark.png",
+      "new-session-dark.png",
+      "session-dark.png",
+      "approval-dark.png",
+      "files-dark.png",
+      "context-dark.png",
+      "approval-task-dark.png",
+      "review-diff-dark.png",
+      "home-sessions-dark.png",
+      "settings-dark.png",
+      "offline-banner-dark.png",
+    ]) {
+      const file = Bun.file(`test-results/${screenshot}`)
+      expect(await file.exists()).toBe(true)
+      expect(file.size).toBeGreaterThan(5_000)
+    }
   }, 90_000)
 
   test("accepts a one-time pairing link and signs the device in", async () => {
@@ -202,14 +237,22 @@ describe("Agent-1 web UI", () => {
     const paired = await browser.newContext({ viewport: { width: 1024, height: 768 }, colorScheme: "dark" })
     const pairedPage = await paired.newPage()
     await pairedPage.goto(`${daemon.state.url}/login`)
-    await pairedPage.locator("#pairing-link").fill(pairing.url)
     await pairedPage.evaluate(() => {
       const button = [...document.querySelectorAll("button")].find(
-        (entry) => entry.textContent?.trim() === "Connect",
+        (entry) => entry.textContent?.trim() === "Scan QR code",
       )
       button?.click()
     })
-    await pairedPage.waitForURL(`${daemon.state.url}/`)
+    await pairedPage.locator(".scan-dialog").waitFor()
+    await pairedPage.screenshot({ path: "test-results/qr-upload-dark.png", fullPage: true })
+    expect(await Bun.file("test-results/qr-upload-dark.png").exists()).toBe(true)
+    const qr = await QRCode.toBuffer(pairing.url, { type: "png", width: 420, margin: 2 })
+    await pairedPage.setInputFiles('input[type="file"]', {
+      name: "pairing.png",
+      mimeType: "image/png",
+      buffer: qr,
+    })
+    await pairedPage.waitForURL(`${daemon.state.url}/`, { timeout: 15_000 })
     await pairedPage.locator(".home-panel").waitFor()
     await paired.close()
   }, 20_000)
@@ -238,6 +281,7 @@ describe("Agent-1 web UI", () => {
     expect(state.overflow).toBeLessThanOrEqual(1)
     expect(state.titlebar).toBe("flex")
     await mobilePage.screenshot({ path: "test-results/home-mobile-dark.png", fullPage: true })
+    expect(await Bun.file("test-results/home-mobile-dark.png").exists()).toBe(true)
     await mobilePage.evaluate(() => {
       const row = document.querySelector(".home-session-row") as HTMLElement | null
       row?.click()
@@ -250,6 +294,7 @@ describe("Agent-1 web UI", () => {
     })
     await mobilePage.locator(".side-panel").waitFor()
     await mobilePage.screenshot({ path: "test-results/session-mobile-dark.png", fullPage: true })
+    expect(await Bun.file("test-results/session-mobile-dark.png").exists()).toBe(true)
     await mobile.close()
   }, 20_000)
 
@@ -279,6 +324,7 @@ describe("Agent-1 web UI", () => {
     await lightPage.waitForURL(`${daemon.state.url}/`)
     await lightPage.locator(".home-panel").waitFor()
     await lightPage.screenshot({ path: "test-results/home-light-mobile.png", fullPage: true })
+    expect(await Bun.file("test-results/home-light-mobile.png").exists()).toBe(true)
     await light.close()
   }, 30_000)
 })

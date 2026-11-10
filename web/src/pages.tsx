@@ -14,6 +14,7 @@ import {
   type Workspace,
 } from "./api"
 import { Icon } from "./icons"
+import { PierreDiffView, PierreFileView, PierreTree } from "./pierre"
 import { ApprovalCard, Banner, Composer, Empty, Markdown, PageHeader, formatDate, shortHash, statusColor } from "./ui"
 import { applyTheme, getThemePreference, type ThemePreference } from "./theme"
 
@@ -169,7 +170,6 @@ function ContextPanel(props: { context: ContextInfo | undefined }) {
 function FilesPanel() {
   const workspaces = useQuery(() => ({ queryKey: ["workspaces"], queryFn: api.workspaces }))
   const [workspaceId, setWorkspaceId] = createSignal<string>()
-  const [treePath, setTreePath] = createSignal<string>()
   const [selectedFile, setSelectedFile] = createSignal<string>()
 
   createEffect(() => {
@@ -178,32 +178,29 @@ function FilesPanel() {
   })
 
   const tree = useQuery(() => ({
-    queryKey: ["tree", workspaceId(), treePath()],
-    queryFn: () => api.workspaceTree(workspaceId()!, treePath()),
+    queryKey: ["workspace-paths", workspaceId()],
+    queryFn: () => api.workspacePaths(workspaceId()!),
     enabled: Boolean(workspaceId()),
   }))
+  const selectedWorkspace = () => workspaces.data?.workspaces.find((workspace) => workspace.id === workspaceId())
+  const absolutePath = (relative: string) => {
+    const root = selectedWorkspace()?.path?.replace(/[\\/]+$/, "")
+    return root ? `${root}/${relative}` : relative
+  }
   const file = useQuery(() => ({
     queryKey: ["file", workspaceId(), selectedFile()],
-    queryFn: () => api.workspaceFile(workspaceId()!, selectedFile()!),
+    queryFn: () => api.workspaceFile(workspaceId()!, absolutePath(selectedFile()!)),
     enabled: Boolean(workspaceId() && selectedFile()),
   }))
 
-  const selectedWorkspace = () => workspaces.data?.workspaces.find((workspace) => workspace.id === workspaceId())
-  const parentPath = (value: string) => {
-    const root = selectedWorkspace()?.path ?? ""
-    const parent = value.replace(/[\\/][^\\/]+$/, "")
-    return parent.startsWith(root) ? parent : root
-  }
-
   return (
-    <div>
+    <div class="files-panel">
       <Show when={(workspaces.data?.workspaces.length ?? 0) > 0} fallback={<Empty>No workspace grants. Add one in Workspaces.</Empty>}>
         <select
           class="form-select"
           value={workspaceId() ?? ""}
           onChange={(event) => {
             setWorkspaceId(event.currentTarget.value)
-            setTreePath(undefined)
             setSelectedFile(undefined)
           }}
         >
@@ -211,46 +208,94 @@ function FilesPanel() {
             {(workspace) => <option value={workspace.id}>{workspace.label} · {workspace.access}</option>}
           </For>
         </select>
-        <div class="row" style={{ "margin-top": "10px" }}>
-          <button
-            class="button button-ghost button-small"
-            type="button"
-            onClick={() => {
-              const path = tree.data?.path
-              if (path) setTreePath(parentPath(path))
-            }}
+        <div class="files-root">{selectedWorkspace()?.path}</div>
+        <div class="files-tree-wrap">
+          <Show
+            when={tree.data}
+            fallback={<div class="empty">Loading files…</div>}
           >
-            <Icon name="back" size={12} /> Up
-          </button>
-          <span class="tiny faint truncate mono">{tree.data?.path ?? selectedWorkspace()?.path}</span>
-        </div>
-        <div class="tree" style={{ "margin-top": "8px" }}>
-          <For each={tree.data?.entries ?? []}>
-            {(entry) => (
-              <button
-                class={`tree-entry ${selectedFile() === entry.path ? "active" : ""}`}
-                type="button"
-                onClick={() => entry.type === "directory" ? (setTreePath(entry.path), setSelectedFile(undefined)) : setSelectedFile(entry.path)}
-              >
-                <Icon name={entry.type === "directory" ? "folder" : "file"} size={12} />
-                <span class="truncate">{entry.name}</span>
-              </button>
-            )}
-          </For>
+            <PierreTree paths={tree.data?.paths ?? []} onSelect={setSelectedFile} />
+          </Show>
         </div>
         <Show when={file.data}>
           {(content) => (
-            <pre class="file-preview">
-              {content().content.slice(0, 40_000)}
-            </pre>
+            <div class="files-preview">
+              <div class="files-preview-name">
+                <Icon name="file" size={12} />
+                <span class="truncate">{selectedFile()}</span>
+                <span class="tiny faint">{content().size.toLocaleString()} bytes</span>
+              </div>
+              <PierreFileView name={selectedFile() ?? "file"} contents={content().content.slice(0, 100_000)} />
+            </div>
           )}
+        </Show>
+        <Show when={file.error}>
+          <Banner kind="error">{errorMessage(file.error)}</Banner>
         </Show>
       </Show>
     </div>
   )
 }
 
+function matchingWorkspace(path: string | null, workspaces: Workspace[]): Workspace | undefined {
+  if (!path) return
+  const normalized = path.toLowerCase().replace(/\\/g, "/")
+  return workspaces.find((workspace) => {
+    const root = workspace.path.toLowerCase().replace(/\\/g, "/").replace(/\/+$/, "")
+    return normalized === root || normalized.startsWith(`${root}/`)
+  })
+}
+
+function JournalChange(props: { entry: JournalEntry; workspaces: Workspace[] }) {
+  const workspace = matchingWorkspace(props.entry.target ?? props.entry.source, props.workspaces)
+  const target = props.entry.target ?? props.entry.source
+  const file = useQuery(() => ({
+    queryKey: ["journal-file", props.entry.id, target],
+    queryFn: () => api.workspaceFile(workspace!.id, target!),
+    enabled: Boolean(workspace && target && props.entry.state === "done"),
+  }))
+  const previous = () => {
+    const undo = props.entry.undo as { previous?: string | null } | undefined
+    return typeof undo?.previous === "string" ? undo.previous : ""
+  }
+  const relative = () => {
+    if (!workspace || !target) return target ?? ""
+    return target.replace(workspace.path, "").replace(/^[\\/]/, "").replace(/\\/g, "/")
+  }
+
+  return (
+    <div class="journal-file">
+      <div class="journal-file-head">
+        <Icon name={props.entry.operation === "move" ? "back" : "file"} size={11} />
+        <span class="truncate">{relative()}</span>
+        <span class="tag">{props.entry.operation}</span>
+      </div>
+      <Show when={props.entry.operation === "move" && props.entry.source && props.entry.target}>
+        <div class="journal-move">
+          <span>{props.entry.source}</span>
+          <span class="new">→ {props.entry.target}</span>
+        </div>
+      </Show>
+      <Show when={file.data}>
+        {(content) => (
+          <Show
+            when={props.entry.operation === "write"}
+            fallback={<PierreFileView name={relative()} contents={content().content.slice(0, 100_000)} />}
+          >
+            <PierreDiffView
+              name={relative()}
+              before={previous()}
+              after={content().content}
+            />
+          </Show>
+        )}
+      </Show>
+    </div>
+  )
+}
+
 function JournalList(props: { entries: JournalEntry[]; onUndo: (batchId: string) => void }) {
+  const workspaces = useQuery(() => ({ queryKey: ["workspaces"], queryFn: api.workspaces }))
   const batches = createMemo(() => {
     const map = new Map<string, JournalEntry[]>()
     for (const entry of props.entries) {
@@ -274,6 +319,14 @@ function JournalList(props: { entries: JournalEntry[]; onUndo: (batchId: string)
                 {entries.filter((entry) => entry.state === "done").length} done ·{" "}
                 {entries[0]?.operation ?? "operation"}
               </div>
+              <Show when={entries.length <= 8}>
+                <details class="journal-details">
+                  <summary>Review changes</summary>
+                  <For each={entries.filter((entry) => entry.target || entry.source)}>
+                    {(entry) => <JournalChange entry={entry} workspaces={workspaces.data?.workspaces ?? []} />}
+                  </For>
+                </details>
+              </Show>
               <button class="button button-ghost button-small" type="button" onClick={() => props.onUndo(batchId)}>
                 <Icon name="refresh" size={12} /> Undo batch
               </button>

@@ -8,7 +8,8 @@ export default defineConfig({
     solid(),
     tailwindcss(),
     VitePWA({
-      registerType: "autoUpdate",
+      registerType: "prompt",
+      injectRegister: false,
       includeAssets: ["icon.svg", "icon-192.png", "icon-512.png", "theme-init.js"],
       manifest: {
         name: "Agent-1",
@@ -36,11 +37,21 @@ export default defineConfig({
       workbox: {
         navigateFallback: "/index.html",
         navigateFallbackDenylist: [/^\/v1\//, /^\/pair/],
-        globPatterns: ["**/*.{js,css,html,svg,woff2,ttf}"],
+        globPatterns: [
+          "**/*.{css,html,svg,woff2,ttf}",
+          "assets/index-*.js",
+          "assets/rolldown-runtime-*.js",
+          "assets/qr-scanner-worker*.js",
+        ],
         runtimeCaching: [
           {
             urlPattern: ({ url }) => url.pathname.startsWith("/v1/"),
             handler: "NetworkOnly",
+          },
+          {
+            urlPattern: ({ url }) => url.pathname.startsWith("/assets/"),
+            handler: "StaleWhileRevalidate",
+            options: { cacheName: "agent1-assets" },
           },
         ],
       },

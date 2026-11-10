@@ -224,6 +224,11 @@ export const api = {
       "GET",
       `/v1/workspaces/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
     ),
+  workspacePaths: (id: string) =>
+    request<{ root: string; paths: string[] }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(id)}/tree?recursive=1`,
+    ),
   journal: (limit = 100) => request<{ entries: JournalEntry[] }>("GET", `/v1/journal?limit=${limit}`),
   undoJournal: (batchId?: string) =>
     request<{ batchId: string; undone: number; skipped: number; errors: string[] }>(

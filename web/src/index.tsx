@@ -22,6 +22,16 @@ watchSystemTheme(() => {
   if (getThemePreference() === "system") applyTheme("system")
 })
 
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  window.addEventListener(
+    "load",
+    () => {
+      void navigator.serviceWorker.register("/sw.js").catch(() => undefined)
+    },
+    { once: true },
+  )
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
