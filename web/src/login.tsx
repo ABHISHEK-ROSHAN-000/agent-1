@@ -4,6 +4,7 @@ import QrScanner from "qr-scanner"
 import { toast } from "solid-sonner"
 import { api } from "./api"
 import { Icon } from "./icons"
+import { AgentOneWordmark } from "./wordmark"
 
 function ScannerModal(props: { onClose: () => void; onResult: (value: string) => void }) {
   let video: HTMLVideoElement | undefined
@@ -28,11 +29,7 @@ function ScannerModal(props: { onClose: () => void; onResult: (value: string) =>
       )
       await scanner.start()
     } catch (cause) {
-      setError(
-        cause instanceof Error
-          ? cause.message
-          : "Camera access failed. Paste the pairing link instead.",
-      )
+      setError(cause instanceof Error ? cause.message : "Camera access failed. Paste the pairing link instead.")
     }
   })
 
@@ -45,7 +42,7 @@ function ScannerModal(props: { onClose: () => void; onResult: (value: string) =>
     <div class="scan-modal" onClick={(event) => event.target === event.currentTarget && props.onClose()}>
       <div class="scan-dialog">
         <div class="row-between" style={{ "margin-bottom": "12px" }}>
-          <strong>Scan pairing QR</strong>
+          <strong style={{ "font-weight": "530" }}>Scan pairing QR</strong>
           <button class="icon-button" type="button" onClick={props.onClose} aria-label="Close">
             <Icon name="close" />
           </button>
@@ -56,7 +53,7 @@ function ScannerModal(props: { onClose: () => void; onResult: (value: string) =>
             {error()}
           </div>
         </Show>
-        <p class="small muted" style={{ "margin": "12px 0 0", "text-align": "center" }}>
+        <p class="connect-hint" style={{ "margin": "12px 0 0", "text-align": "center" }}>
           Point the camera at the QR code printed by <span class="mono">agent-1 pair</span>.
         </p>
       </div>
@@ -123,24 +120,34 @@ export function LoginPage() {
   }
 
   return (
-    <div class="login-page">
-      <div class="login-card">
-        <div class="login-wordmark">Agent-1</div>
-        <h1 class="login-title">Connect to a server</h1>
-        <p class="login-subtitle">Paste the pairing link from the server, or scan its QR code.</p>
+    <div class="connect-page">
+      <div class="connect-content">
+        <div class="connect-brand">
+          <AgentOneWordmark />
+        </div>
+        <header class="connect-header">
+          <h1>Connect to a server</h1>
+          <p>Paste the pairing link from the server, or scan its QR code.</p>
+        </header>
 
         <Show
           when={mode() === "pairing"}
           fallback={
-            <form class="login-stack" onSubmit={signIn}>
+            <form class="connect-form" onSubmit={signIn}>
               <input type="text" name="username" autocomplete="username" value="agent-1" hidden readonly />
-              <div>
+              <div class="connect-field">
+                <label class="field-label" for="server-address">
+                  Server address
+                </label>
+                <input id="server-address" class="input input-large" type="text" value={window.location.origin} readonly />
+              </div>
+              <div class="connect-field">
                 <label class="field-label" for="password">
                   Password
                 </label>
                 <input
                   id="password"
-                  class="input"
+                  class="input input-large"
                   type="password"
                   autocomplete="current-password"
                   placeholder="Server password"
@@ -148,26 +155,27 @@ export function LoginPage() {
                   onInput={(event) => setPassword(event.currentTarget.value)}
                   disabled={busy()}
                 />
+                <p class="connect-hint">Use the password printed by `agent-1 auth show`.</p>
               </div>
-              <button class="button button-primary" type="submit" disabled={busy() || !password()}>
-                {busy() ? "Connecting…" : "Connect"}
+              <button class="button button-contrast button-large button-block" type="submit" disabled={busy() || !password()}>
+                {busy() ? "Checking…" : "Connect"}
               </button>
-              <div class="login-links">
-                <button class="link-button" type="button" onClick={() => setMode("pairing")}>
+              <div class="connect-links">
+                <button class="connect-link-button" type="button" onClick={() => setMode("pairing")}>
                   Back to pairing link
                 </button>
               </div>
             </form>
           }
         >
-          <div class="login-stack">
-            <div>
+          <div class="connect-form">
+            <div class="connect-field">
               <label class="field-label" for="pairing-link">
                 Pairing link
               </label>
               <input
                 id="pairing-link"
-                class="input"
+                class="input input-large"
                 type="url"
                 spellcheck={false}
                 placeholder="http://192.168.1.2:4096/pair?token=…"
@@ -176,29 +184,34 @@ export function LoginPage() {
                 onKeyDown={(event) => event.key === "Enter" && connect()}
               />
             </div>
-            <button class="button button-primary" type="button" onClick={() => connect()}>
+            <button
+              class="button button-contrast button-large button-block"
+              type="button"
+              onClick={() => connect()}
+              disabled={!link().trim()}
+            >
               Connect
             </button>
-            <button class="button button-secondary" type="button" onClick={() => setShowScanner(true)}>
+            <button class="button button-neutral button-large button-block" type="button" onClick={() => setShowScanner(true)}>
               Scan QR code
             </button>
           </div>
 
-          <div class="login-links">
-            <span>No pairing link?&nbsp;&nbsp;</span>
-            <button class="link-button" type="button" onClick={() => setMode("password")}>
+          <div class="connect-links">
+            <span>No pairing link?</span>
+            <button class="connect-link-button" type="button" onClick={() => setMode("password")}>
               Use password
             </button>
           </div>
 
-          <div class="login-help">
+          <div class="connect-help">
             <div>Run this command on the server's computer to get a pairing link and QR code.</div>
-            <div class="command-chip">agent-1 pair</div>
+            <div class="connect-command">agent-1 pair</div>
           </div>
         </Show>
 
         <Show when={error()}>
-          <div class="login-error">{error()}</div>
+          <div class="connect-error">{error()}</div>
         </Show>
       </div>
 

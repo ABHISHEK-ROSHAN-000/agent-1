@@ -24,6 +24,7 @@ export function applyTheme(preference: ThemePreference): void {
   }
   const resolved = resolvedTheme(preference)
   document.documentElement.dataset.theme = resolved
+  document.documentElement.dataset.colorScheme = resolved
   document.documentElement.style.colorScheme = resolved
 }
 

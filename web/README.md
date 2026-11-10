@@ -16,10 +16,14 @@ daemon API and all approvals go back through the daemon.
 - `vite-plugin-pwa` for the manifest and service worker
 - `solid-sonner` for transient notifications
 - `marked` + DOMPurify for sanitized assistant Markdown
+- Vendored OpenCode presentation tokens, CSS, and icon renderer at pinned commit
+  `30e7a4d573cb8f83d186cef682569cb5758ad8f3`
 
 All dependencies are exact-pinned in `web/package.json` and `web/bun.lock`.
-The UI uses original Agent-1 branding and icons; no OpenCode assets, source, or
-wordmark are copied.
+OpenCode material is MIT-licensed and retained under `src/opencode/LICENSE`;
+see `../THIRD_PARTY_NOTICES.md`. The Agent-1 wordmark, product name, data layer,
+auth, and approval behavior are original Agent-1 work. OpenCode branding,
+telemetry, and server/client protocol are not used.
 
 ## Run
 
@@ -52,8 +56,9 @@ requires a secure context (`localhost` or HTTPS).
 
 ## Surfaces
 
-- Login by pairing link, QR scan, or shared password.
-- Session list, new session, streaming chat, stop, model selection.
+- OpenCode-style connect screen: pairing link, QR scan, password fallback.
+- Titlebar tabs, home workspace/session list, and new-session wordmark/composer.
+- Streaming chat with stop, models, approvals, and auto-scroll.
 - Approval inbox and inline approval cards with exact arguments.
 - Review panel: pending approvals, journal batches, and undo.
 - Context panel: model, token, turn, cost, and context-window stats.
@@ -61,6 +66,10 @@ requires a secure context (`localhost` or HTTPS).
 - Rules, workspaces, journal, model profiles, and settings.
 - System light/dark theme with a manual override.
 - Installable PWA with a network-only API policy.
+
+The visual port deliberately does not include OpenCode's multi-server UI,
+plugins, terminal, voice, worktrees, LSP, sharing, provider accounts, or its
+client/server protocol. Those features have no Agent-1 backend yet.
 
 ## Checks
 
@@ -71,6 +80,7 @@ bun run test:e2e     # builds web/dist and runs Playwright against a real daemon
 ```
 
 The browser suite uses the installed Edge or Chrome executable. It covers
-password login, a one-time pairing link, streaming chat, an approval-gated real
-file move, journal undo, files/context panels, the mobile shell, system light
-theme, and PWA manifest/service-worker availability.
+password login, a one-time pairing link, home/new-session/session flows,
+streaming chat, an approval-gated real file move, journal undo, files/context
+panels, the mobile shell, system light/dark theme, and PWA manifest/service-worker
+availability.

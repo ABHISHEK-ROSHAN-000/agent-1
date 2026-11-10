@@ -4,13 +4,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/solid-query"
 import { Toaster } from "solid-sonner"
 import { Root } from "./app"
 import { LoginPage } from "./login"
+import { HomePage, NewSessionPage } from "./home"
 import {
   ApprovalsPage,
   JournalPage,
   ModelsPage,
   RulesPage,
   SessionPage,
-  SessionsPage,
   SettingsPage,
   WorkspacesPage,
 } from "./pages"
@@ -40,7 +40,8 @@ render(
     <QueryClientProvider client={queryClient}>
       <Router root={Root}>
         <Route path="/login" component={LoginPage} />
-        <Route path="/" component={SessionsPage} />
+        <Route path="/" component={HomePage} />
+        <Route path="/new" component={NewSessionPage} />
         <Route path="/sessions/:id" component={SessionPage} />
         <Route path="/approvals" component={ApprovalsPage} />
         <Route path="/rules" component={RulesPage} />
@@ -48,7 +49,7 @@ render(
         <Route path="/journal" component={JournalPage} />
         <Route path="/models" component={ModelsPage} />
         <Route path="/settings" component={SettingsPage} />
-        <Route path="*" component={SessionsPage} />
+        <Route path="*" component={HomePage} />
       </Router>
       <Toaster
         theme="system"

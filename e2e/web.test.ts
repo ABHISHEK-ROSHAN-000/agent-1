@@ -87,10 +87,19 @@ describe("Agent-1 web UI", () => {
     await page.locator('input[type="password"]').fill(daemon.password)
     await page.evaluate(() => (document.querySelector("form") as HTMLFormElement).requestSubmit())
     await page.waitForURL(`${daemon.state.url}/`)
-    await page.locator(".home-wordmark").waitFor()
+    await page.locator(".home-panel").waitFor()
     await page.screenshot({ path: "test-results/home-dark.png", fullPage: true })
 
-    await page.locator(".home textarea").fill("hello")
+    await page.evaluate(() => {
+      const button = [...document.querySelectorAll("button")].find(
+        (entry) => entry.textContent?.includes("New session"),
+      )
+      button?.click()
+    })
+    await page.waitForURL(`${daemon.state.url}/new`)
+    await page.locator(".new-session-page").waitFor()
+    await page.screenshot({ path: "test-results/new-session-dark.png", fullPage: true })
+    await page.locator(".new-session-page textarea").fill("hello")
     await page.evaluate(() => (document.querySelector(".send-button") as HTMLElement | null)?.click())
     await page.waitForURL(/\/sessions\//)
     await page.locator(".session-screen textarea").waitFor()
@@ -166,6 +175,13 @@ describe("Agent-1 web UI", () => {
     await waitForPath(path.join(taskDir, "a.txt"))
     await waitForPath(path.join(taskDir, "sorted", "a.txt"), false)
 
+    await page.goto(`${daemon.state.url}/`)
+    await page.locator(".home-session-row").first().waitFor()
+    await page.screenshot({ path: "test-results/home-sessions-dark.png", fullPage: true })
+    await page.goto(`${daemon.state.url}/settings`)
+    await page.locator(".page-title").waitFor()
+    await page.screenshot({ path: "test-results/settings-dark.png", fullPage: true })
+
     const manifest = await page.request.get(`${daemon.state.url}/manifest.webmanifest`)
     expect(manifest.status()).toBe(200)
     const sw = await page.request.get(`${daemon.state.url}/sw.js`)
@@ -194,7 +210,7 @@ describe("Agent-1 web UI", () => {
       button?.click()
     })
     await pairedPage.waitForURL(`${daemon.state.url}/`)
-    await pairedPage.locator(".home-wordmark").waitFor()
+    await pairedPage.locator(".home-panel").waitFor()
     await paired.close()
   }, 20_000)
 
@@ -214,14 +230,26 @@ describe("Agent-1 web UI", () => {
     await mobilePage.locator('input[type="password"]').fill(daemon.password)
     await mobilePage.evaluate(() => (document.querySelector("form") as HTMLFormElement).requestSubmit())
     await mobilePage.waitForURL(`${daemon.state.url}/`)
-    await mobilePage.locator(".home-wordmark").waitFor()
+    await mobilePage.locator(".home-panel").waitFor()
     const state = await mobilePage.evaluate(() => ({
       overflow: document.documentElement.scrollWidth - window.innerWidth,
-      rail: getComputedStyle(document.querySelector(".rail") as HTMLElement).display,
+      titlebar: getComputedStyle(document.querySelector(".titlebar") as HTMLElement).display,
     }))
     expect(state.overflow).toBeLessThanOrEqual(1)
-    expect(state.rail).toBe("none")
+    expect(state.titlebar).toBe("flex")
     await mobilePage.screenshot({ path: "test-results/home-mobile-dark.png", fullPage: true })
+    await mobilePage.evaluate(() => {
+      const row = document.querySelector(".home-session-row") as HTMLElement | null
+      row?.click()
+    })
+    await mobilePage.waitForURL(/\/sessions\//)
+    await mobilePage.locator(".session-screen").waitFor()
+    await mobilePage.evaluate(() => {
+      const button = document.querySelector('.session-header button[title="Toggle review panel"]') as HTMLElement | null
+      button?.click()
+    })
+    await mobilePage.locator(".side-panel").waitFor()
+    await mobilePage.screenshot({ path: "test-results/session-mobile-dark.png", fullPage: true })
     await mobile.close()
   }, 20_000)
 
@@ -229,15 +257,30 @@ describe("Agent-1 web UI", () => {
     const light = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: "light" })
     const lightPage = await light.newPage()
     await lightPage.goto(`${daemon.state.url}/login`)
-    await lightPage.locator(".login-title").waitFor()
+    await lightPage.locator(".connect-header h1").waitFor()
     expect(await lightPage.evaluate(() => document.documentElement.dataset.theme)).toBe("light")
     await lightPage.screenshot({ path: "test-results/login-light-mobile.png", fullPage: true })
     await lightPage.evaluate(() => localStorage.setItem("agent1-theme", "dark"))
     await lightPage.reload()
-    await lightPage.locator(".login-title").waitFor()
+    await lightPage.locator(".connect-header h1").waitFor()
     expect(await lightPage.evaluate(() => document.documentElement.dataset.theme)).toBe("dark")
+    await lightPage.evaluate(() => localStorage.setItem("agent1-theme", "light"))
+    await lightPage.reload()
+    await lightPage.locator(".connect-header h1").waitFor()
+    expect(await lightPage.evaluate(() => document.documentElement.dataset.theme)).toBe("light")
+    await lightPage.evaluate(() => {
+      const button = [...document.querySelectorAll("button")].find((entry) =>
+        entry.textContent?.includes("Use password"),
+      )
+      button?.click()
+    })
+    await lightPage.locator('input[type="password"]').fill(daemon.password)
+    await lightPage.evaluate(() => (document.querySelector("form") as HTMLFormElement).requestSubmit())
+    await lightPage.waitForURL(`${daemon.state.url}/`)
+    await lightPage.locator(".home-panel").waitFor()
+    await lightPage.screenshot({ path: "test-results/home-light-mobile.png", fullPage: true })
     await light.close()
-  }, 20_000)
+  }, 30_000)
 })
 
 

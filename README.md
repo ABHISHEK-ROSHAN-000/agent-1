@@ -1,12 +1,12 @@
 # Agent-1
 
-**Status:** Phase 5 complete — the Solid web client/PWA is available from the local daemon.
+**Status:** Phase 5 complete — the Solid web client/PWA is available from the local daemon with an OpenCode-derived visual foundation.
 
 Agent-1 is a local, single-user personal assistant daemon for Windows. It will run in the background at sign-in, own sessions, tools, permissions, memory, and the remote tunnel, and serve thin clients: a web app/PWA, a desktop window and tray, and a TUI.
 
 This repository is a clean rebuild. The original Folder Ops prototype has been removed. Folder Ops now exists only as a reference workflow and integration test for the file tools, approval gate, journal, crash recovery, and undo.
 
-The daemon, agent runtime, approval gate, and core tools are usable from the CLI/API: detached lifecycle, SQLite, durable events/SSE, auth/pairing, cloud/local model profiles, streaming turns, checkpoints, resume, budgets, compaction, permission rules, exact-argument approvals, workspace grants, filesystem tools with journal/undo, shell, web fetch/search, and audit logging. The web client/PWA adds login, QR pairing, streaming chat, approvals, rules, workspaces, journal/undo, files, models, settings, and system light/dark theme. The TUI and desktop wrapper are still ahead.
+The daemon, agent runtime, approval gate, and core tools are usable from the CLI/API: detached lifecycle, SQLite, durable events/SSE, auth/pairing, cloud/local model profiles, streaming turns, checkpoints, resume, budgets, compaction, permission rules, exact-argument approvals, workspace grants, filesystem tools with journal/undo, shell, web fetch/search, and audit logging. The web client/PWA adds OpenCode-style login, home, new-session, tabs, streaming chat, approvals, review/files/context, rules, workspaces, journal/undo, models, settings, and system light/dark theme. The TUI and desktop wrapper are still ahead.
 
 ## What it will do
 
@@ -96,14 +96,16 @@ bun run check
 66 pass, 0 fail, 370 expect() calls, 27 files
 
 bun run test:e2e
-4 pass, 0 fail, 7 expect() calls, 1 browser suite
+4 pass, 0 fail, 8 expect() calls, 1 browser suite
 ```
 
-Coverage includes Phase 1–4 plus web static serving/CSP, login and pairing, streaming chat, approval-gated real file moves and journal undo, files/context panels, mobile layout, system light/dark theme, PWA manifest/service-worker checks, and CLI QR pairing. The 500-file injected crash/resume/undo test remains at the tool/journal layer.
+Coverage includes Phase 1–4 plus OpenCode-style web surfaces, static serving/CSP, login and pairing, home/new-session/session flows, streaming chat, approval-gated real file moves and journal undo, files/context panels, mobile layout, system light/dark theme, PWA manifest/service-worker checks, and CLI QR pairing. The 500-file injected crash/resume/undo test remains at the tool/journal layer.
 
 ## Limits
 
-- The web client/PWA is Phase 5. The TUI and Electron desktop wrapper are later.
+- The web client/PWA is a visual/interaction port using vendored OpenCode presentation material. It is not a fork of the OpenCode server or client protocol; Agent-1's `/v1` API and approval rules remain authoritative.
+- OpenCode-only surfaces such as plugins, terminal, voice, multi-server, worktrees, LSP, sharing, and provider-account management are not included.
+- The TUI and Electron desktop wrapper are later.
 - The 500-file crash test is at the tool/journal layer with an injected failure; the browser suite covers a real approval-gated file move and undo, but not a browser-driven 500-file batch.
 - QR camera scanning requires a secure context (`localhost` or HTTPS). The browser suite checks the QR entry point and CLI QR output but cannot emulate a real camera QR scan.
 - Web search requires `AGENT1_SEARCH_URL`; there is no default search provider.
@@ -115,4 +117,4 @@ Coverage includes Phase 1–4 plus web static serving/CSP, login and pairing, st
 
 ## License
 
-TBD. Do not distribute this code until a license and dependency-license review are complete.
+Agent-1's own license is TBD. Do not distribute this code until a license and dependency-license review are complete. Vendored OpenCode presentation material is MIT-licensed and preserved under `web/src/opencode/LICENSE`; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

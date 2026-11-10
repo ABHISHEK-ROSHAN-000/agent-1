@@ -112,7 +112,8 @@ export function Composer(props: {
 
   return (
     <div class="composer-wrap">
-      <div class="composer">
+      <div class="composer-dock">
+        <div class="composer">
         <textarea
           ref={textarea}
           value={value()}
@@ -162,6 +163,7 @@ export function Composer(props: {
               <Icon name="stop" size={13} />
             </button>
           </Show>
+        </div>
         </div>
       </div>
     </div>

@@ -1,0 +1,39 @@
+@import "./styles/colors.css";
+@import "./styles/theme.css";
+@import "./styles/tokens/index.css";
+@import "./styles/base.css";
+@import "./styles/scrollbar.css";
+@import "./styles/utilities.css";
+@import "./styles/animations.css";
+
+@font-face {
+  font-family: "Inter";
+  src: url("/assets/Inter.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/assets/IBMPlexMono-400-normal.woff2") format("woff2");
+  font-weight: 100 599;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/assets/IBMPlexMono-600-normal.woff2") format("woff2");
+  font-weight: 600 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/assets/IBMPlexMono-400-italic.woff2") format("woff2");
+  font-weight: 100 599;
+  font-style: italic;
+  font-display: swap;
+}

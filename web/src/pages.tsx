@@ -14,116 +14,47 @@ import {
   type Workspace,
 } from "./api"
 import { Icon } from "./icons"
-import { ApprovalCard, Banner, Composer, Empty, Markdown, PageHeader, formatDate, shortHash, statusColor, timeAgo } from "./ui"
+import { ApprovalCard, Banner, Composer, Empty, Markdown, PageHeader, formatDate, shortHash, statusColor } from "./ui"
 import { applyTheme, getThemePreference, type ThemePreference } from "./theme"
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+const settingsNav = [
+  { href: "/settings", label: "General", icon: "settings" as const },
+  { href: "/models", label: "Models", icon: "model" as const },
+  { href: "/approvals", label: "Approvals", icon: "approvals" as const },
+  { href: "/rules", label: "Rules", icon: "rules" as const },
+  { href: "/workspaces", label: "Workspaces", icon: "folder" as const },
+  { href: "/journal", label: "Journal", icon: "journal" as const },
+]
+
 function PageBody(props: { children?: unknown }) {
-  return <div class="page-scroll">{props.children as never}</div>
-}
-
-/* ------------------------------------------------------------------ home */
-
-export function SessionsPage() {
-  const navigate = useNavigate()
-  const queryClient = useQueryClient()
-  const [title, setTitle] = createSignal("")
-  const [busy, setBusy] = createSignal(false)
-  const [selectedModel, setSelectedModel] = createSignal("")
-  const sessions = useQuery(() => ({ queryKey: ["sessions"], queryFn: api.sessions }))
-  const models = useQuery(() => ({ queryKey: ["models"], queryFn: api.models }))
-
-  createEffect(() => {
-    if (!selectedModel() && models.data?.profiles?.[0]) setSelectedModel(models.data.profiles[0].id)
-  })
-
-  const create = async () => {
-    if (busy()) return
-    setBusy(true)
-    try {
-      const result = await api.createSession(title().trim() || undefined)
-      setTitle("")
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] })
-      navigate(`/sessions/${encodeURIComponent(result.session.id)}`)
-    } catch (error) {
-      toast.error(errorMessage(error))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const send = async (text: string) => {
-    if (busy()) return
-    setBusy(true)
-    try {
-      const result = await api.createSession(text.slice(0, 70))
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] })
-      try {
-        const started = await api.startMessage(
-          result.session.id,
-          text,
-          selectedModel() || undefined,
-        )
-        navigate(`/sessions/${encodeURIComponent(result.session.id)}?turn=${encodeURIComponent(started.turn.id)}`)
-      } catch (error) {
-        toast.error(errorMessage(error))
-        navigate(`/sessions/${encodeURIComponent(result.session.id)}`)
-      }
-    } catch (error) {
-      toast.error(errorMessage(error))
-    } finally {
-      setBusy(false)
-    }
-  }
-
+  const location = useLocation()
   return (
-    <div class="home">
-      <div class="home-wordmark">Agent-1</div>
-      <div class="home-inner">
-        <Composer
-          onSubmit={send}
-          busy={busy()}
-          models={models.data?.profiles ?? []}
-          modelId={selectedModel()}
-          onModel={setSelectedModel}
-          placeholder="Ask anything, / for commands, @ for context…"
-          compact
-        />
-        <div class="home-meta">
-          <span class="pill">
-            <Icon name="model" size={11} /> Agent-1
-          </span>
-          <span class="pill">{models.data?.profiles?.[0]?.name ?? "No model configured"}</span>
-          <span class="pill">
-            <Icon name="folder" size={11} /> Local
-          </span>
-        </div>
-        <div class="row" style={{ "margin-top": "12px", "justify-content": "center" }}>
-          <button class="button button-ghost button-small" type="button" onClick={() => void create()}>
-            <Icon name="plus" size={13} /> New session
-          </button>
-        </div>
-        <Show when={(sessions.data?.sessions.length ?? 0) > 0}>
-          <div class="recent-grid">
-            <For each={sessions.data?.sessions.slice(0, 6)}>
-              {(session) => (
-                <A href={`/sessions/${encodeURIComponent(session.id)}`} class="recent-card">
-                  <span class="recent-title">{session.title}</span>
-                  <span class="recent-meta">
-                    {timeAgo(session.updatedAt)} · {session.id.slice(0, 10)}
-                  </span>
-                </A>
-              )}
-            </For>
-          </div>
-        </Show>
-      </div>
+    <div class="settings-layout">
+      <aside class="settings-nav">
+        <div class="settings-nav-title">Settings</div>
+        <For each={settingsNav}>
+          {(item) => (
+            <A
+              href={item.href}
+              class="settings-nav-row"
+              data-selected={location.pathname === item.href ? "" : undefined}
+            >
+              <Icon name={item.icon} size={14} />
+              <span>{item.label}</span>
+            </A>
+          )}
+        </For>
+      </aside>
+      <div class="page-scroll">{props.children as never}</div>
     </div>
   )
 }
+
+/* ------------------------------------------------------------------ home */
 
 /* ------------------------------------------------------------------ session */
 
@@ -362,6 +293,7 @@ function SessionPanel(props: {
   onDecide: (approval: Approval, decision: "approve" | "reject") => void
   tab: "review" | "context" | "files"
   onTab: (tab: "review" | "context" | "files") => void
+  onClose?: () => void
 }) {
   const queryClient = useQueryClient()
   return (
@@ -378,6 +310,11 @@ function SessionPanel(props: {
         </button>
         <div class="composer-spacer" />
         <span class="tag">{props.session?.id.slice(0, 10)}</span>
+        <Show when={props.onClose}>
+          <button class="icon-button" type="button" onClick={props.onClose} title="Close panel">
+            <Icon name="close" size={12} />
+          </button>
+        </Show>
       </div>
       <div class="side-content">
         <Show when={props.tab === "review"}>
@@ -575,22 +512,22 @@ export function SessionPage() {
 
   return (
     <div class="session-screen">
-      <div class="session-top">
-        <button class="icon-button drawer-toggle" type="button" onClick={() => setSideOpen((value) => !value)}>
-          <Icon name="panel" size={15} />
-        </button>
-        <Icon name="approvals" size={14} />
-        <span class="session-title">{session()?.title ?? "Session"}</span>
-        <div class="session-top-spacer" />
-        <Show when={busy()}>
-          <span class="tag amber">working</span>
-        </Show>
-        <Show when={pendingApprovals().length > 0}>
-          <span class="tag amber">{pendingApprovals().length} approval</span>
-        </Show>
-        <button class="icon-button" type="button" onClick={() => setSideOpen((value) => !value)} title="Toggle panel">
-          <Icon name="panel" size={15} />
-        </button>
+      <div class="session-header">
+        <div class="session-header-title">
+          <strong>{session()?.title ?? "Session"}</strong>
+          <span class="session-header-path">Agent-1 local</span>
+        </div>
+        <div class="session-header-actions">
+          <Show when={busy()}>
+            <span class="tag amber">working</span>
+          </Show>
+          <Show when={pendingApprovals().length > 0}>
+            <span class="tag amber">{pendingApprovals().length} approval</span>
+          </Show>
+          <button class="icon-button" type="button" onClick={() => setSideOpen((value) => !value)} title="Toggle review panel">
+            <Icon name="panel" size={15} />
+          </button>
+        </div>
       </div>
       <div class="session-body">
         <div class="chat-pane">
@@ -599,7 +536,7 @@ export function SessionPage() {
               <Show when={(messages.data?.messages.length ?? 0) === 0 && !busy()}>
                 <Empty>
                   <div>
-                    <div class="bold" style={{ color: "var(--text-soft)", "margin-bottom": "6px" }}>
+                    <div class="bold" style={{ color: "var(--v2-text-text-base)", "margin-bottom": "6px" }}>
                       Start a conversation
                     </div>
                     <div>Ask Agent-1 to inspect a folder, research something, or prepare an approval-gated action.</div>
@@ -646,6 +583,7 @@ export function SessionPage() {
             onDecide={(approval, decision) => void decide(approval, decision)}
             tab={sideTab()}
             onTab={setSideTab}
+            onClose={() => setSideOpen(false)}
           />
         </Show>
       </div>

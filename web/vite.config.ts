@@ -14,8 +14,8 @@ export default defineConfig({
         name: "Agent-1",
         short_name: "Agent-1",
         description: "A local, approval-gated personal assistant.",
-        theme_color: "#0b0b0c",
-        background_color: "#0b0b0c",
+        theme_color: "#080808",
+        background_color: "#080808",
         display: "standalone",
         start_url: "/",
         icons: [
@@ -36,7 +36,7 @@ export default defineConfig({
       workbox: {
         navigateFallback: "/index.html",
         navigateFallbackDenylist: [/^\/v1\//, /^\/pair/],
-        globPatterns: ["**/*.{js,css,html,svg,woff2}"],
+        globPatterns: ["**/*.{js,css,html,svg,woff2,ttf}"],
         runtimeCaching: [
           {
             urlPattern: ({ url }) => url.pathname.startsWith("/v1/"),
