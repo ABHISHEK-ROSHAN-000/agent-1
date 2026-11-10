@@ -504,6 +504,7 @@ export class App {
         turns: turns.length,
         inputTokens: turns.reduce((sum, turn) => sum + turn.inputTokens, 0),
         outputTokens: turns.reduce((sum, turn) => sum + turn.outputTokens, 0),
+        contextTokens: turns[0] ? turns[0].inputTokens + turns[0].outputTokens : 0,
         costUsd: turns.reduce((sum, turn) => sum + turn.costUsd, 0),
         lastActivity: turns[0]?.updatedAt ?? session.updatedAt,
         contextWindow: model?.contextWindow ?? null,

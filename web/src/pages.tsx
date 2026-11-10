@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js"
 import { A, useLocation, useNavigate, useParams } from "@solidjs/router"
+import { Popover } from "@kobalte/core/popover"
 import { useQuery, useQueryClient } from "@tanstack/solid-query"
 import { toast } from "solid-sonner"
 import {
@@ -122,6 +123,14 @@ function ContextPanel(props: { context: ContextInfo | undefined }) {
             <div>
               <span class="stat-label">Context limit</span>
               <span class="stat-value">{context().contextWindow?.toLocaleString() ?? "—"}</span>
+            </div>
+            <div>
+              <span class="stat-label">Usage</span>
+              <span class="stat-value">
+                {context().contextWindow
+                  ? `${Math.round((context().contextTokens / context().contextWindow!) * 100)}%`
+                  : "—"}
+              </span>
             </div>
             <div>
               <span class="stat-label">Total tokens</span>
@@ -418,13 +427,94 @@ function SessionPanel(props: {
   )
 }
 
+function ContextRing(props: { percentage: number; size?: number }) {
+  const size = props.size ?? 16
+  const stroke = 2
+  const radius = (size - stroke) / 2
+  const circumference = 2 * Math.PI * radius
+  const offset = circumference * (1 - Math.max(0, Math.min(100, props.percentage)) / 100)
+  return (
+    <svg
+      class="context-ring"
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle cx={size / 2} cy={size / 2} r={radius} stroke-width={stroke} class="context-ring-track" />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        stroke-width={stroke}
+        stroke-dasharray={String(circumference)}
+        stroke-dashoffset={String(offset)}
+        class="context-ring-progress"
+      />
+    </svg>
+  )
+}
+
+function ContextUsage(props: { context: ContextInfo | undefined; onOpen: () => void }) {
+  const [open, setOpen] = createSignal(false)
+  const tokens = () => props.context?.contextTokens ?? 0
+  const usage = () =>
+    props.context?.contextWindow ? Math.round((tokens() / props.context.contextWindow) * 100) : 0
+  const compactTokens = () =>
+    new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 0 })
+      .format(tokens())
+      .toLowerCase()
+  const cost = () => props.context?.costUsd ?? 0
+
+  return (
+    <Show when={props.context}>
+      <Popover open={open()} onOpenChange={setOpen} placement="bottom-end" gutter={6}>
+        <Popover.Trigger class="context-usage-trigger" type="button" aria-label="Context usage">
+          <ContextRing percentage={usage()} />
+          <span>{compactTokens()}</span>
+          <Show when={cost() > 0}>
+            <span aria-hidden="true">·</span>
+            <span>${cost().toFixed(2)}</span>
+          </Show>
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Content class="context-usage-popover" aria-label="Context usage">
+            <div class="context-usage-row">
+              <span>Tokens</span>
+              <strong>{tokens().toLocaleString()}</strong>
+            </div>
+            <div class="context-usage-row">
+              <span>Cost</span>
+              <strong>${cost().toFixed(2)}</strong>
+            </div>
+            <div class="context-usage-row">
+              <span>Usage</span>
+              <strong>{usage()}%</strong>
+            </div>
+            <button
+              type="button"
+              class="context-usage-view"
+              onClick={() => {
+                setOpen(false)
+                props.onOpen()
+              }}
+            >
+              View context
+            </button>
+          </Popover.Content>
+        </Popover.Portal>
+      </Popover>
+    </Show>
+  )
+}
 export function SessionPage() {
   const params = useParams<{ id: string }>()
   const location = useLocation()
   const id = () => params.id ?? ""
   const queryClient = useQueryClient()
   const [sideTab, setSideTab] = createSignal<"review" | "context" | "files">("review")
-  const [sideOpen, setSideOpen] = createSignal(typeof window === "undefined" ? true : window.innerWidth >= 860)
+  const [sideOpen, setSideOpen] = createSignal(false)
   const [busy, setBusy] = createSignal(false)
   const [liveText, setLiveText] = createSignal("")
   const [liveTurnId, setLiveTurnId] = createSignal<string>()
@@ -432,7 +522,11 @@ export function SessionPage() {
   const [selectedModel, setSelectedModel] = createSignal<string>()
   const [selectedEffort, setSelectedEffort] = createSignal<string | null>(null)
   let stream: { abort(): void } | undefined
+  let chatPane: HTMLDivElement | undefined
   let messagesEl: HTMLDivElement | undefined
+  let messagesInner: HTMLDivElement | undefined
+  const [following, setFollowing] = createSignal(true)
+  const [scrollOverflow, setScrollOverflow] = createSignal(false)
 
   const sessions = useQuery(() => ({ queryKey: ["sessions"], queryFn: api.sessions }))
   const messages = useQuery(() => ({
@@ -478,6 +572,8 @@ export function SessionPage() {
         appliedContextModel = false
         setSelectedModel("")
         setSelectedEffort(null)
+        setFollowing(true)
+        setScrollOverflow(false)
       },
     ),
   )
@@ -499,12 +595,85 @@ export function SessionPage() {
     if (!selectedModel() && fallback) setSelectedModel(fallback)
   })
 
+  let autoScrolling = false
+  let lastScrollTop = 0
+  const scrollToEnd = (behavior: ScrollBehavior = "auto") => {
+    const element = messagesEl
+    if (!element) return
+    autoScrolling = true
+    element.scrollTo({ top: element.scrollHeight, behavior })
+    requestAnimationFrame(() => {
+      autoScrolling = false
+    })
+  }
+
+  const updateScrollState = () => {
+    const element = messagesEl
+    if (!element) return
+    const overflow = element.scrollHeight - element.clientHeight > 1
+    setScrollOverflow(overflow)
+    const atEnd = element.scrollHeight - element.scrollTop - element.clientHeight <= 4
+    if (atEnd) setFollowing(true)
+    else if (!autoScrolling && element.scrollTop < lastScrollTop - 1) setFollowing(false)
+    lastScrollTop = element.scrollTop
+    return { atEnd, overflow }
+  }
+
   createEffect(() => {
     void messages.data?.messages.length
     void liveText()
     void pendingApprovals().length
+    if (!following()) return
     queueMicrotask(() => {
-      if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight
+      if (!following()) return
+      scrollToEnd()
+      updateScrollState()
+    })
+  })
+
+  onMount(() => {
+    const element = messagesEl
+    const inner = messagesInner
+    if (!element) return
+    const composer = chatPane?.querySelector<HTMLElement>(".composer-wrap")
+    const composerObserver = composer
+      ? new ResizeObserver(() => {
+          chatPane?.style.setProperty("--composer-height", `${composer.offsetHeight}px`)
+        })
+      : undefined
+    if (composer && composerObserver) {
+      composerObserver.observe(composer)
+      chatPane?.style.setProperty("--composer-height", `${composer.offsetHeight}px`)
+    }
+    const onScroll = () => updateScrollState()
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0 && element.scrollHeight - element.clientHeight > 1) setFollowing(false)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (["PageUp", "Home", "ArrowUp"].includes(event.key) && element.scrollHeight - element.clientHeight > 1) {
+        setFollowing(false)
+      }
+    }
+    const onPointerDown = () => updateScrollState()
+    const observer = inner
+      ? new ResizeObserver(() => {
+          updateScrollState()
+          if (following()) queueMicrotask(() => following() && scrollToEnd())
+        })
+      : undefined
+    if (inner) observer?.observe(inner)
+    element.addEventListener("scroll", onScroll, { passive: true })
+    element.addEventListener("wheel", onWheel, { passive: true })
+    element.addEventListener("keydown", onKeyDown)
+    element.addEventListener("pointerdown", onPointerDown)
+    updateScrollState()
+    onCleanup(() => {
+      observer?.disconnect()
+      composerObserver?.disconnect()
+      element.removeEventListener("scroll", onScroll)
+      element.removeEventListener("wheel", onWheel)
+      element.removeEventListener("keydown", onKeyDown)
+      element.removeEventListener("pointerdown", onPointerDown)
     })
   })
 
@@ -552,6 +721,7 @@ export function SessionPage() {
     if (busy()) return
     setBusy(true)
     setTurnError(undefined)
+    setFollowing(true)
     try {
       const selection = parseModelKey(selectedModel())
       const started = await api.startMessage(
@@ -613,15 +783,22 @@ export function SessionPage() {
           <Show when={pendingApprovals().length > 0}>
             <span class="tag amber">{pendingApprovals().length} approval</span>
           </Show>
+          <ContextUsage
+            context={context.data}
+            onOpen={() => {
+              setSideOpen(true)
+              setSideTab("context")
+            }}
+          />
           <button class="icon-button" type="button" onClick={() => setSideOpen((value) => !value)} title="Toggle review panel">
             <Icon name="panel" size={15} />
           </button>
         </div>
       </div>
       <div class="session-body">
-        <div class="chat-pane">
+        <div class="chat-pane" ref={chatPane}>
           <div class="messages" ref={messagesEl}>
-            <div class="messages-inner">
+            <div class="messages-inner" ref={messagesInner}>
               <Show when={(messages.data?.messages.length ?? 0) === 0 && !busy()}>
                 <Empty>
                   <div>
@@ -637,7 +814,7 @@ export function SessionPage() {
                 <div class="message message-assistant">
                   <div class="message-meta">assistant</div>
                   <div class="message-live">
-                    {liveText()}
+                    <Markdown content={liveText()} streaming />
                     <span class="typing-cursor" />
                   </div>
                 </div>
@@ -654,6 +831,20 @@ export function SessionPage() {
               </Show>
             </div>
           </div>
+          <Show when={!following() && scrollOverflow()}>
+            <button
+              class="jump-to-latest"
+              type="button"
+              title="Jump to latest"
+              aria-label="Jump to latest"
+              onClick={() => {
+                setFollowing(true)
+                scrollToEnd("smooth")
+              }}
+            >
+              <Icon name="chevron" size={14} />
+            </button>
+          </Show>
           <Composer
             onSubmit={send}
             onStop={() => void stop()}

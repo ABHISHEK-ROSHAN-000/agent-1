@@ -201,6 +201,7 @@ export interface ContextInfo {
   turns: number
   inputTokens: number
   outputTokens: number
+  contextTokens: number
   costUsd: number
   lastActivity: string
   contextWindow: number | null

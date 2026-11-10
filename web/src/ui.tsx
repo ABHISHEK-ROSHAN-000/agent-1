@@ -41,7 +41,7 @@ export function statusColor(status: string): string {
   return "muted"
 }
 
-export function Markdown(props: { content: string }) {
+export function Markdown(props: { content: string; streaming?: boolean }) {
   const html = createMemo(() => {
     try {
       const rendered = marked.parse(props.content, { async: false, gfm: true, breaks: true })
@@ -50,7 +50,15 @@ export function Markdown(props: { content: string }) {
       return DOMPurify.sanitize(props.content)
     }
   })
-  return <div class="markdown" innerHTML={html()} />
+  return (
+    <div
+      class="markdown-content"
+      data-component="markdown"
+      data-streaming={props.streaming ? "" : undefined}
+      data-markdown-ready=""
+      innerHTML={html()}
+    />
+  )
 }
 
 export function Spinner() {
