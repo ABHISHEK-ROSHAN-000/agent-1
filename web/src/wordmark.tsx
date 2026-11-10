@@ -26,8 +26,9 @@ export function AgentOneWordmark(props: {
       <g opacity={props.muted === false ? 1 : 0.6}>
         <g mask={props.fade === false ? undefined : `url(#${mask})`}>
           <text
-            x="0"
+            x="360"
             y="104"
+            text-anchor="middle"
             font-family="Inter, Segoe UI, sans-serif"
             font-size="126"
             font-weight="640"
