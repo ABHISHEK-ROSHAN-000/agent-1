@@ -1,6 +1,7 @@
 import { ensureDataDirs, PHASE, resolveConfig } from "../core/config"
 import { Logger, resolveLogLevel } from "../core/log"
 import { Database } from "../db/database"
+import { MemoryService } from "../memory/memory-service"
 import { AuthService } from "../auth/auth-service"
 import { SecretStore } from "../auth/secret-store"
 import { EventService } from "../events/service"
@@ -76,9 +77,10 @@ async function main(): Promise<void> {
     const workspace = new WorkspaceService(db, logger, config.dataDir)
     const journal = new JournalService(db, logger)
     await journal.reconcile()
-    const tools = new ToolService(workspace, journal, logger)
+    const memory = new MemoryService(db)
+    const tools = new ToolService(workspace, journal, logger, memory)
     const turnBus = new TurnBus()
-    const turns = new TurnService(db, events, models, providers, permissions, tools, turnBus, logger)
+    const turns = new TurnService(db, events, models, providers, permissions, tools, turnBus, logger, memory)
     remoteService = new RemoteService(db, logger, () => `127.0.0.1:${server?.port ?? 0}`)
 
     const app = new App({

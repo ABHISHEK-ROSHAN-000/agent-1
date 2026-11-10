@@ -47,6 +47,8 @@ interface SessionRow {
   readonly reasoning_effort: string | null
   readonly summary: string | null
   readonly summary_through_seq: number | null
+  readonly memory_snapshot_json: string | null
+  readonly memory_snapshot_at: string | null
 }
 
 export interface ProviderRecord {
@@ -345,6 +347,8 @@ function rowToSession(row: SessionRow): Session {
     reasoningEffort: row.reasoning_effort,
     summary: row.summary,
     summaryThroughSeq: row.summary_through_seq,
+    memorySnapshotJson: row.memory_snapshot_json,
+    memorySnapshotAt: row.memory_snapshot_at,
   }
 }
 
@@ -836,7 +840,8 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<SessionRow>`
-          SELECT id, title, created_at, updated_at, provider_id, model_id, reasoning_effort, summary, summary_through_seq
+          SELECT id, title, created_at, updated_at, provider_id, model_id, reasoning_effort, summary,
+                 summary_through_seq, memory_snapshot_json, memory_snapshot_at
           FROM sessions
           ORDER BY updated_at DESC, id DESC
         `
@@ -849,7 +854,8 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<SessionRow>`
-          SELECT id, title, created_at, updated_at, provider_id, model_id, reasoning_effort, summary, summary_through_seq
+          SELECT id, title, created_at, updated_at, provider_id, model_id, reasoning_effort, summary,
+                 summary_through_seq, memory_snapshot_json, memory_snapshot_at
           FROM sessions
           WHERE id = ${id}
         `
@@ -1343,6 +1349,21 @@ export class Database {
       sql`
         UPDATE sessions SET provider_id = ${providerId}, model_id = ${modelId},
           reasoning_effort = ${reasoningEffort}, updated_at = ${nowIso()}
+        WHERE id = ${sessionId}
+      `.pipe(Effect.asVoid),
+    )
+  }
+
+  async setSessionMemorySnapshot(
+    sessionId: string,
+    snapshotJson: string,
+    snapshotAt: string = nowIso(),
+  ): Promise<void> {
+    await this.query((sql) =>
+      sql`
+        UPDATE sessions
+        SET memory_snapshot_json = ${snapshotJson}, memory_snapshot_at = ${snapshotAt},
+            updated_at = ${nowIso()}
         WHERE id = ${sessionId}
       `.pipe(Effect.asVoid),
     )

@@ -17,6 +17,8 @@ import { tool, type Tool } from "ai"
 import { z } from "zod"
 import type { Logger } from "../core/log"
 import { sha256 } from "../core/ids"
+import type { MemoryService } from "../memory/memory-service"
+import { MemoryError } from "../memory/types"
 import type { ToolRisk } from "../shared/types"
 import type { JournalService } from "./journal-service"
 import { JournalError, sha256File } from "./journal-service"
@@ -35,6 +37,7 @@ export interface ToolInfo {
   readonly description: string
   readonly risk: ToolRisk
   readonly readOnly: boolean
+  readonly approvalRequired?: boolean
 }
 
 interface ToolEntry extends ToolInfo {
@@ -46,6 +49,20 @@ const moveInput = z.object({
   from: z.string().min(1).max(4_000),
   to: z.string().min(1).max(4_000),
   sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+})
+
+const memoryInput = z.object({
+  target: z.enum(["user", "memory"]),
+  operations: z
+    .array(
+      z.object({
+        action: z.enum(["add", "patch", "remove"]),
+        content: z.string().min(1).max(20_000).optional(),
+        oldText: z.string().min(1).max(20_000).optional(),
+      }),
+    )
+    .min(1)
+    .max(50),
 })
 
 const jsonValue = (value: unknown) => JSON.parse(JSON.stringify(value)) as unknown
@@ -125,6 +142,7 @@ export class ToolService {
     private readonly workspace: WorkspaceService,
     private readonly journal: JournalService,
     private readonly logger: Logger,
+    private readonly memory?: MemoryService,
   ) {
     this.entries = new Map()
     this.register({
@@ -291,6 +309,56 @@ export class ToolService {
       inputSchema: z.object({ query: z.string().min(1).max(500) }),
       execute: async (input) => this.webSearch(input),
     })
+    if (this.memory) {
+      this.register({
+        name: "memory",
+        action: "memory.write",
+        description:
+          "Maintain durable memory across sessions. Use target 'user' for identity and preferences, or 'memory' for environment facts and conventions. Send all changes for one target in one atomic operations array. Actions are add, patch, and remove; there is no read action because memory is injected into the prompt at session start.",
+        risk: "write",
+        readOnly: false,
+        approvalRequired: false,
+        inputSchema: memoryInput,
+        execute: async (input, context) => this.executeMemory(input, context),
+      })
+    }
+  }
+
+  private async executeMemory(input: unknown, context: ToolContext): Promise<unknown> {
+    const memory = this.memory
+    if (!memory) throw new Error("Memory is not available.")
+    const parsed = memoryInput.parse(input)
+    try {
+      const result = await memory.mutate({
+        store: parsed.target,
+        operations: parsed.operations,
+        actor: "agent",
+        sessionId: context.sessionId,
+        turnId: context.turnId,
+      })
+      return {
+        success: true,
+        target: parsed.target,
+        changed: result.changed,
+        actions: result.actions,
+        usage: result.usage,
+        message: result.message,
+      }
+    } catch (error) {
+      if (!(error instanceof MemoryError)) throw error
+      const details: Record<string, unknown> = {
+        success: false,
+        error: error.message,
+        code: error.code,
+      }
+      if (error.details.currentEntries) details.current_entries = error.details.currentEntries
+      if (error.details.usage) details.usage = error.details.usage
+      if (error.details.requiredFree !== undefined) details.required_free = error.details.requiredFree
+      if (error.details.closestEntries) details.closest_entries = error.details.closestEntries
+      if (error.details.matches) details.matches = error.details.matches
+      if (error.details.threats) details.threats = error.details.threats
+      return details
+    }
   }
 
   private register(entry: ToolEntry): void {
@@ -312,12 +380,13 @@ export class ToolService {
 
   list(): ToolInfo[] {
     return Array.from(this.entries.values())
-      .map(({ name, action, description, risk, readOnly }) => ({
+      .map(({ name, action, description, risk, readOnly, approvalRequired }) => ({
         name,
         action,
         description,
         risk,
         readOnly,
+        approvalRequired: approvalRequired ?? !readOnly,
       }))
       .sort((left, right) => left.name.localeCompare(right.name))
   }

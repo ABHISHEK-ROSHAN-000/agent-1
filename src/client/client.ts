@@ -389,6 +389,7 @@ export class AgentOneClient {
       description: string
       risk: string
       readOnly: boolean
+      approvalRequired?: boolean
     }>
   }> {
     return this.request("GET", "/v1/tools")

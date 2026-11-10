@@ -213,6 +213,7 @@ export interface ToolInfo {
   description: string
   risk: string
   readOnly: boolean
+  approvalRequired?: boolean
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {

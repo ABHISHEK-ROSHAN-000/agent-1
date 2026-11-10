@@ -140,6 +140,7 @@ export function startFakeOpenAI(): FakeOpenAI {
       const wantsEcho = /test_echo|echo/i.test(userText) && toolNames.includes("test_echo")
       const wantsConfirm = /confirm/i.test(userText) && toolNames.includes("test_confirm")
       const wantsLoop = /loop/i.test(userText) && toolNames.includes("test_echo")
+      const memoryMatch = /remember(?:\s+that)?\s+(.+)/i.exec(userText)
       const slow = /slow/i.test(userText)
       const isSummarize = /summarize the earlier conversation/i.test(userText) || /summarize/i.test(systemText)
       const applyMatch = /apply moves:\s*(\{[\s\S]*\})/i.exec(userText)
@@ -153,7 +154,15 @@ export function startFakeOpenAI(): FakeOpenAI {
       if (applyMatch && toolNames.includes("fs_apply_moves") && !hasToolResult) {
         tool = { name: "fs_apply_moves", args: JSON.parse(applyMatch[1]!) as Record<string, unknown> }
       } else if (wantsLoop) tool = { name: "test_echo", args: { message: "loop" } }
-      else if (wantsConfirm && !hasToolResult) {
+      else if (memoryMatch && toolNames.includes("memory") && !hasToolResult) {
+        tool = {
+          name: "memory",
+          args: {
+            target: "user",
+            operations: [{ action: "add", content: memoryMatch[1]!.trim() }],
+          },
+        }
+      } else if (wantsConfirm && !hasToolResult) {
         tool = { name: "test_confirm", args: { note: "confirm from fake" } }
       } else if (wantsEcho && !hasToolResult) {
         tool = { name: "test_echo", args: { message: "hello from fake" } }

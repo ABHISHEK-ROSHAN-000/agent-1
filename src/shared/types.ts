@@ -8,6 +8,8 @@ export interface Session {
   readonly reasoningEffort?: string | null
   readonly summary?: string | null
   readonly summaryThroughSeq?: number | null
+  readonly memorySnapshotJson?: string | null
+  readonly memorySnapshotAt?: string | null
 }
 
 export type ReasoningOption =

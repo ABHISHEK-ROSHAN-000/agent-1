@@ -505,7 +505,9 @@ export function ToolList(props: { tools: ToolInfo[] }) {
                 <span class="tag">{tool.risk}</span>
                 <span class="tag">{tool.action}</span>
               </div>
-              <span class="tiny faint">{tool.readOnly ? "read-only" : "approval-gated"}</span>
+              <span class="tiny faint">
+                {tool.readOnly ? "read-only" : tool.approvalRequired === false ? "direct" : "approval-gated"}
+              </span>
             </div>
             <div class="small muted" style={{ "margin-top": "5px" }}>
               {tool.description}

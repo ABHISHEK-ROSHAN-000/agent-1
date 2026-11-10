@@ -1058,7 +1058,7 @@ async function toolsCommand(parsed: ParsedArgs): Promise<void> {
   }
   for (const tool of result.tools) {
     process.stdout.write(
-      `${tool.name.padEnd(20)} ${tool.risk.padEnd(8)} ${tool.action}${tool.readOnly ? "" : "  (approval)"}\n`,
+      `${tool.name.padEnd(20)} ${tool.risk.padEnd(8)} ${tool.action}${tool.approvalRequired === false ? "" : tool.readOnly ? "" : "  (approval)"}\n`,
     )
   }
 }

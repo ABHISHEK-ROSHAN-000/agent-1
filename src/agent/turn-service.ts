@@ -17,6 +17,8 @@ import {
 import { outputLimit } from "./token-budget"
 import type { Database, NewMessage } from "../db/database"
 import type { EventService } from "../events/service"
+import type { MemoryService } from "../memory/memory-service"
+import type { MemorySnapshot } from "../memory/types"
 import type { Message, ModelSelection, Session, TokenUsage, Turn } from "../shared/types"
 import { argumentsHash, type PermissionService } from "../permissions/permission-service"
 import type { ToolService } from "../tools/tool-service"
@@ -97,6 +99,7 @@ export class TurnService {
     private readonly tools: ToolService,
     private readonly bus: TurnBus,
     private readonly logger: Logger,
+    private readonly memory?: MemoryService,
     options: TurnServiceOptions = {},
   ) {
     this.maxSteps = options.maxSteps ?? Number(process.env.AGENT1_TURN_MAX_STEPS ?? "8")
@@ -194,6 +197,7 @@ export class TurnService {
       const resolved = await this.models.resolve({ providerId: turn.providerId, modelId: turn.modelId })
       let session = await this.db.getSession(turn.sessionId)
       if (!session) throw new Error("Session not found")
+      session = await this.ensureMemorySnapshot(session)
 
       const checkpoint = await this.db.getLatestCheckpoint(turnId)
       let state: CheckpointState
@@ -773,20 +777,60 @@ export class TurnService {
     return fallback
   }
 
+  private async ensureMemorySnapshot(session: Session): Promise<Session> {
+    if (!this.memory || session.memorySnapshotJson) return session
+    try {
+      const snapshot = await this.memory.snapshot()
+      const snapshotJson = JSON.stringify(snapshot)
+      const snapshotAt = new Date().toISOString()
+      await this.db.setSessionMemorySnapshot(session.id, snapshotJson, snapshotAt)
+      return { ...session, memorySnapshotJson: snapshotJson, memorySnapshotAt: snapshotAt }
+    } catch (error) {
+      this.logger.warn("memory.snapshot_failed", {
+        sessionId: session.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return session
+    }
+  }
+
+  private memoryPrompt(session: Session): string {
+    if (!session.memorySnapshotJson) return ""
+    try {
+      const snapshot = JSON.parse(session.memorySnapshotJson) as Partial<MemorySnapshot>
+      const blocks = [snapshot.user?.block, snapshot.memory?.block].filter(
+        (block): block is string => typeof block === "string" && block.trim().length > 0,
+      )
+      if (blocks.length === 0) return ""
+      return [
+        "Persistent memory snapshot (frozen at session start; changes apply in a future session):",
+        ...blocks,
+      ].join("\n\n")
+    } catch (error) {
+      this.logger.warn("memory.snapshot_invalid", {
+        sessionId: session.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return ""
+    }
+  }
+
   private systemPrompt(session: Session, model: ResolvedModel["model"]): string {
-    const summary = session.summary ? `\n\nEarlier conversation summary:\n${session.summary}` : ""
+    const summary = session.summary ? `Earlier conversation summary:\n${session.summary}` : ""
+    const memory = this.memoryPrompt(session)
     return [
       "You are Agent-1, a local personal assistant running on the user's Windows laptop.",
       model.supportsTools
         ? "You can use the available tools. Writes and shell commands require explicit user approval."
         : "This model is running without tool access.",
       model.supportsTools ? `Available tools: ${this.tools.names().join(", ")}.` : "",
+      memory,
       "Use tools when they help. Do not claim a side effect or a tool result you did not receive.",
       "Be direct, concrete, and concise. Ask one clarifying question only when necessary.",
       summary,
     ]
       .filter(Boolean)
-      .join(" ")
+      .join("\n\n")
   }
 
   private toModelMessage(message: Message): ModelMessage {

@@ -117,6 +117,10 @@ export class MemoryStore {
     return usageFor(this.values, this.limit)
   }
 
+  safeEntries(entries: readonly string[] = this.values): string[] {
+    return entries.map((entry) => this.promptEntry(entry))
+  }
+
   resolveEntry(oldText: string): { readonly index: number; readonly entry: string } {
     return this.locate(this.values, oldText)
   }
@@ -150,7 +154,7 @@ export class MemoryStore {
             throw new MemoryError(
               "missing_old_text",
               "'patch' needs oldText, a unique substring of the entry to patch.",
-              { currentEntries: working, usage: usageFor(working, this.limit) },
+              { currentEntries: this.safeEntries(working), usage: usageFor(working, this.limit) },
             )
           }
           const content = operation.content ?? ""
@@ -171,7 +175,7 @@ export class MemoryStore {
             throw new MemoryError(
               "missing_old_text",
               "'remove' needs oldText, a unique substring of the entry to remove.",
-              { currentEntries: working, usage: usageFor(working, this.limit) },
+              { currentEntries: this.safeEntries(working), usage: usageFor(working, this.limit) },
             )
           }
           const located = this.locate(working, oldText)
@@ -185,18 +189,19 @@ export class MemoryStore {
       throw new MemoryError(
         "would_empty",
         "Refusing to empty the memory store. Keep at least one entry, or remove one entry deliberately.",
-        { currentEntries: working, usage: usageFor(working, this.limit) },
+        { currentEntries: this.safeEntries(working), usage: usageFor(working, this.limit) },
       )
     }
 
     const usage = usageFor(working, this.limit)
     if (usage.chars > this.limit) {
+      const currentUsage = usageFor(this.values, this.limit)
       throw new MemoryError(
         "over_limit",
         `Memory would be at ${usage.chars}/${this.limit} chars; free at least ${usage.chars - this.limit} chars.`,
         {
-          currentEntries: working,
-          usage,
+          currentEntries: this.safeEntries(this.values),
+          usage: currentUsage,
           requiredFree: usage.chars - this.limit,
         },
       )
@@ -259,7 +264,11 @@ export class MemoryStore {
       throw new MemoryError(
         "over_limit",
         `Memory would be at ${usage.chars}/${this.limit} chars; free at least ${usage.chars - this.limit} chars.`,
-        { currentEntries: working, usage, requiredFree: usage.chars - this.limit },
+        {
+          currentEntries: this.safeEntries(this.values),
+          usage: usageFor(this.values, this.limit),
+          requiredFree: usage.chars - this.limit,
+        },
       )
     }
 
@@ -278,7 +287,7 @@ export class MemoryStore {
     const usage = this.usage
     const title = this.name === "user" ? "USER PROFILE (who the user is)" : "MEMORY (your personal notes)"
     const rule = "═".repeat(46)
-    const safeEntries = this.values.map((entry) => this.promptEntry(entry))
+    const safeEntries = this.safeEntries()
     return `${rule}\n${title} [${usage.percent}% — ${usage.chars.toLocaleString("en-US")}/${usage.limit.toLocaleString("en-US")} chars]\n${rule}\n${safeEntries.join(ENTRY_DELIMITER)}`
   }
 
@@ -291,7 +300,7 @@ export class MemoryStore {
   private locate(entries: readonly string[], oldText: string): { readonly index: number; readonly entry: string } {
     if (!oldText.trim()) {
       throw new MemoryError("missing_old_text", "A short unique substring is required.", {
-        currentEntries: entries,
+        currentEntries: this.safeEntries(entries),
         usage: usageFor(entries, this.limit),
       })
     }
@@ -306,7 +315,7 @@ export class MemoryStore {
       throw new MemoryError(
         "ambiguous",
         `Multiple entries matched '${oldText}'. Be more specific.`,
-        { matches: exact.map((item) => this.preview(item.entry)) },
+        { matches: exact.map((item) => this.preview(this.promptEntry(item.entry))) },
       )
     }
     if (exact.length === 1 && exact[0]) return exact[0]
@@ -320,7 +329,7 @@ export class MemoryStore {
         throw new MemoryError(
           "ambiguous",
           `Multiple entries matched '${oldText}'. Be more specific.`,
-          { matches: folded.map((item) => this.preview(item.entry)) },
+          { matches: folded.map((item) => this.preview(this.promptEntry(item.entry))) },
         )
       }
       if (folded.length === 1 && folded[0]) return folded[0]
@@ -330,9 +339,9 @@ export class MemoryStore {
       "not_found",
       `No entry matched '${oldText}'. Retry with oldText copied verbatim from the intended entry.`,
       {
-        currentEntries: entries,
+        currentEntries: this.safeEntries(entries),
         usage: usageFor(entries, this.limit),
-        closestEntries: closestEntries(entries, oldText),
+        closestEntries: closestEntries(entries, oldText).map((entry) => this.promptEntry(entry)),
       },
     )
   }
