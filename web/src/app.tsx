@@ -10,6 +10,7 @@ const menuItems: Array<{ href: string; icon: IconName; label: string }> = [
   { href: "/rules", icon: "rules", label: "Rules" },
   { href: "/workspaces", icon: "folder", label: "Workspaces" },
   { href: "/journal", icon: "journal", label: "Journal" },
+  { href: "/providers", icon: "key", label: "Providers" },
   { href: "/models", icon: "model", label: "Models" },
   { href: "/settings", icon: "settings", label: "Settings" },
 ]

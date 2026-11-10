@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js"
 import { A, useLocation, useNavigate, useParams } from "@solidjs/router"
 import { useQuery, useQueryClient } from "@tanstack/solid-query"
 import { toast } from "solid-sonner"
@@ -6,12 +6,15 @@ import {
   api,
   streamTurn,
   type Approval,
+  type CatalogModel,
   type ContextInfo,
   type JournalEntry,
   type Message,
-  type ModelProfile,
+  type ProviderInfo,
   type Session,
   type Workspace,
+  modelKey,
+  parseModelKey,
 } from "./api"
 import { Icon } from "./icons"
 import { PierreDiffView, PierreFileView, PierreTree } from "./pierre"
@@ -24,6 +27,7 @@ function errorMessage(error: unknown): string {
 
 const settingsNav = [
   { href: "/settings", label: "General", icon: "settings" as const },
+  { href: "/providers", label: "Providers", icon: "key" as const },
   { href: "/models", label: "Models", icon: "model" as const },
   { href: "/approvals", label: "Approvals", icon: "approvals" as const },
   { href: "/rules", label: "Rules", icon: "rules" as const },
@@ -109,7 +113,7 @@ function ContextPanel(props: { context: ContextInfo | undefined }) {
             </div>
             <div>
               <span class="stat-label">Provider</span>
-              <span class="stat-value">{context().model?.kind ?? "—"}</span>
+              <span class="stat-value">{context().model?.providerName ?? "—"}</span>
             </div>
             <div>
               <span class="stat-label">Model</span>
@@ -457,16 +461,39 @@ export function SessionPage() {
     queryFn: () => api.journal(200),
     enabled: Boolean(id()),
   }))
-  const models = useQuery(() => ({ queryKey: ["models"], queryFn: api.models }))
+  const models = useQuery(() => ({ queryKey: ["models"], queryFn: () => api.models() }))
+  const defaultModel = useQuery(() => ({ queryKey: ["default-model"], queryFn: api.defaultModel }))
 
   const session = () => sessions.data?.sessions.find((item) => item.id === id())
   const sessionApprovals = () => (approvals.data?.approvals ?? []).filter((approval) => approval.sessionId === id())
   const pendingApprovals = () => sessionApprovals().filter((approval) => approval.status === "pending")
   const sessionJournal = () => (journal.data?.entries ?? []).filter((entry) => entry.sessionId === id())
 
+  let appliedContextModel = false
+  createEffect(
+    on(
+      () => id(),
+      () => {
+        appliedContextModel = false
+        setSelectedModel("")
+      },
+    ),
+  )
   createEffect(() => {
-    const model = session()?.modelProfileId ?? models.data?.profiles?.[0]?.id
-    if (model && !selectedModel()) setSelectedModel(model)
+    const contextModel = context.data?.model
+      ? `${context.data.model.providerId}/${context.data.model.modelId}`
+      : undefined
+    if (contextModel && !appliedContextModel) {
+      appliedContextModel = true
+      setSelectedModel(contextModel)
+      return
+    }
+    const fallback = defaultModel.data?.model
+      ? modelKey(defaultModel.data.model)
+      : models.data?.models?.[0]
+        ? modelKey(models.data.models[0])
+        : undefined
+    if (!selectedModel() && fallback) setSelectedModel(fallback)
   })
 
   createEffect(() => {
@@ -522,7 +549,7 @@ export function SessionPage() {
     setBusy(true)
     setTurnError(undefined)
     try {
-      const started = await api.startMessage(id(), text, selectedModel() || undefined)
+      const started = await api.startMessage(id(), text, parseModelKey(selectedModel()))
       await attachStream(started.turn.id)
     } catch (error) {
       setTurnError(errorMessage(error))
@@ -622,9 +649,17 @@ export function SessionPage() {
             onSubmit={send}
             onStop={() => void stop()}
             busy={busy()}
-            models={models.data?.profiles ?? []}
+            models={models.data?.models ?? []}
             modelId={selectedModel()}
-            onModel={setSelectedModel}
+            onModel={(value) => {
+              setSelectedModel(value)
+              const selection = parseModelKey(value)
+              if (!selection) return
+              void api
+                .setSessionModel(id(), selection)
+                .then(() => queryClient.invalidateQueries({ queryKey: ["context", id()] }))
+                .catch((error) => toast.error(errorMessage(error)))
+            }}
           />
         </div>
         <Show when={sideOpen()}>
@@ -898,62 +933,70 @@ export function JournalPage() {
 
 export function ModelsPage() {
   const queryClient = useQueryClient()
-  const models = useQuery(() => ({ queryKey: ["models"], queryFn: api.models }))
-  const [name, setName] = createSignal("")
-  const [kind, setKind] = createSignal<"cloud" | "local">("local")
-  const [baseUrl, setBaseUrl] = createSignal("")
-  const [modelId, setModelId] = createSignal("")
-  const [apiKey, setApiKey] = createSignal("")
-  const [busy, setBusy] = createSignal(false)
+  const providers = useQuery(() => ({ queryKey: ["providers"], queryFn: api.providers }))
+  const models = useQuery(() => ({ queryKey: ["models-all"], queryFn: () => api.models(undefined, true) }))
+  const defaultModel = useQuery(() => ({ queryKey: ["default-model"], queryFn: api.defaultModel }))
+  const [search, setSearch] = createSignal("")
 
-  const add = async () => {
-    if (!name() || !baseUrl() || !modelId()) return
-    setBusy(true)
-    try {
-      await api.createModel({
-        name: name(),
-        kind: kind(),
-        baseUrl: baseUrl(),
-        modelId: modelId(),
-        ...(apiKey() ? { apiKey: apiKey() } : {}),
-      })
-      setName("")
-      setBaseUrl("")
-      setModelId("")
-      setApiKey("")
-      await queryClient.invalidateQueries({ queryKey: ["models"] })
-      toast.success("Model profile created")
-    } catch (error) {
-      toast.error(errorMessage(error))
-    } finally {
-      setBusy(false)
+  const providerName = (providerId: string) =>
+    providers.data?.providers.find((provider) => provider.id === providerId)?.name ?? providerId
+  const filtered = () =>
+    (models.data?.models ?? []).filter((model) => {
+      const query = search().trim().toLowerCase()
+      return !query || `${model.name} ${model.modelId} ${providerName(model.providerId)}`.toLowerCase().includes(query)
+    })
+  const grouped = () => {
+    const map = new Map<string, CatalogModel[]>()
+    for (const model of filtered()) {
+      const group = map.get(model.providerId) ?? []
+      group.push(model)
+      map.set(model.providerId, group)
     }
+    return [...map.entries()]
   }
 
-  const test = async (profile: ModelProfile) => {
-    try {
-      const result = await api.testModel(profile.id)
-      toast.success(`Model test OK · tools ${result.supportsTools ? "yes" : "no"} · ${result.latencyMs}ms`)
-      await queryClient.invalidateQueries({ queryKey: ["models"] })
-    } catch (error) {
-      toast.error(errorMessage(error))
-    }
+  const refresh = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["providers"] }),
+      queryClient.invalidateQueries({ queryKey: ["models"] }),
+      queryClient.invalidateQueries({ queryKey: ["models-all"] }),
+      queryClient.invalidateQueries({ queryKey: ["default-model"] }),
+    ])
   }
 
-  const makeDefault = async (profile: ModelProfile) => {
+  const toggle = async (model: CatalogModel, enabled: boolean) => {
     try {
-      await api.setDefaultModel(profile.id)
-      await queryClient.invalidateQueries({ queryKey: ["models"] })
-      toast.success(`${profile.name} is now the default`)
+      await api.updateModel(model.providerId, model.modelId, { enabled })
+      await refresh()
     } catch (error) {
       toast.error(errorMessage(error))
     }
   }
 
-  const remove = async (profile: ModelProfile) => {
+  const favorite = async (model: CatalogModel) => {
     try {
-      await api.removeModel(profile.id)
-      await queryClient.invalidateQueries({ queryKey: ["models"] })
+      await api.updateModel(model.providerId, model.modelId, { favorite: !model.favorite })
+      await refresh()
+    } catch (error) {
+      toast.error(errorMessage(error))
+    }
+  }
+
+  const test = async (model: CatalogModel) => {
+    try {
+      const result = await api.testModel(model.providerId, model.modelId)
+      toast.success(`Model test OK � tools ${result.supportsTools ? "yes" : "no"} � ${result.latencyMs}ms`)
+      await refresh()
+    } catch (error) {
+      toast.error(errorMessage(error))
+    }
+  }
+
+  const makeDefault = async (model: CatalogModel) => {
+    try {
+      await api.setDefaultModel({ providerId: model.providerId, modelId: model.modelId })
+      await refresh()
+      toast.success(`${model.name} is now the default`)
     } catch (error) {
       toast.error(errorMessage(error))
     }
@@ -961,52 +1004,191 @@ export function ModelsPage() {
 
   return (
     <PageBody>
-      <PageHeader title="Models" subtitle="Cloud and local OpenAI-compatible profiles. Keys stay in DPAPI." />
-      <div class="form-grid" style={{ "margin-bottom": "24px" }}>
-        <div class="form-row">
-          <div><label class="form-label">Name</label><input class="form-input" value={name()} onInput={(event) => setName(event.currentTarget.value)} placeholder="Local Ollama" /></div>
-          <div>
-            <label class="form-label">Kind</label>
-            <select class="form-select" value={kind()} onChange={(event) => setKind(event.currentTarget.value as "cloud" | "local")}>
-              <option value="local">Local</option>
-              <option value="cloud">Cloud</option>
-            </select>
-          </div>
-        </div>
-        <div class="form-row">
-          <div><label class="form-label">Base URL</label><input class="form-input" value={baseUrl()} onInput={(event) => setBaseUrl(event.currentTarget.value)} placeholder="http://127.0.0.1:11434/v1" /></div>
-          <div><label class="form-label">Model ID</label><input class="form-input" value={modelId()} onInput={(event) => setModelId(event.currentTarget.value)} placeholder="llama3.2" /></div>
-        </div>
-        <div><label class="form-label">API key (optional for local)</label><input class="form-input" type="password" value={apiKey()} onInput={(event) => setApiKey(event.currentTarget.value)} placeholder="sk-…" /></div>
-        <button class="button button-primary" type="button" onClick={() => void add()} disabled={busy() || !name() || !baseUrl() || !modelId()}>Add model</button>
+      <PageHeader title="Models" subtitle="Enabled models from connected providers. Connect a provider first." />
+      <div class="form-row" style={{ "margin-bottom": "18px" }}>
+        <input
+          class="form-input"
+          value={search()}
+          onInput={(event) => setSearch(event.currentTarget.value)}
+          placeholder="Search models or providers"
+        />
       </div>
-      <div class="list">
-        <For each={models.data?.profiles ?? []}>
-          {(profile) => (
-            <div class="list-card">
-              <div class="row-between">
-                <div class="row">
-                  <span class="tag">{profile.kind}</span>
-                  <strong>{profile.name}</strong>
-                  <span class="mono tiny muted">{profile.modelId}</span>
-                  <Show when={profile.supportsTools}><span class="tag green">tools</span></Show>
-                  <Show when={profile.hasApiKey}><span class="tag"><Icon name="key" size={10} /> key</span></Show>
+      <Show
+        when={grouped().length > 0}
+        fallback={
+          <Empty>
+            No connected models. Open <A href="/providers">Providers</A> and connect OpenRouter or a local provider.
+          </Empty>
+        }
+      >
+        <div class="list">
+          <For each={grouped()}>
+            {([providerId, items]) => (
+              <section>
+                <div class="row-between" style={{ "margin": "14px 0 8px" }}>
+                  <strong>{providerName(providerId)}</strong>
+                  <span class="tag">{items.filter((model) => model.enabled).length} enabled</span>
                 </div>
-                <div class="row">
-                  <button class="button button-secondary button-small" type="button" onClick={() => void test(profile)}>Test</button>
-                  <button class="button button-ghost button-small" type="button" onClick={() => void makeDefault(profile)}>Default</button>
-                  <button class="icon-button" type="button" onClick={() => void remove(profile)}><Icon name="trash" size={13} /></button>
-                </div>
-              </div>
-              <div class="mono tiny muted" style={{ "margin-top": "5px" }}>{profile.baseUrl}</div>
-            </div>
-          )}
-        </For>
-      </div>
+                <For each={items}>
+                  {(model) => (
+                    <div class="list-card">
+                      <div class="row-between">
+                        <div class="row">
+                          <input
+                            type="checkbox"
+                            checked={model.enabled}
+                            title="Show in model picker"
+                            onChange={(event) => void toggle(model, event.currentTarget.checked)}
+                          />
+                          <strong>{model.name}</strong>
+                          <span class="mono tiny muted">{model.modelId}</span>
+                          <Show when={model.supportsTools}><span class="tag green">tools</span></Show>
+                          <Show when={model.reasoning}><span class="tag">reasoning</span></Show>
+                          <Show when={model.costInputPerMillion === 0 && model.costOutputPerMillion === 0}>
+                            <span class="tag green">free</span>
+                          </Show>
+                          <Show when={defaultModel.data?.model?.providerId === model.providerId && defaultModel.data?.model?.modelId === model.modelId}>
+                            <span class="tag amber">default</span>
+                          </Show>
+                        </div>
+                        <div class="row">
+                          <button class="button button-ghost button-small" type="button" onClick={() => void favorite(model)}>
+                            {model.favorite ? "Favorited" : "Favorite"}
+                          </button>
+                          <button class="button button-secondary button-small" type="button" onClick={() => void test(model)}>Test</button>
+                          <button class="button button-ghost button-small" type="button" onClick={() => void makeDefault(model)}>Default</button>
+                        </div>
+                      </div>
+                      <div class="mono tiny muted" style={{ "margin-top": "5px" }}>
+                        {model.contextWindow.toLocaleString()} context � {model.maxOutputTokens.toLocaleString()} output
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </section>
+            )}
+          </For>
+        </div>
+      </Show>
     </PageBody>
   )
 }
 
+function ProviderCard(props: { provider: ProviderInfo }) {
+  const queryClient = useQueryClient()
+  const [apiKey, setApiKey] = createSignal("")
+  const [busy, setBusy] = createSignal(false)
+
+  const refresh = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["providers"] }),
+      queryClient.invalidateQueries({ queryKey: ["models"] }),
+      queryClient.invalidateQueries({ queryKey: ["models-all"] }),
+      queryClient.invalidateQueries({ queryKey: ["default-model"] }),
+    ])
+  }
+
+  const connect = async () => {
+    setBusy(true)
+    try {
+      await api.connectProvider(props.provider.id, apiKey() || undefined)
+      setApiKey("")
+      await refresh()
+      toast.success(`${props.provider.name} connected`)
+    } catch (error) {
+      toast.error(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const refreshCatalog = async () => {
+    setBusy(true)
+    try {
+      await api.refreshProvider(props.provider.id)
+      await refresh()
+      toast.success(`${props.provider.name} catalog refreshed`)
+    } catch (error) {
+      toast.error(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (credentialId: string) => {
+    try {
+      await api.removeProviderCredential(props.provider.id, credentialId)
+      await refresh()
+    } catch (error) {
+      toast.error(errorMessage(error))
+    }
+  }
+
+  return (
+    <div class="list-card">
+      <div class="row-between">
+        <div class="row">
+          <strong>{props.provider.name}</strong>
+          <span class={`tag ${props.provider.connected ? "green" : ""}`}>
+            {props.provider.connected ? `connected � ${props.provider.source}` : "not connected"}
+          </span>
+          <span class="tag">{props.provider.modelCount} models</span>
+          <span class="mono tiny muted">{props.provider.baseUrl}</span>
+        </div>
+        <button class="button button-ghost button-small" type="button" onClick={() => void refreshCatalog()} disabled={busy()}>
+          Refresh catalog
+        </button>
+      </div>
+      <Show when={props.provider.environment.length > 0}>
+        <div class="tiny muted" style={{ "margin-top": "6px" }}>
+          Environment: {props.provider.environment.join(", ")}
+        </div>
+      </Show>
+      <Show when={props.provider.credentials.length > 0}>
+        <div class="list" style={{ "margin-top": "8px" }}>
+          <For each={props.provider.credentials}>
+            {(credential) => (
+              <div class="row-between">
+                <span class="mono tiny">{credential.label}{credential.active ? " � active" : ""}</span>
+                <button class="icon-button" type="button" onClick={() => void remove(credential.id)} title="Remove credential">
+                  <Icon name="trash" size={12} />
+                </button>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
+      <div class="form-row" style={{ "margin-top": "10px" }}>
+        <input
+          class="form-input"
+          type="password"
+          value={apiKey()}
+          onInput={(event) => setApiKey(event.currentTarget.value)}
+          placeholder={props.provider.environment.length > 0 ? `API key (blank uses ${props.provider.environment[0]})` : "API key"}
+        />
+        <button class="button button-primary button-small" type="button" onClick={() => void connect()} disabled={busy()}>
+          {props.provider.connected ? "Add credential" : "Connect"}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+export function ProvidersPage() {
+  const providers = useQuery(() => ({ queryKey: ["providers"], queryFn: api.providers }))
+  return (
+    <PageBody>
+      <PageHeader title="Providers" subtitle="Connect a provider once, then choose any of its models per session." />
+      <Show when={providers.data} fallback={<Empty>Loading providers�</Empty>}>
+        <div class="list">
+          <For each={providers.data?.providers ?? []}>
+            {(provider) => <ProviderCard provider={provider} />}
+          </For>
+        </div>
+      </Show>
+    </PageBody>
+  )
+}
 export function SettingsPage() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()

@@ -2,7 +2,7 @@ import { A, useNavigate } from "@solidjs/router"
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js"
 import { useQuery, useQueryClient } from "@tanstack/solid-query"
 import { toast } from "solid-sonner"
-import { api, type Session, type Workspace } from "./api"
+import { api, modelKey, parseModelKey, type Session, type Workspace } from "./api"
 import { Icon } from "./icons"
 import { AgentOneWordmark } from "./wordmark"
 import { Composer, timeAgo } from "./ui"
@@ -188,11 +188,13 @@ export function NewSessionPage() {
   const [busy, setBusy] = createSignal(false)
   const [selectedModel, setSelectedModel] = createSignal("")
   const [selectedWorkspace, setSelectedWorkspace] = createSignal("")
-  const models = useQuery(() => ({ queryKey: ["models"], queryFn: api.models }))
+  const models = useQuery(() => ({ queryKey: ["models"], queryFn: () => api.models() }))
+  const defaultModel = useQuery(() => ({ queryKey: ["default-model"], queryFn: api.defaultModel }))
   const workspaces = useQuery(() => ({ queryKey: ["workspaces"], queryFn: api.workspaces }))
 
   createEffect(() => {
-    if (!selectedModel() && models.data?.profiles?.[0]) setSelectedModel(models.data.profiles[0].id)
+    const preferred = defaultModel.data?.model ?? models.data?.models?.[0]
+    if (!selectedModel() && preferred) setSelectedModel(modelKey(preferred))
   })
 
   const send = async (text: string) => {
@@ -202,7 +204,7 @@ export function NewSessionPage() {
       const result = await api.createSession(text.slice(0, 70))
       await queryClient.invalidateQueries({ queryKey: ["sessions"] })
       try {
-        const started = await api.startMessage(result.session.id, text, selectedModel() || undefined)
+        const started = await api.startMessage(result.session.id, text, parseModelKey(selectedModel()))
         navigate(`/sessions/${encodeURIComponent(result.session.id)}?turn=${encodeURIComponent(started.turn.id)}`)
       } catch (error) {
         toast.error(errorMessage(error))
@@ -223,7 +225,7 @@ export function NewSessionPage() {
           <Composer
             onSubmit={send}
             busy={busy()}
-            models={models.data?.profiles ?? []}
+            models={models.data?.models ?? []}
             modelId={selectedModel()}
             onModel={setSelectedModel}
             placeholder="Ask Agent-1 anything…"

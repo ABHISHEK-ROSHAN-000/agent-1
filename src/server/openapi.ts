@@ -209,46 +209,81 @@ export const openApiDocument = {
         responses: { "200": { description: "Audit entries" } },
       },
     },
-    "/v1/model-profiles": {
+    "/v1/providers": {
       get: {
-        summary: "List model profiles",
+        summary: "List providers and credential sources",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
-        responses: { "200": { description: "Model profiles" } },
+        responses: { "200": { description: "Providers" } },
       },
       post: {
-        summary: "Create a cloud or local model profile",
+        summary: "Create a custom OpenAI-compatible provider",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
-        responses: { "201": { description: "Profile created" }, "400": { description: "Invalid profile" } },
+        responses: { "201": { description: "Provider created" } },
       },
     },
-    "/v1/model-profiles/{id}": {
-      patch: {
-        summary: "Update a model profile",
-        security: [{ basicAuth: [] }, { sessionCookie: [] }],
-        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Profile updated" } },
-      },
-      delete: {
-        summary: "Remove a model profile",
-        security: [{ basicAuth: [] }, { sessionCookie: [] }],
-        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Profile removed" } },
-      },
-    },
-    "/v1/model-profiles/{id}/test": {
+    "/v1/providers/{id}/connect": {
       post: {
-        summary: "Probe a model profile for text and tool calling",
+        summary: "Store a provider credential",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Probe result" } },
+        responses: { "200": { description: "Provider connected" } },
       },
     },
-    "/v1/model-profiles/{id}/default": {
+    "/v1/providers/{id}/connect-env": {
       post: {
-        summary: "Set the default model profile",
+        summary: "Store the configured environment credential",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Provider connected" } },
+      },
+    },
+    "/v1/providers/{id}/refresh": {
+      post: {
+        summary: "Refresh a provider model catalog",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Catalog refreshed" } },
+      },
+    },
+    "/v1/providers/{id}/credentials/{credentialId}/activate": {
+      post: {
+        summary: "Activate a provider credential",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "credentialId", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: { "200": { description: "Credential activated" } },
+      },
+    },
+    "/v1/models": {
+      get: {
+        summary: "List connected provider models",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Models" } },
+      },
+    },
+    "/v1/models/default": {
+      get: {
+        summary: "Get the default model",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Default model" } },
+      },
+      put: {
+        summary: "Set the default model",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
         responses: { "200": { description: "Default updated" } },
+      },
+    },
+    "/v1/models/{providerId}/{modelId}/test": {
+      post: {
+        summary: "Probe a provider model for text and tools",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [
+          { name: "providerId", in: "path", required: true, schema: { type: "string" } },
+          { name: "modelId", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: { "200": { description: "Probe result" } },
       },
     },
     "/v1/sessions": {

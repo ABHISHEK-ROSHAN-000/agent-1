@@ -3,40 +3,68 @@ export interface Session {
   readonly title: string
   readonly createdAt: string
   readonly updatedAt: string
-  readonly modelProfileId?: string | null
+  readonly providerId?: string | null
+  readonly modelId?: string | null
   readonly summary?: string | null
   readonly summaryThroughSeq?: number | null
 }
 
-export type ModelKind = "cloud" | "local"
+export type ProviderKind = "cloud" | "local"
+export type CredentialSource = "stored" | "environment" | "none"
 
-export interface ModelProfile {
+export interface ProviderCredential {
   readonly id: string
-  readonly name: string
-  readonly kind: ModelKind
-  readonly baseUrl: string
-  readonly modelId: string
-  readonly contextWindow: number
-  readonly maxOutputTokens: number
-  readonly costInputPerMillion: number
-  readonly costOutputPerMillion: number
-  readonly supportsTools: boolean
-  readonly supportsStreaming: boolean
-  readonly hasApiKey: boolean
-  readonly createdAt: string
-  readonly updatedAt: string
+  readonly label: string
+  readonly active: boolean
+  readonly source: "stored"
 }
 
-export interface ModelProfileInput {
+export interface ProviderInfo {
+  readonly id: string
   readonly name: string
-  readonly kind: ModelKind
+  readonly kind: ProviderKind
   readonly baseUrl: string
+  readonly connected: boolean
+  readonly source: CredentialSource
+  readonly credentials: readonly ProviderCredential[]
+  readonly environment: readonly string[]
+  readonly modelCount: number
+}
+
+export interface CatalogModel {
+  readonly providerId: string
   readonly modelId: string
-  readonly contextWindow?: number
-  readonly maxOutputTokens?: number
-  readonly costInputPerMillion?: number
-  readonly costOutputPerMillion?: number
-  readonly apiKey?: string
+  readonly name: string
+  readonly family?: string
+  readonly contextWindow: number
+  readonly maxOutputTokens: number
+  readonly inputModalities: readonly string[]
+  readonly outputModalities: readonly string[]
+  readonly supportsTools: boolean
+  readonly supportsTemperature: boolean
+  readonly reasoning: boolean
+  readonly costInputPerMillion: number
+  readonly costOutputPerMillion: number
+  readonly costCacheReadPerMillion: number
+  readonly costCacheWritePerMillion: number
+  readonly enabled: boolean
+  readonly favorite: boolean
+  readonly status?: string
+}
+
+export interface ModelSelection {
+  readonly providerId: string
+  readonly modelId: string
+}
+
+export interface SelectedModel extends ModelSelection {
+  readonly name: string
+  readonly providerName: string
+  readonly contextWindow: number
+  readonly maxOutputTokens: number
+  readonly supportsTools: boolean
+  readonly costInputPerMillion: number
+  readonly costOutputPerMillion: number
 }
 
 export type MessageRole = "user" | "assistant" | "tool" | "system"
@@ -66,7 +94,8 @@ export interface Turn {
   readonly id: string
   readonly sessionId: string
   readonly status: TurnStatus
-  readonly modelProfileId: string
+  readonly providerId: string
+  readonly modelId: string
   readonly userMessageId: string
   readonly stepCount: number
   readonly inputTokens: number

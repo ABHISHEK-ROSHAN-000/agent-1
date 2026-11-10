@@ -5,6 +5,7 @@ import { AuthService } from "../auth/auth-service"
 import { SecretStore } from "../auth/secret-store"
 import { EventService } from "../events/service"
 import { ModelService } from "../models/model-service"
+import { ProviderService } from "../models/provider-service"
 import { PermissionService } from "../permissions/permission-service"
 import { WorkspaceService } from "../tools/workspace-service"
 import { JournalService } from "../tools/journal-service"
@@ -67,7 +68,9 @@ async function main(): Promise<void> {
     await auth.initialize()
     await auth.pruneExpired()
     events = new EventService(db, logger)
-    const models = new ModelService(db, logger, config.modelSecretsPath)
+    const providers = new ProviderService(db, logger, config.modelSecretsPath)
+    await providers.initialize()
+    const models = new ModelService(providers, logger)
     const permissions = new PermissionService(db, logger)
     await permissions.expireApprovals()
     const workspace = new WorkspaceService(db, logger, config.dataDir)
@@ -75,7 +78,7 @@ async function main(): Promise<void> {
     await journal.reconcile()
     const tools = new ToolService(workspace, journal, logger)
     const turnBus = new TurnBus()
-    const turns = new TurnService(db, events, models, permissions, tools, turnBus, logger)
+    const turns = new TurnService(db, events, models, providers, permissions, tools, turnBus, logger)
     remoteService = new RemoteService(db, logger, () => `127.0.0.1:${server?.port ?? 0}`)
 
     const app = new App({
@@ -84,6 +87,7 @@ async function main(): Promise<void> {
       auth,
       events,
       models,
+      providers,
       turns,
       turnBus,
       permissions,

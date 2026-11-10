@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { rmSync } from "node:fs"
 import path from "node:path"
-import { startTestDaemon, waitFor, type TestDaemon } from "../test/helpers"
+import { configureTestProvider, startTestDaemon, waitFor, type TestDaemon } from "../test/helpers"
 import { startFakeOpenAI, type FakeOpenAI } from "../test/fake-openai"
 import { removeState } from "../daemon/state"
 
@@ -31,41 +31,24 @@ async function startDaemonWithModel(env?: Record<string, string>) {
   servers.push(fake)
   const daemon = await startTestDaemon({ env })
   daemons.push(daemon)
-  const response = await fetch(`${daemon.state.url}/v1/model-profiles`, {
-    method: "POST",
-    headers: {
-      authorization: basic(daemon.password),
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      name: "Test model",
-      kind: "cloud",
-      baseUrl: fake.url,
-      modelId: "fake-model",
-      apiKey: "sk-test-not-for-logs",
-      contextWindow: 8192,
-      maxOutputTokens: 256,
-    }),
+  await configureTestProvider(daemon.client, fake.url, {
+    name: "Test model",
+    apiKey: "sk-test-not-for-logs",
+    contextWindow: 8192,
+    maxOutputTokens: 256,
   })
-  expect(response.status).toBe(201)
-  const profile = (await response.json()) as { profile: { id: string } }
   const session = await daemon.client.createSession("Chat session")
-  return { fake, daemon, profileId: profile.profile.id, sessionId: session.session.id as string }
+  return { fake, daemon, sessionId: session.session.id as string }
 }
 
-async function startMessage(
-  daemon: TestDaemon,
-  sessionId: string,
-  content: string,
-  modelProfileId?: string,
-) {
+async function startMessage(daemon: TestDaemon, sessionId: string, content: string) {
   const response = await fetch(`${daemon.state.url}/v1/sessions/${sessionId}/messages`, {
     method: "POST",
     headers: {
       authorization: basic(daemon.password),
       "content-type": "application/json",
     },
-    body: JSON.stringify({ content, ...(modelProfileId ? { modelProfileId } : {}) }),
+    body: JSON.stringify({ content }),
   })
   expect(response.status).toBe(202)
   return (await response.json()) as { turn: { id: string }; streamUrl: string }
@@ -146,12 +129,12 @@ describe("Phase 2 turn API", () => {
       ),
     ).toBe(true)
 
-    const profiles = await fetch(`${daemon.state.url}/v1/model-profiles`, {
+    const providers = await fetch(`${daemon.state.url}/v1/providers`, {
       headers: { authorization: basic(daemon.password) },
     })
-    const profilesText = await profiles.text()
-    expect(profilesText).not.toContain("sk-test-not-for-logs")
-    expect(profiles.status).toBe(200)
+    const providersText = await providers.text()
+    expect(providersText).not.toContain("sk-test-not-for-logs")
+    expect(providers.status).toBe(200)
   }, 30_000)
 
   test("runs a tool loop through the HTTP API", async () => {

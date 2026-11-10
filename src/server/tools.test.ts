@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { startFakeOpenAI, type FakeOpenAI } from "../test/fake-openai"
-import { startTestDaemon, waitFor, type TestDaemon } from "../test/helpers"
+import { configureTestProvider, startTestDaemon, waitFor, type TestDaemon } from "../test/helpers"
 
 const daemons: TestDaemon[] = []
 const servers: FakeOpenAI[] = []
@@ -24,13 +24,7 @@ async function setup() {
   servers.push(fake)
   const daemon = await startTestDaemon()
   daemons.push(daemon)
-  await daemon.client.createModelProfile({
-    name: "Tools model",
-    kind: "cloud",
-    baseUrl: fake.url,
-    modelId: "fake-model",
-    apiKey: "sk-tools-test",
-  })
+  await configureTestProvider(daemon.client, fake.url, { name: "Tools model", apiKey: "sk-tools-test" })
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-1-folderops-"))
   dirs.push(root)
   await writeFile(path.join(root, "a.txt"), "A\n")

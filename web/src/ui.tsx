@@ -1,8 +1,8 @@
-import { For, Show, createMemo, createSignal } from "solid-js"
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import DOMPurify from "dompurify"
 import { marked } from "marked"
 import { Icon } from "./icons"
-import type { Approval, ModelProfile, ToolInfo } from "./api"
+import type { Approval, CatalogModel, ToolInfo } from "./api"
 
 export function formatDate(value: string | null | undefined): string {
   if (!value) return "—"
@@ -81,12 +81,143 @@ export function Banner(props: { kind?: "error" | "warn"; children: unknown }) {
   )
 }
 
+function ModelPicker(props: {
+  models: CatalogModel[]
+  value?: string
+  onChange?: (value: string) => void
+  disabled?: boolean
+}) {
+  const [open, setOpen] = createSignal(false)
+  const [query, setQuery] = createSignal("")
+  let root: HTMLDivElement | undefined
+
+  const selected = () =>
+    props.models.find((model) => `${model.providerId}/${model.modelId}` === props.value)
+  const filtered = () => {
+    const search = query().trim().toLowerCase()
+    return props.models.filter(
+      (model) =>
+        !search ||
+        `${model.name} ${model.modelId} ${model.providerId}`.toLowerCase().includes(search),
+    )
+  }
+  const groups = createMemo(() => {
+    const map = new Map<string, CatalogModel[]>()
+    for (const model of filtered()) {
+      const group = map.get(model.providerId) ?? []
+      group.push(model)
+      map.set(model.providerId, group)
+    }
+    return [...map.entries()]
+  })
+
+  onMount(() => {
+    const close = (event: PointerEvent) => {
+      if (root && !root.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener("pointerdown", close)
+    onCleanup(() => document.removeEventListener("pointerdown", close))
+  })
+
+  return (
+    <div
+      ref={root}
+      class="composer-control"
+      style={{ position: "relative", display: "inline-flex", "align-items": "center", cursor: "pointer" }}
+    >
+      <button
+        type="button"
+        disabled={props.disabled || props.models.length === 0}
+        onClick={() => setOpen((value) => !value)}
+        style={{ background: "transparent", border: "0", color: "inherit", "font": "inherit", cursor: "inherit", padding: "0" }}
+      >
+        {selected()?.name ?? "No model"} ▾
+      </button>
+      <Show when={open()}>
+        <div
+          style={{
+            position: "absolute",
+            bottom: "calc(100% + 8px)",
+            left: "0",
+            width: "min(360px, calc(100vw - 28px))",
+            "max-height": "360px",
+            overflow: "auto",
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            "border-radius": "10px",
+            padding: "8px",
+            "z-index": "80",
+            "box-shadow": "0 16px 40px rgb(0 0 0 / 30%)",
+          }}
+        >
+          <input
+            class="form-input"
+            style={{ "margin-bottom": "8px" }}
+            value={query()}
+            onInput={(event) => setQuery(event.currentTarget.value)}
+            placeholder="Search models"
+            autofocus
+          />
+          <Show when={groups().length > 0} fallback={<div class="tiny muted">No matching models</div>}>
+            <For each={groups()}>
+              {([providerId, models]) => (
+                <div style={{ "margin-bottom": "8px" }}>
+                  <div class="tiny muted" style={{ padding: "4px 6px", "text-transform": "uppercase" }}>
+                    {providerId}
+                  </div>
+                  <For each={models}>
+                    {(model) => (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          props.onChange?.(`${model.providerId}/${model.modelId}`)
+                          setOpen(false)
+                          setQuery("")
+                        }}
+                        style={{
+                          display: "flex",
+                          width: "100%",
+                          gap: "8px",
+                          "align-items": "center",
+                          "justify-content": "space-between",
+                          padding: "7px 8px",
+                          border: "0",
+                          "border-radius": "6px",
+                          background:
+                            props.value === `${model.providerId}/${model.modelId}`
+                              ? "var(--surface-raised)"
+                              : "transparent",
+                          color: "inherit",
+                          cursor: "pointer",
+                          "text-align": "left",
+                        }}
+                      >
+                        <span class="truncate">{model.name}</span>
+                        <span class="row" style={{ gap: "4px", "flex-shrink": "0" }}>
+                          {model.supportsTools ? <span class="tag green">tools</span> : undefined}
+                          {model.costInputPerMillion === 0 && model.costOutputPerMillion === 0 ? (
+                            <span class="tag">free</span>
+                          ) : undefined}
+                        </span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              )}
+            </For>
+          </Show>
+        </div>
+      </Show>
+    </div>
+  )
+}
+
 export function Composer(props: {
   onSubmit: (text: string) => void | Promise<void>
   onStop?: () => void
   busy?: boolean
   disabled?: boolean
-  models: ModelProfile[]
+  models: CatalogModel[]
   modelId?: string
   onModel?: (id: string) => void
   placeholder?: string
@@ -130,20 +261,12 @@ export function Composer(props: {
           <span class="composer-control" title="Agent-1 one mode">
             Agent
           </span>
-          <select
-            class="composer-control"
-            value={props.modelId ?? ""}
-            onChange={(event) => props.onModel?.(event.currentTarget.value)}
-            disabled={props.disabled || props.models.length === 0}
-            title="Model"
-          >
-            <Show when={props.models.length === 0}>
-              <option value="">No model</option>
-            </Show>
-            <For each={props.models}>
-              {(model) => <option value={model.id}>{model.name}</option>}
-            </For>
-          </select>
+          <ModelPicker
+            models={props.models}
+            value={props.modelId}
+            onChange={props.onModel}
+            disabled={props.disabled}
+          />
           <div class="composer-spacer" />
           <Show
             when={props.busy}

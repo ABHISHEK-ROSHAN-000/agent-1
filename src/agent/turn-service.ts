@@ -5,10 +5,11 @@ import {
   type ModelMessage,
 } from "ai"
 import type { Logger } from "../core/log"
-import type { ModelService } from "../models/model-service"
+import type { ModelService, ResolvedModel } from "../models/model-service"
+import type { ProviderService } from "../models/provider-service"
 import type { Database, NewMessage } from "../db/database"
 import type { EventService } from "../events/service"
-import type { Message, ModelProfile, Session, TokenUsage, Turn } from "../shared/types"
+import type { Message, ModelSelection, Session, TokenUsage, Turn } from "../shared/types"
 import { argumentsHash, type PermissionService } from "../permissions/permission-service"
 import type { ToolService } from "../tools/tool-service"
 import type { TurnBus } from "./turn-bus"
@@ -62,10 +63,10 @@ function tokenEstimate(messages: readonly ModelMessage[]): number {
   return Math.ceil(JSON.stringify(messages).length / 4)
 }
 
-function costFor(profile: ModelProfile, inputTokens: number, outputTokens: number): number {
+function costFor(model: { costInputPerMillion: number; costOutputPerMillion: number }, inputTokens: number, outputTokens: number): number {
   return (
-    (inputTokens / 1_000_000) * profile.costInputPerMillion +
-    (outputTokens / 1_000_000) * profile.costOutputPerMillion
+    (inputTokens / 1_000_000) * model.costInputPerMillion +
+    (outputTokens / 1_000_000) * model.costOutputPerMillion
   )
 }
 
@@ -79,6 +80,7 @@ export class TurnService {
     private readonly db: Database,
     private readonly events: EventService,
     private readonly models: ModelService,
+    private readonly providers: ProviderService,
     private readonly permissions: PermissionService,
     private readonly tools: ToolService,
     private readonly bus: TurnBus,
@@ -93,24 +95,30 @@ export class TurnService {
   async startTurn(
     sessionId: string,
     content: string,
-    modelProfileId?: string,
+    selection?: ModelSelection,
   ): Promise<{ turn: Turn; userMessage: Message }> {
     const session = await this.db.getSession(sessionId)
     if (!session) throw new Error("Session not found")
-    const resolved = await this.models.resolve(modelProfileId ?? session.modelProfileId ?? undefined)
-    if (!session.modelProfileId) {
-      await this.db.setSessionModelProfile(sessionId, resolved.profile.id)
-    }
+    const resolved = await this.models.resolve(
+      selection ??
+        (session.providerId && session.modelId
+          ? { providerId: session.providerId, modelId: session.modelId }
+          : undefined),
+    )
+    await this.db.setSessionModel(sessionId, resolved.provider.id, resolved.model.modelId)
     const created = await this.db.createTurnWithUserMessage(
       sessionId,
-      resolved.profile.id,
+      resolved.provider.id,
+      resolved.model.modelId,
       content,
     )
     this.bus.publish(created.turn.id, { type: "status", status: "queued" })
     await this.events.append("turn.started", sessionId, {
       turnId: created.turn.id,
-      modelProfileId: resolved.profile.id,
+      providerId: resolved.provider.id,
+      modelId: resolved.model.modelId,
     })
+    await this.providers.touchModel(resolved.provider.id, resolved.model.modelId)
     void this.runTurn(created.turn.id, false)
     return created
   }
@@ -158,7 +166,7 @@ export class TurnService {
       if (turn.status === "cancelled" || turn.status === "completed" || turn.status === "failed") {
         return
       }
-      const resolved = await this.models.resolve(turn.modelProfileId)
+      const resolved = await this.models.resolve({ providerId: turn.providerId, modelId: turn.modelId })
       let session = await this.db.getSession(turn.sessionId)
       if (!session) throw new Error("Session not found")
 
@@ -167,7 +175,7 @@ export class TurnService {
       if (checkpoint && this.isCheckpointState(checkpoint.state)) {
         state = checkpoint.state
       } else {
-        const history = await this.buildHistory(session, resolved.profile)
+        const history = await this.buildHistory(session, resolved.model)
         session = (await this.db.getSession(session.id)) ?? session
         state = {
           step: 0,
@@ -246,8 +254,7 @@ export class TurnService {
         const step = await this.streamStep(
           turnId,
           session,
-          resolved.profile,
-          resolved.apiKey,
+          resolved,
           state.messages,
           controller.signal,
         )
@@ -259,7 +266,7 @@ export class TurnService {
             inputTokens: state.usage.inputTokens + step.usage.inputTokens,
             outputTokens: state.usage.outputTokens + step.usage.outputTokens,
             costUsd: costFor(
-              resolved.profile,
+              resolved.model,
               state.usage.inputTokens + step.usage.inputTokens,
               state.usage.outputTokens + step.usage.outputTokens,
             ),
@@ -566,20 +573,19 @@ export class TurnService {
   private async streamStep(
     turnId: string,
     session: Session,
-    profile: ModelProfile,
-    apiKey: string | undefined,
+    resolved: ResolvedModel,
     messages: ModelMessage[],
     signal: AbortSignal,
   ): Promise<StepResult> {
-    const model = this.models.createModel(profile, apiKey)
+    const model = this.models.createModel(resolved)
     const result = streamText({
       model,
-      system: this.systemPrompt(session),
+      system: this.systemPrompt(session, resolved.model),
       messages,
-      tools: this.tools.definitions(),
+      ...(resolved.model.supportsTools ? { tools: this.tools.definitions() } : {}),
       stopWhen: stepCountIs(1),
-      maxOutputTokens: profile.maxOutputTokens,
-      temperature: 0,
+      maxOutputTokens: resolved.model.maxOutputTokens,
+      ...(resolved.model.supportsTemperature ? { temperature: 0 } : {}),
       maxRetries: 0,
       abortSignal: signal,
     })
@@ -614,21 +620,20 @@ export class TurnService {
     }
   }
 
-  private async buildHistory(session: Session, profile: ModelProfile): Promise<ModelMessage[]> {
+  private async buildHistory(session: Session, model: ResolvedModel["model"]): Promise<ModelMessage[]> {
     const stored = await this.db.getSessionMessages(session.id, 500)
     const visible = stored.filter(
       (message) => !session.summaryThroughSeq || message.seq > session.summaryThroughSeq,
     )
     let messages = visible.map((message) => this.toModelMessage(message))
-    if (tokenEstimate(messages) > Math.floor(profile.contextWindow * 0.7) && messages.length > 8) {
+    if (tokenEstimate(messages) > Math.floor(model.contextWindow * 0.7) && messages.length > 8) {
       const oldMessages = stored.slice(0, -6)
       const recentMessages = stored.slice(-6)
       const throughSeq = oldMessages[oldMessages.length - 1]?.seq
       if (throughSeq !== undefined) {
         const summary = await this.summarize(
           oldMessages.map((message) => message.text).filter(Boolean),
-          profile,
-          await this.models.resolve(profile.id),
+          await this.models.resolve({ providerId: model.providerId, modelId: model.modelId }),
         )
         await this.db.setSessionSummary(session.id, summary, throughSeq)
         messages = recentMessages.map((message) => this.toModelMessage(message))
@@ -639,19 +644,18 @@ export class TurnService {
 
   private async summarize(
     texts: string[],
-    profile: ModelProfile,
-    resolved: Awaited<ReturnType<ModelService["resolve"]>>,
+    resolved: ResolvedModel,
   ): Promise<string> {
     const fallback = `Earlier conversation was compacted (${texts.length} messages).`
     try {
-      const model = this.models.createModel(profile, resolved.apiKey)
+      const model = this.models.createModel(resolved)
       const result = await generateText({
         model,
         system:
           "Summarize the earlier conversation for use as context. Keep decisions, user preferences, open tasks, and facts. Be concise.",
         prompt: texts.join("\n\n").slice(0, 24_000),
         maxOutputTokens: 400,
-        temperature: 0,
+        ...(resolved.model.supportsTemperature ? { temperature: 0 } : {}),
         maxRetries: 0,
         abortSignal: AbortSignal.timeout(20_000),
       })
@@ -661,16 +665,20 @@ export class TurnService {
     }
   }
 
-  private systemPrompt(session: Session): string {
+  private systemPrompt(session: Session, model: ResolvedModel["model"]): string {
     const summary = session.summary ? `\n\nEarlier conversation summary:\n${session.summary}` : ""
     return [
       "You are Agent-1, a local personal assistant running on the user's Windows laptop.",
-      "You can use the available tools. Writes and shell commands require explicit user approval.",
-      `Available tools: ${this.tools.names().join(", ")}.`,
+      model.supportsTools
+        ? "You can use the available tools. Writes and shell commands require explicit user approval."
+        : "This model is running without tool access.",
+      model.supportsTools ? `Available tools: ${this.tools.names().join(", ")}.` : "",
       "Use tools when they help. Do not claim a side effect or a tool result you did not receive.",
       "Be direct, concrete, and concise. Ask one clarifying question only when necessary.",
       summary,
-    ].join(" ")
+    ]
+      .filter(Boolean)
+      .join(" ")
   }
 
   private toModelMessage(message: Message): ModelMessage {

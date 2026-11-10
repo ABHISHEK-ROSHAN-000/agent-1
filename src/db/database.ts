@@ -13,8 +13,6 @@ import type {
   JournalState,
   Message,
   MessageRole,
-  ModelProfile,
-  ModelProfileInput,
   PermissionRule,
   RuleEffect,
   Session,
@@ -34,24 +32,77 @@ interface SessionRow {
   readonly title: string
   readonly created_at: string
   readonly updated_at: string
-  readonly model_profile_id: string | null
+  readonly provider_id: string | null
+  readonly model_id: string | null
   readonly summary: string | null
   readonly summary_through_seq: number | null
 }
 
-interface ModelProfileRow {
+export interface ProviderRecord {
+  readonly id: string
+  readonly name: string
+  readonly kind: "cloud" | "local"
+  readonly baseUrl: string
+  readonly env: readonly string[]
+  readonly headers: Readonly<Record<string, string>>
+  readonly enabled: boolean
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+interface ProviderRow {
   readonly id: string
   readonly name: string
   readonly kind: "cloud" | "local"
   readonly base_url: string
-  readonly model_id: string
-  readonly context_window: number
-  readonly max_output_tokens: number
-  readonly cost_input_per_million: number
-  readonly cost_output_per_million: number
-  readonly supports_tools: number
-  readonly supports_streaming: number
+  readonly env_json: string
+  readonly headers_json: string | null
+  readonly enabled: number
   readonly created_at: string
+  readonly updated_at: string
+}
+
+export interface ProviderCredentialRecord {
+  readonly id: string
+  readonly providerId: string
+  readonly label: string
+  readonly active: boolean
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+interface ProviderCredentialRow {
+  readonly id: string
+  readonly provider_id: string
+  readonly label: string
+  readonly active: number
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface ProviderModelRow {
+  readonly provider_id: string
+  readonly model_id: string
+  readonly name: string
+  readonly family: string | null
+  readonly type: string
+  readonly released_at: string | null
+  readonly status: string | null
+  readonly context_limit: number
+  readonly output_limit: number
+  readonly input_modalities_json: string
+  readonly output_modalities_json: string
+  readonly tools_supported: number
+  readonly temperature_supported: number
+  readonly reasoning: number
+  readonly cost_input: number
+  readonly cost_output: number
+  readonly cost_cache_read: number
+  readonly cost_cache_write: number
+  readonly enabled: number
+  readonly favorite: number
+  readonly last_used_at: string | null
+  readonly metadata_json: string
   readonly updated_at: string
 }
 
@@ -70,7 +121,8 @@ interface TurnRow {
   readonly id: string
   readonly session_id: string
   readonly status: string
-  readonly model_profile_id: string
+  readonly provider_id: string
+  readonly model_id: string
   readonly user_message_id: string
   readonly step_count: number
   readonly input_tokens: number
@@ -233,28 +285,78 @@ function rowToSession(row: SessionRow): Session {
     title: row.title,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    modelProfileId: row.model_profile_id,
+    providerId: row.provider_id,
+    modelId: row.model_id,
     summary: row.summary,
     summaryThroughSeq: row.summary_through_seq,
   }
 }
 
-function rowToModelProfile(row: ModelProfileRow, hasApiKey: boolean): import("../shared/types").ModelProfile {
+function jsonStrings(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []
+  } catch {
+    return []
+  }
+}
+
+function rowToProvider(row: ProviderRow): ProviderRecord {
+  let headers: Record<string, string> = {}
+  try {
+    const parsed = row.headers_json ? (JSON.parse(row.headers_json) as unknown) : {}
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      headers = Object.fromEntries(
+        Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+      )
+    }
+  } catch {
+    headers = {}
+  }
   return {
     id: row.id,
     name: row.name,
     kind: row.kind,
     baseUrl: row.base_url,
-    modelId: row.model_id,
-    contextWindow: row.context_window,
-    maxOutputTokens: row.max_output_tokens,
-    costInputPerMillion: row.cost_input_per_million,
-    costOutputPerMillion: row.cost_output_per_million,
-    supportsTools: row.supports_tools === 1,
-    supportsStreaming: row.supports_streaming === 1,
-    hasApiKey,
+    env: jsonStrings(row.env_json),
+    headers,
+    enabled: row.enabled === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  }
+}
+
+function rowToProviderCredential(row: ProviderCredentialRow): ProviderCredentialRecord {
+  return {
+    id: row.id,
+    providerId: row.provider_id,
+    label: row.label,
+    active: row.active === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function rowToCatalogModel(row: ProviderModelRow): import("../shared/types").CatalogModel {
+  return {
+    providerId: row.provider_id,
+    modelId: row.model_id,
+    name: row.name,
+    ...(row.family ? { family: row.family } : {}),
+    contextWindow: row.context_limit,
+    maxOutputTokens: row.output_limit,
+    inputModalities: jsonStrings(row.input_modalities_json),
+    outputModalities: jsonStrings(row.output_modalities_json),
+    supportsTools: row.tools_supported === 1,
+    supportsTemperature: row.temperature_supported === 1,
+    reasoning: row.reasoning === 1,
+    costInputPerMillion: row.cost_input,
+    costOutputPerMillion: row.cost_output,
+    costCacheReadPerMillion: row.cost_cache_read,
+    costCacheWritePerMillion: row.cost_cache_write,
+    enabled: row.enabled === 1,
+    favorite: row.favorite === 1,
+    ...(row.status ? { status: row.status } : {}),
   }
 }
 
@@ -282,7 +384,8 @@ function rowToTurn(row: TurnRow): Turn {
     id: row.id,
     sessionId: row.session_id,
     status: row.status as TurnStatus,
-    modelProfileId: row.model_profile_id,
+    providerId: row.provider_id,
+    modelId: row.model_id,
     userMessageId: row.user_message_id,
     stepCount: row.step_count,
     inputTokens: row.input_tokens,
@@ -559,7 +662,7 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<SessionRow>`
-          SELECT id, title, created_at, updated_at, model_profile_id, summary, summary_through_seq
+          SELECT id, title, created_at, updated_at, provider_id, model_id, summary, summary_through_seq
           FROM sessions
           ORDER BY updated_at DESC, id DESC
         `
@@ -572,7 +675,7 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<SessionRow>`
-          SELECT id, title, created_at, updated_at, model_profile_id, summary, summary_through_seq
+          SELECT id, title, created_at, updated_at, provider_id, model_id, summary, summary_through_seq
           FROM sessions
           WHERE id = ${id}
         `
@@ -757,136 +860,306 @@ export class Database {
   }
 
   // ---------------------------------------------------------------------------
-  // Model profiles
+  // Providers and model catalog
 
-  async listModelProfiles(): Promise<ModelProfile[]> {
+  async listProviders(): Promise<ProviderRecord[]> {
     return this.query((sql) =>
       Effect.gen(function* () {
-        const rows = yield* sql<ModelProfileRow>`
-          SELECT id, name, kind, base_url, model_id, context_window, max_output_tokens,
-                 cost_input_per_million, cost_output_per_million, supports_tools,
-                 supports_streaming, created_at, updated_at
-          FROM model_profiles
+        const rows = yield* sql<ProviderRow>`
+          SELECT id, name, kind, base_url, env_json, headers_json, enabled, created_at, updated_at
+          FROM providers
           ORDER BY name ASC, id ASC
         `
-        return rows.map((row) => rowToModelProfile(row, false))
+        return rows.map(rowToProvider)
       }),
     )
   }
 
-  async getModelProfile(id: string): Promise<ModelProfile | null> {
+  async getProvider(id: string): Promise<ProviderRecord | null> {
     return this.query((sql) =>
       Effect.gen(function* () {
-        const rows = yield* sql<ModelProfileRow>`
-          SELECT id, name, kind, base_url, model_id, context_window, max_output_tokens,
-                 cost_input_per_million, cost_output_per_million, supports_tools,
-                 supports_streaming, created_at, updated_at
-          FROM model_profiles
+        const rows = yield* sql<ProviderRow>`
+          SELECT id, name, kind, base_url, env_json, headers_json, enabled, created_at, updated_at
+          FROM providers
           WHERE id = ${id}
         `
         const row = rows[0]
-        return row ? rowToModelProfile(row, false) : null
+        return row ? rowToProvider(row) : null
       }),
     )
   }
 
-  async createModelProfile(
-    input: Required<Pick<ModelProfileInput, "name" | "kind" | "baseUrl" | "modelId">> &
-      Pick<ModelProfileInput, "contextWindow" | "maxOutputTokens" | "costInputPerMillion" | "costOutputPerMillion"> & {
-        supportsTools: boolean
-      },
-  ): Promise<ModelProfile> {
-    const id = newId("mdl")
+  async upsertProvider(input: {
+    id: string
+    name: string
+    kind: "cloud" | "local"
+    baseUrl: string
+    env: readonly string[]
+    headers?: Readonly<Record<string, string>>
+    enabled?: boolean
+  }): Promise<ProviderRecord> {
     const now = nowIso()
-    const contextWindow = input.contextWindow ?? 32_768
-    const maxOutputTokens = input.maxOutputTokens ?? 4_096
-    const costInput = input.costInputPerMillion ?? 0
-    const costOutput = input.costOutputPerMillion ?? 0
-    return this.query((sql) =>
-      Effect.gen(function* () {
-        yield* sql`
-          INSERT INTO model_profiles
-            (id, name, kind, base_url, model_id, context_window, max_output_tokens,
-             cost_input_per_million, cost_output_per_million, supports_tools,
-             supports_streaming, created_at, updated_at)
-          VALUES
-            (${id}, ${input.name}, ${input.kind}, ${input.baseUrl}, ${input.modelId},
-             ${contextWindow}, ${maxOutputTokens}, ${costInput}, ${costOutput},
-             ${input.supportsTools ? 1 : 0}, 1, ${now}, ${now})
-        `
-        return {
-          id,
-          name: input.name,
-          kind: input.kind,
-          baseUrl: input.baseUrl,
-          modelId: input.modelId,
-          contextWindow,
-          maxOutputTokens,
-          costInputPerMillion: costInput,
-          costOutputPerMillion: costOutput,
-          supportsTools: input.supportsTools,
-          supportsStreaming: true,
-          hasApiKey: false,
-          createdAt: now,
-          updatedAt: now,
-        }
-      }),
-    )
-  }
-
-  async updateModelProfile(
-    id: string,
-    input: Partial<
-      Required<Pick<ModelProfileInput, "name" | "kind" | "baseUrl" | "modelId">> & {
-        contextWindow: number
-        maxOutputTokens: number
-        costInputPerMillion: number
-        costOutputPerMillion: number
-        supportsTools: boolean
-      }
-    >,
-  ): Promise<ModelProfile | null> {
-    const current = await this.getModelProfile(id)
-    if (!current) return null
-    const next = {
-      name: input.name ?? current.name,
-      kind: input.kind ?? current.kind,
-      baseUrl: input.baseUrl ?? current.baseUrl,
-      modelId: input.modelId ?? current.modelId,
-      contextWindow: input.contextWindow ?? current.contextWindow,
-      maxOutputTokens: input.maxOutputTokens ?? current.maxOutputTokens,
-      costInputPerMillion: input.costInputPerMillion ?? current.costInputPerMillion,
-      costOutputPerMillion: input.costOutputPerMillion ?? current.costOutputPerMillion,
-      supportsTools: input.supportsTools ?? current.supportsTools,
-      now: nowIso(),
-    }
     await this.query((sql) =>
       sql`
-        UPDATE model_profiles SET
-          name = ${next.name},
-          kind = ${next.kind},
-          base_url = ${next.baseUrl},
-          model_id = ${next.modelId},
-          context_window = ${next.contextWindow},
-          max_output_tokens = ${next.maxOutputTokens},
-          cost_input_per_million = ${next.costInputPerMillion},
-          cost_output_per_million = ${next.costOutputPerMillion},
-          supports_tools = ${next.supportsTools ? 1 : 0},
-          updated_at = ${next.now}
-        WHERE id = ${id}
+        INSERT INTO providers (id, name, kind, base_url, env_json, headers_json, enabled, created_at, updated_at)
+        VALUES (${input.id}, ${input.name}, ${input.kind}, ${input.baseUrl}, ${JSON.stringify(input.env)},
+                ${input.headers ? JSON.stringify(input.headers) : null}, ${input.enabled === false ? 0 : 1},
+                ${now}, ${now})
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          kind = excluded.kind,
+          base_url = excluded.base_url,
+          env_json = excluded.env_json,
+          headers_json = excluded.headers_json,
+          enabled = excluded.enabled,
+          updated_at = excluded.updated_at
       `.pipe(Effect.asVoid),
     )
-    return this.getModelProfile(id)
+    const provider = await this.getProvider(input.id)
+    if (!provider) throw new Error("Failed to persist provider")
+    return provider
   }
 
-  async deleteModelProfile(id: string): Promise<void> {
-    await this.query((sql) => sql`DELETE FROM model_profiles WHERE id = ${id}`.pipe(Effect.asVoid))
+  async listProviderCredentials(providerId: string): Promise<ProviderCredentialRecord[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<ProviderCredentialRow>`
+          SELECT id, provider_id, label, active, created_at, updated_at
+          FROM provider_credentials
+          WHERE provider_id = ${providerId}
+          ORDER BY active DESC, created_at ASC
+        `
+        return rows.map(rowToProviderCredential)
+      }),
+    )
   }
 
-  async setSessionModelProfile(sessionId: string, modelProfileId: string | null): Promise<void> {
+  async createProviderCredential(providerId: string, label: string, active: boolean): Promise<ProviderCredentialRecord> {
+    const id = newId("cred")
+    const now = nowIso()
+    await this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          if (active) {
+            yield* sql`
+              UPDATE provider_credentials SET active = 0, updated_at = ${now}
+              WHERE provider_id = ${providerId}
+            `
+          }
+          yield* sql`
+            INSERT INTO provider_credentials (id, provider_id, label, active, created_at, updated_at)
+            VALUES (${id}, ${providerId}, ${label}, ${active ? 1 : 0}, ${now}, ${now})
+          `
+        }),
+      ),
+    )
+    return {
+      id,
+      providerId,
+      label,
+      active,
+      createdAt: now,
+      updatedAt: now,
+    }
+  }
+
+  async activateProviderCredential(providerId: string, credentialId: string): Promise<boolean> {
+    const now = nowIso()
+    return this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<{ id: string }>`
+            SELECT id FROM provider_credentials WHERE id = ${credentialId} AND provider_id = ${providerId}
+          `
+          if (!rows[0]) return false
+          yield* sql`
+            UPDATE provider_credentials SET active = 0, updated_at = ${now}
+            WHERE provider_id = ${providerId}
+          `
+          yield* sql`
+            UPDATE provider_credentials SET active = 1, updated_at = ${now}
+            WHERE id = ${credentialId} AND provider_id = ${providerId}
+          `
+          return true
+        }),
+      ),
+    )
+  }
+
+  async deleteProviderCredential(providerId: string, credentialId: string): Promise<boolean> {
+    const now = nowIso()
+    return this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<{ active: number }>`
+            SELECT active FROM provider_credentials
+            WHERE id = ${credentialId} AND provider_id = ${providerId}
+          `
+          const current = rows[0]
+          if (!current) return false
+          yield* sql`
+            DELETE FROM provider_credentials
+            WHERE id = ${credentialId} AND provider_id = ${providerId}
+          `
+          if (current.active === 1) {
+            const remaining = yield* sql<{ id: string }>`
+              SELECT id FROM provider_credentials
+              WHERE provider_id = ${providerId}
+              ORDER BY created_at ASC
+              LIMIT 1
+            `
+            if (remaining[0]) {
+              yield* sql`
+                UPDATE provider_credentials SET active = 1, updated_at = ${now}
+                WHERE id = ${remaining[0].id}
+              `
+            }
+          }
+          return true
+        }),
+      ),
+    )
+  }
+
+  async activeProviderCredential(providerId: string): Promise<ProviderCredentialRecord | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<ProviderCredentialRow>`
+          SELECT id, provider_id, label, active, created_at, updated_at
+          FROM provider_credentials
+          WHERE provider_id = ${providerId} AND active = 1
+          ORDER BY created_at ASC
+          LIMIT 1
+        `
+        return rows[0] ? rowToProviderCredential(rows[0]) : null
+      }),
+    )
+  }
+
+  async upsertProviderModels(models: readonly import("../shared/types").CatalogModel[]): Promise<void> {
+    if (models.length === 0) return
+    const now = nowIso()
+    await this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          for (const model of models) {
+            yield* sql`
+              INSERT INTO provider_models
+                (provider_id, model_id, name, family, type, released_at, status,
+                 context_limit, output_limit, input_modalities_json, output_modalities_json,
+                 tools_supported, temperature_supported, reasoning, cost_input, cost_output,
+                 cost_cache_read, cost_cache_write, enabled, favorite, metadata_json, updated_at)
+              VALUES
+                (${model.providerId}, ${model.modelId}, ${model.name}, ${model.family ?? null}, 'chat',
+                 ${null}, ${model.status ?? null}, ${model.contextWindow}, ${model.maxOutputTokens},
+                 ${JSON.stringify(model.inputModalities)}, ${JSON.stringify(model.outputModalities)},
+                 ${model.supportsTools ? 1 : 0}, ${model.supportsTemperature ? 1 : 0},
+                 ${model.reasoning ? 1 : 0}, ${model.costInputPerMillion}, ${model.costOutputPerMillion},
+                 ${model.costCacheReadPerMillion}, ${model.costCacheWritePerMillion},
+                 ${model.enabled ? 1 : 0}, ${model.favorite ? 1 : 0}, '{}', ${now})
+              ON CONFLICT(provider_id, model_id) DO UPDATE SET
+                name = excluded.name,
+                family = excluded.family,
+                context_limit = excluded.context_limit,
+                output_limit = excluded.output_limit,
+                input_modalities_json = excluded.input_modalities_json,
+                output_modalities_json = excluded.output_modalities_json,
+                tools_supported = excluded.tools_supported,
+                temperature_supported = excluded.temperature_supported,
+                reasoning = excluded.reasoning,
+                cost_input = excluded.cost_input,
+                cost_output = excluded.cost_output,
+                cost_cache_read = excluded.cost_cache_read,
+                cost_cache_write = excluded.cost_cache_write,
+                updated_at = excluded.updated_at
+            `
+          }
+        }),
+      ),
+    )
+  }
+
+  async listProviderModels(providerId?: string, includeDisabled = false): Promise<import("../shared/types").CatalogModel[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = providerId
+          ? yield* sql<ProviderModelRow>`
+              SELECT provider_id, model_id, name, family, type, released_at, status,
+                     context_limit, output_limit, input_modalities_json, output_modalities_json,
+                     tools_supported, temperature_supported, reasoning, cost_input, cost_output,
+                     cost_cache_read, cost_cache_write, enabled, favorite, last_used_at,
+                     metadata_json, updated_at
+              FROM provider_models
+              WHERE provider_id = ${providerId} ${includeDisabled ? sql`` : sql`AND enabled = 1`}
+              ORDER BY name ASC, model_id ASC
+            `
+          : yield* sql<ProviderModelRow>`
+              SELECT provider_id, model_id, name, family, type, released_at, status,
+                     context_limit, output_limit, input_modalities_json, output_modalities_json,
+                     tools_supported, temperature_supported, reasoning, cost_input, cost_output,
+                     cost_cache_read, cost_cache_write, enabled, favorite, last_used_at,
+                     metadata_json, updated_at
+              FROM provider_models
+              WHERE 1 = 1 ${includeDisabled ? sql`` : sql`AND enabled = 1`}
+              ORDER BY provider_id ASC, name ASC, model_id ASC
+            `
+        return rows.map(rowToCatalogModel)
+      }),
+    )
+  }
+
+  async getProviderModel(
+    providerId: string,
+    modelId: string,
+  ): Promise<import("../shared/types").CatalogModel | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<ProviderModelRow>`
+          SELECT provider_id, model_id, name, family, type, released_at, status,
+                 context_limit, output_limit, input_modalities_json, output_modalities_json,
+                 tools_supported, temperature_supported, reasoning, cost_input, cost_output,
+                 cost_cache_read, cost_cache_write, enabled, favorite, last_used_at,
+                 metadata_json, updated_at
+          FROM provider_models
+          WHERE provider_id = ${providerId} AND model_id = ${modelId}
+        `
+        return rows[0] ? rowToCatalogModel(rows[0]) : null
+      }),
+    )
+  }
+
+  async updateProviderModel(
+    providerId: string,
+    modelId: string,
+    update: { enabled?: boolean; favorite?: boolean; supportsTools?: boolean },
+  ): Promise<import("../shared/types").CatalogModel | null> {
+    const now = nowIso()
     await this.query((sql) =>
       sql`
-        UPDATE sessions SET model_profile_id = ${modelProfileId}, updated_at = ${nowIso()}
+        UPDATE provider_models SET
+          enabled = COALESCE(${update.enabled === undefined ? null : update.enabled ? 1 : 0}, enabled),
+          favorite = COALESCE(${update.favorite === undefined ? null : update.favorite ? 1 : 0}, favorite),
+          tools_supported = COALESCE(${update.supportsTools === undefined ? null : update.supportsTools ? 1 : 0}, tools_supported),
+          updated_at = ${now}
+        WHERE provider_id = ${providerId} AND model_id = ${modelId}
+      `.pipe(Effect.asVoid),
+    )
+    return this.getProviderModel(providerId, modelId)
+  }
+
+  async touchProviderModel(providerId: string, modelId: string): Promise<void> {
+    await this.query((sql) =>
+      sql`
+        UPDATE provider_models SET last_used_at = ${nowIso()}
+        WHERE provider_id = ${providerId} AND model_id = ${modelId}
+      `.pipe(Effect.asVoid),
+    )
+  }
+
+  async setSessionModel(sessionId: string, providerId: string | null, modelId: string | null): Promise<void> {
+    await this.query((sql) =>
+      sql`
+        UPDATE sessions SET provider_id = ${providerId}, model_id = ${modelId}, updated_at = ${nowIso()}
         WHERE id = ${sessionId}
       `.pipe(Effect.asVoid),
     )
@@ -914,7 +1187,7 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<TurnRow>`
-          SELECT id, session_id, status, model_profile_id, user_message_id, step_count,
+          SELECT id, session_id, status, provider_id, model_id, user_message_id, step_count,
                  input_tokens, output_tokens, cost_usd, error, started_at, updated_at,
                  completed_at
           FROM turns
@@ -930,7 +1203,7 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<TurnRow>`
-          SELECT id, session_id, status, model_profile_id, user_message_id, step_count,
+          SELECT id, session_id, status, provider_id, model_id, user_message_id, step_count,
                  input_tokens, output_tokens, cost_usd, error, started_at, updated_at,
                  completed_at
           FROM turns
@@ -945,7 +1218,8 @@ export class Database {
 
   async createTurnWithUserMessage(
     sessionId: string,
-    modelProfileId: string,
+    providerId: string,
+    modelId: string,
     text: string,
   ): Promise<{ turn: Turn; userMessage: Message }> {
     const turnId = newId("turn")
@@ -965,11 +1239,11 @@ export class Database {
             if (seq === undefined) throw new Error("Failed to persist user message")
             yield* sql`
               INSERT INTO turns
-                (id, session_id, status, model_profile_id, user_message_id, step_count,
+                (id, session_id, status, provider_id, model_id, user_message_id, step_count,
                  input_tokens, output_tokens, cost_usd, error, checkpoint_json,
                  started_at, updated_at, completed_at)
               VALUES
-                (${turnId}, ${sessionId}, 'queued', ${modelProfileId}, ${messageId}, 0,
+                (${turnId}, ${sessionId}, 'queued', ${providerId}, ${modelId}, ${messageId}, 0,
                  0, 0, 0, NULL, NULL, ${now}, ${now}, NULL)
             `
             yield* sql`UPDATE sessions SET updated_at = ${now} WHERE id = ${sessionId}`
@@ -977,7 +1251,8 @@ export class Database {
               id: turnId,
               sessionId,
               status: "queued",
-              modelProfileId,
+              providerId,
+              modelId,
               userMessageId: messageId,
               stepCount: 0,
               inputTokens: 0,
@@ -1128,7 +1403,7 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<TurnRow>`
-          SELECT id, session_id, status, model_profile_id, user_message_id, step_count,
+          SELECT id, session_id, status, provider_id, model_id, user_message_id, step_count,
                  input_tokens, output_tokens, cost_usd, error, started_at, updated_at,
                  completed_at
           FROM turns

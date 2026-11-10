@@ -42,6 +42,10 @@ Open the URL printed by `service start`, or run `bun src/cli/main.ts pair` for a
 one-time pairing link. Use `bun src/cli/main.ts pair --remote` to expose the
 public HTTPS tunnel URL and print the remote QR payload.
 
+Connect a model provider in **Settings → Providers**. OpenRouter stores the key
+once through the provider form. Choose an enabled model from the searchable
+composer picker; model changes apply to the current session.
+
 For development:
 
 ```powershell
@@ -75,6 +79,9 @@ matching OpenCode. It intentionally does not print a loopback QR code.
 ## Surfaces
 
 - OpenCode-style connect screen: pairing link, QR scan, password fallback.
+- Providers screen with API-key connection and environment-key detection.
+- Searchable model picker with free/tool/reasoning labels; per-session switching.
+- Models catalog with search, visibility, favorites, testing, and default selection.
 - Titlebar tabs, home workspace/session list, and new-session wordmark/composer.
 - Streaming chat with stop, models, approvals, and auto-scroll.
 - Approval inbox and inline approval cards with exact arguments.
@@ -82,7 +89,7 @@ matching OpenCode. It intentionally does not print a loopback QR code.
 - Context panel: model, token, turn, cost, and context-window stats.
 - Files panel: `@pierre/trees` workspace tree and `@pierre/diffs` file viewer.
 - Review panel: `@pierre/diffs` file/diff previews for journaled changes.
-- Rules, workspaces, journal, model profiles, and settings.
+- Rules, workspaces, journal, provider connection, searchable model catalog, and settings.
 - System light/dark theme with a manual override.
 - Offline, reconnecting, asleep, and update-available status banners.
 - Installable PWA with a network-only API policy and prompt-based updates.

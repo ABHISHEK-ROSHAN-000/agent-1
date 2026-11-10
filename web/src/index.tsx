@@ -9,6 +9,7 @@ import {
   ApprovalsPage,
   JournalPage,
   ModelsPage,
+  ProvidersPage,
   RulesPage,
   SessionPage,
   SettingsPage,
@@ -57,6 +58,7 @@ render(
         <Route path="/rules" component={RulesPage} />
         <Route path="/workspaces" component={WorkspacesPage} />
         <Route path="/journal" component={JournalPage} />
+        <Route path="/providers" component={ProvidersPage} />
         <Route path="/models" component={ModelsPage} />
         <Route path="/settings" component={SettingsPage} />
         <Route path="*" component={HomePage} />

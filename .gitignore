@@ -18,7 +18,6 @@ state/
 # Secrets and local environment
 .env
 .env.*
-!.env.example
 secrets/
 
 # OS and editor files

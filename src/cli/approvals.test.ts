@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import path from "node:path"
 import { startFakeOpenAI, type FakeOpenAI } from "../test/fake-openai"
-import { startTestDaemon, waitFor, type TestDaemon } from "../test/helpers"
+import { configureTestProvider, startTestDaemon, waitFor, type TestDaemon } from "../test/helpers"
 
 const daemons: TestDaemon[] = []
 const servers: FakeOpenAI[] = []
@@ -32,11 +32,8 @@ describe("CLI approvals and rules", () => {
     servers.push(fake)
     const daemon = await startTestDaemon()
     daemons.push(daemon)
-    await daemon.client.createModelProfile({
+    await configureTestProvider(daemon.client, fake.url, {
       name: "CLI approval model",
-      kind: "cloud",
-      baseUrl: fake.url,
-      modelId: "fake-model",
       apiKey: "sk-cli-approval",
     })
     const session = await daemon.client.createSession("CLI approval")

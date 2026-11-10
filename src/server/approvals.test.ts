@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { rmSync } from "node:fs"
 import path from "node:path"
 import { startFakeOpenAI, type FakeOpenAI } from "../test/fake-openai"
-import { startTestDaemon, waitFor, type TestDaemon } from "../test/helpers"
+import { configureTestProvider, startTestDaemon, waitFor, type TestDaemon } from "../test/helpers"
 import { removeState } from "../daemon/state"
 
 const daemons: TestDaemon[] = []
@@ -31,16 +31,12 @@ async function setup() {
   servers.push(fake)
   const daemon = await startTestDaemon()
   daemons.push(daemon)
-  const profile = await daemon.client.createModelProfile({
+  await configureTestProvider(daemon.client, fake.url, {
     name: "Approval model",
-    kind: "cloud",
-    baseUrl: fake.url,
-    modelId: "fake-model",
     apiKey: "sk-approval-test",
     contextWindow: 4096,
     maxOutputTokens: 128,
   })
-  void profile
   const session = await daemon.client.createSession("Approval session")
   return { fake, daemon, sessionId: String(session.session.id) }
 }

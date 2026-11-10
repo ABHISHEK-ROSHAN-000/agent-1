@@ -20,6 +20,12 @@ branding, logos, and telemetry are not used.
 
 The QR encoder follows Project Nayuki's MIT-licensed QR Code generator.
 
+## models.dev
+
+`src/models/catalog/models-dev.json` is a pinned snapshot of provider and model
+metadata from https://models.dev, licensed MIT. See
+`src/models/catalog/README.md`.
+
 ## OpenTunnel
 
 Remote access uses `@opentunnel/client` `0.6.2` from

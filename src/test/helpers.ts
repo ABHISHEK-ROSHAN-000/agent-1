@@ -83,6 +83,35 @@ function waitForExit(child: ChildProcess, timeoutMs = 10_000): Promise<void> {
   })
 }
 
+export async function configureTestProvider(
+  client: AgentOneClient,
+  baseUrl: string,
+  options: {
+    readonly name?: string
+    readonly modelId?: string
+    readonly apiKey?: string
+    readonly contextWindow?: number
+    readonly maxOutputTokens?: number
+  } = {},
+): Promise<void> {
+  await client.createProvider({
+    id: "test-provider",
+    name: options.name ?? "Test provider",
+    baseUrl,
+    kind: "cloud",
+    apiKey: options.apiKey ?? "sk-test",
+    models: [
+      {
+        id: options.modelId ?? "fake-model",
+        name: "Fake model",
+        contextWindow: options.contextWindow ?? 8192,
+        maxOutputTokens: options.maxOutputTokens ?? 256,
+        supportsTools: true,
+      },
+    ],
+  })
+}
+
 export async function startTestDaemon(options: StartTestDaemonOptions = {}): Promise<TestDaemon> {
   const dir = options.dataDir ?? (await mkdtemp(path.join(os.tmpdir(), "agent-1-test-")))
   const daemonPath = path.join(import.meta.dir, "..", "daemon", "main.ts")

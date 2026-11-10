@@ -14,7 +14,8 @@ export interface Session {
   title: string
   createdAt: string
   updatedAt: string
-  modelProfileId?: string | null
+  providerId?: string | null
+  modelId?: string | null
   summary?: string | null
   summaryThroughSeq?: number | null
 }
@@ -99,21 +100,70 @@ export interface JournalEntry {
   updatedAt: string
 }
 
-export interface ModelProfile {
+export interface ProviderCredential {
+  id: string
+  label: string
+  active: boolean
+  source: "stored"
+}
+
+export interface ProviderInfo {
   id: string
   name: string
   kind: "cloud" | "local"
   baseUrl: string
+  connected: boolean
+  source: "stored" | "environment" | "none"
+  credentials: ProviderCredential[]
+  environment: string[]
+  modelCount: number
+}
+
+export interface CatalogModel {
+  providerId: string
   modelId: string
+  name: string
+  family?: string
   contextWindow: number
   maxOutputTokens: number
+  inputModalities: string[]
+  outputModalities: string[]
+  supportsTools: boolean
+  supportsTemperature: boolean
+  reasoning: boolean
   costInputPerMillion: number
   costOutputPerMillion: number
+  costCacheReadPerMillion: number
+  costCacheWritePerMillion: number
+  enabled: boolean
+  favorite: boolean
+  status?: string
+}
+
+export interface ModelSelection {
+  providerId: string
+  modelId: string
+}
+
+export function modelKey(model: Pick<CatalogModel, "providerId" | "modelId">): string {
+  return `${model.providerId}/${model.modelId}`
+}
+
+export function parseModelKey(value: string | undefined): ModelSelection | undefined {
+  if (!value) return undefined
+  const separator = value.indexOf("/")
+  if (separator <= 0 || separator === value.length - 1) return undefined
+  return { providerId: value.slice(0, separator), modelId: value.slice(separator + 1) }
+}
+
+export interface SelectedModel extends ModelSelection {
+  name: string
+  providerName: string
+  contextWindow: number
+  maxOutputTokens: number
   supportsTools: boolean
-  supportsStreaming: boolean
-  hasApiKey: boolean
-  createdAt: string
-  updatedAt: string
+  costInputPerMillion: number
+  costOutputPerMillion: number
 }
 
 export interface RemoteStatus {
@@ -128,7 +178,7 @@ export interface RemoteStatus {
 
 export interface ContextInfo {
   session: Session
-  model: ModelProfile | null
+  model: SelectedModel | null
   messages: number
   turns: number
   inputTokens: number
@@ -194,11 +244,17 @@ export const api = {
       "GET",
       `/v1/sessions/${encodeURIComponent(sessionId)}/messages?limit=${limit}`,
     ),
-  startMessage: (sessionId: string, content: string, modelProfileId?: string) =>
+  startMessage: (sessionId: string, content: string, selection?: ModelSelection) =>
     request<{ turn: Turn; streamUrl: string }>(
       "POST",
       `/v1/sessions/${encodeURIComponent(sessionId)}/messages`,
-      { content, ...(modelProfileId ? { modelProfileId } : {}) },
+      { content, ...(selection ? { providerId: selection.providerId, modelId: selection.modelId } : {}) },
+    ),
+  setSessionModel: (sessionId: string, selection: ModelSelection) =>
+    request<{ model: SelectedModel }>(
+      "PATCH",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/model`,
+      selection,
     ),
   turn: (turnId: string) =>
     request<{ turn: Turn; messages: Message[] }>("GET", `/v1/turns/${encodeURIComponent(turnId)}`),
@@ -248,30 +304,47 @@ export const api = {
       "/v1/journal/undo",
       batchId ? { batchId } : {},
     ),
-  models: () => request<{ profiles: ModelProfile[] }>("GET", "/v1/model-profiles"),
-  createModel: (input: {
-    name: string
-    kind: "cloud" | "local"
-    baseUrl: string
-    modelId: string
-    contextWindow?: number
-    maxOutputTokens?: number
-    apiKey?: string
-  }) => request<{ profile: ModelProfile }>("POST", "/v1/model-profiles", input),
-  testModel: (id: string) =>
+  providers: () => request<{ providers: ProviderInfo[] }>("GET", "/v1/providers"),
+  connectProvider: (id: string, apiKey?: string, label?: string) =>
+    request<{ provider: ProviderInfo }>(
+      "POST",
+      `/v1/providers/${encodeURIComponent(id)}/connect`,
+      { ...(apiKey ? { apiKey } : {}), ...(label ? { label } : {}) },
+    ),
+  refreshProvider: (id: string) =>
+    request<{ provider: ProviderInfo }>(
+      "POST",
+      `/v1/providers/${encodeURIComponent(id)}/refresh`,
+      {},
+    ),
+  removeProviderCredential: (providerId: string, credentialId: string) =>
+    request<{ provider: ProviderInfo }>(
+      "DELETE",
+      `/v1/providers/${encodeURIComponent(providerId)}/credentials/${encodeURIComponent(credentialId)}`,
+    ),
+  models: (provider?: string, all = false) =>
+    request<{ models: CatalogModel[] }>(
+      "GET",
+      `/v1/models?${new URLSearchParams({
+        ...(provider ? { provider } : {}),
+        ...(all ? { all: "1" } : {}),
+      }).toString()}`,
+    ),
+  defaultModel: () => request<{ model: CatalogModel | null }>("GET", "/v1/models/default"),
+  setDefaultModel: (selection: ModelSelection) =>
+    request<{ model: CatalogModel }>("PUT", "/v1/models/default", selection),
+  updateModel: (providerId: string, modelId: string, input: { enabled?: boolean; favorite?: boolean }) =>
+    request<{ model: CatalogModel }>(
+      "PATCH",
+      `/v1/models/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`,
+      input,
+    ),
+  testModel: (providerId: string, modelId: string) =>
     request<{ ok: boolean; text: string; supportsTools: boolean; latencyMs: number }>(
       "POST",
-      `/v1/model-profiles/${encodeURIComponent(id)}/test`,
+      `/v1/models/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}/test`,
       {},
     ),
-  setDefaultModel: (id: string) =>
-    request<{ ok: true; profile: ModelProfile }>(
-      "POST",
-      `/v1/model-profiles/${encodeURIComponent(id)}/default`,
-      {},
-    ),
-  removeModel: (id: string) =>
-    request<{ ok: true }>("DELETE", `/v1/model-profiles/${encodeURIComponent(id)}`),
   tools: () => request<{ tools: ToolInfo[] }>("GET", "/v1/tools"),
   audit: (limit = 100) => request<{ entries: unknown[] }>("GET", `/v1/audit?limit=${limit}`),
 }

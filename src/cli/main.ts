@@ -17,17 +17,18 @@ Commands:
   service start|stop|status|restart
   service autostart on|off|status
   status
-  auth show|rotate
+  auth login [provider]          Connect a provider with an API key
+  auth list [--format default|json]
+  auth logout <provider> [credential]
+  auth switch <provider> [credential]
+  auth show|rotate                Server password
   pair [--remote] [--url <url>] [--yes]
   remote on [--yes]|off|status
   session create [--title <title>]
   session list
-  model list
-  model add --name <name> --kind cloud|local --base-url <url> --model <id> [--api-key <key>]
-  model test <id>
-  model default <id>
-  model remove <id>
-  chat --session <id> --message <text> [--model <profile-id>]
+  models                         List provider/model pairs
+  run [message...] [--session <id>] [--model provider/model#variant]
+  chat [message...] [--session <id>] [--model provider/model#variant]
   rules list
   rules add --action <action> --resource <resource> --effect allow|ask|deny [--note <note>]
   rules update <id> [--effect ...] [--position ...] [--action ...] [--resource ...]
@@ -176,6 +177,61 @@ async function serviceCommand(parsed: ParsedArgs): Promise<void> {
   throw new Error("Usage: agent-1 service start|stop|status|restart|autostart")
 }
 
+async function promptLine(question: string, secret = false): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("This action needs an interactive terminal")
+  }
+  const terminal = createInterface({ input: process.stdin, output: process.stdout, terminal: true })
+  if (secret) {
+    process.stdout.write(question)
+    ;(terminal as unknown as { _writeToOutput?: (value: string) => void })._writeToOutput = () => undefined
+    try {
+      const answer = await terminal.question("")
+      process.stdout.write("\n")
+      return answer
+    } finally {
+      terminal.close()
+    }
+  }
+  try {
+    return await terminal.question(question)
+  } finally {
+    terminal.close()
+  }
+}
+
+async function providerClient(parsed: ParsedArgs): Promise<{
+  client: AgentOneClient
+  config: AppConfig
+}> {
+  const config = configFor(parsed)
+  const status = await ensureRunning(config)
+  const password = await passwordFor(config)
+  return { client: new AgentOneClient({ baseUrl: status.state.url, password }), config }
+}
+
+async function chooseProvider(
+  client: AgentOneClient,
+  target: string | undefined,
+): Promise<{ id: string; name: string; environment: readonly string[]; credentials: readonly { id: string; label: string; active: boolean }[] }> {
+  const providers = (await client.listProviders()).providers
+  if (target) {
+    const normalized = target.toLowerCase()
+    const match = providers.find(
+      (provider) => provider.id === target || provider.name.toLowerCase() === normalized || provider.id === normalized,
+    )
+    if (!match) throw new Error(`Provider not found: ${target}`)
+    return match
+  }
+  if (!process.stdin.isTTY) throw new Error("Pass a provider ID or name when running without an interactive terminal")
+  process.stdout.write(
+    providers.map((provider) => `${provider.id.padEnd(14)} ${provider.name}${provider.connected ? " (connected)" : ""}`).join(EOL) + EOL,
+  )
+  const answer = (await promptLine("Provider: ")).trim()
+  if (!answer) throw new Error("Provider is required")
+  return chooseProvider(client, answer)
+}
+
 async function authCommand(parsed: ParsedArgs): Promise<void> {
   const sub = parsed.positionals[1]
   const json = hasFlag(parsed, "json")
@@ -199,7 +255,78 @@ async function authCommand(parsed: ParsedArgs): Promise<void> {
     return
   }
 
-  throw new Error("Usage: agent-1 auth show|rotate")
+  if (sub === "list") {
+    const { client } = await providerClient(parsed)
+    const result = await client.listProviders()
+    if (json || parsed.flags.get("format") === "json") {
+      output(true, result, "")
+      return
+    }
+    const rows = result.providers.flatMap((provider) => {
+      const connections = provider.credentials.map((credential) => ({
+        provider: provider.name,
+        source: credential.label,
+        type: credential.active ? "stored (active)" : "stored",
+      }))
+      if (provider.environment.length > 0) {
+        connections.push({
+          provider: provider.name,
+          source: provider.environment.join(", "),
+          type: "environment",
+        })
+      }
+      return connections
+    })
+    if (rows.length === 0) {
+      process.stdout.write("No authenticated integrations\n")
+      return
+    }
+    const width = Math.max(...rows.map((row) => row.provider.length)) + 2
+    const sourceWidth = Math.max(...rows.map((row) => row.source.length)) + 2
+    process.stdout.write(rows.map((row) => row.provider.padEnd(width) + row.source.padEnd(sourceWidth) + row.type).join(EOL) + EOL)
+    return
+  }
+
+  if (sub === "login") {
+    const { client } = await providerClient(parsed)
+    const provider = await chooseProvider(client, parsed.positionals[2])
+    let key = ""
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      const hint = provider.environment.length > 0 ? ` (leave blank to use ${provider.environment.join(", ")})` : ""
+      key = await promptLine(`API key${hint}: `, true)
+    }
+    const result = await client.connectProvider(provider.id, key || undefined)
+    output(json, result, `Connected to ${result.provider.name}.`)
+    return
+  }
+
+  if (sub === "logout") {
+    const { client } = await providerClient(parsed)
+    const provider = await chooseProvider(client, parsed.positionals[2])
+    const requested = parsed.positionals[3]
+    const credential =
+      provider.credentials.find((item) => item.id === requested || item.label === requested) ??
+      (provider.credentials.length === 1 ? provider.credentials[0] : undefined)
+    if (!credential) throw new Error("Pass a credential ID or label")
+    const result = await client.removeProviderCredential(provider.id, credential.id)
+    output(json, result, `Removed ${credential.label} from ${result.provider.name}.`)
+    return
+  }
+
+  if (sub === "switch") {
+    const { client } = await providerClient(parsed)
+    const provider = await chooseProvider(client, parsed.positionals[2])
+    const requested = parsed.positionals[3]
+    const credential =
+      provider.credentials.find((item) => item.id === requested || item.label === requested) ??
+      (provider.credentials.length === 1 ? provider.credentials[0] : undefined)
+    if (!credential) throw new Error("Pass a credential ID or label")
+    const result = await client.activateProviderCredential(provider.id, credential.id)
+    output(json, result, `Active credential for ${result.provider.name}: ${credential.label}.`)
+    return
+  }
+
+  throw new Error("Usage: agent-1 auth login|list|logout|switch|show|rotate")
 }
 
 const PAIR_HELP = `Usage: ${CLI_NAME} pair [--remote] [--url <url>] [--yes]
@@ -469,103 +596,51 @@ async function sessionCommand(parsed: ParsedArgs): Promise<void> {
   throw new Error("Usage: agent-1 session create|list")
 }
 
-async function modelCommand(parsed: ParsedArgs): Promise<void> {
-  const sub = parsed.positionals[1]
-  const json = hasFlag(parsed, "json")
-  const config = configFor(parsed)
-  const password = await passwordFor(config)
-  const status = await serviceStatus(config)
-  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
-  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+function parseModelRef(value: string | undefined): { providerId: string; modelId: string } | undefined {
+  if (!value) return undefined
+  const withoutVariant = value.split("#", 1)[0] ?? value
+  const separator = withoutVariant.indexOf("/")
+  if (separator <= 0 || separator === withoutVariant.length - 1) {
+    throw new Error("Model must be in provider/model format")
+  }
+  return {
+    providerId: withoutVariant.slice(0, separator),
+    modelId: withoutVariant.slice(separator + 1),
+  }
+}
 
-  if (sub === "list" || !sub) {
-    const result = await client.listModelProfiles()
-    if (json) {
-      output(true, result, "")
-      return
-    }
-    if (result.profiles.length === 0) {
-      process.stdout.write("No model profiles. Add one with `agent-1 model add`.\n")
-      return
-    }
-    for (const profile of result.profiles) {
-      process.stdout.write(
-        `${profile.id}  ${profile.name}  ${profile.kind}  ${profile.modelId}  key=${profile.hasApiKey ? "yes" : "no"}  tools=${profile.supportsTools ? "yes" : "no"}\n`,
-      )
-    }
+async function modelsCommand(parsed: ParsedArgs): Promise<void> {
+  const { client } = await providerClient(parsed)
+  const result = await client.listModels()
+  if (hasFlag(parsed, "json")) {
+    output(true, result, "")
     return
   }
-
-  if (sub === "add") {
-    const name = flagString(parsed, "name")
-    const kind = flagString(parsed, "kind")
-    const baseUrl = flagString(parsed, "base-url")
-    const modelId = flagString(parsed, "model")
-    if (!name || (kind !== "cloud" && kind !== "local") || !baseUrl || !modelId) {
-      throw new Error(
-        "Usage: agent-1 model add --name <name> --kind cloud|local --base-url <url> --model <id> [--api-key <key>]",
-      )
-    }
-    const contextWindow = flagString(parsed, "context-window")
-    const maxOutputTokens = flagString(parsed, "max-output-tokens")
-    const apiKey = flagString(parsed, "api-key") ?? process.env.AGENT1_MODEL_API_KEY
-    const result = await client.createModelProfile({
-      name,
-      kind,
-      baseUrl,
-      modelId,
-      ...(contextWindow ? { contextWindow: Number(contextWindow) } : {}),
-      ...(maxOutputTokens ? { maxOutputTokens: Number(maxOutputTokens) } : {}),
-      ...(apiKey ? { apiKey } : {}),
-    })
-    output(json, result, `Created model profile ${result.profile.id} (${result.profile.name}).`)
-    return
+  for (const model of [...result.models].sort((left, right) =>
+    `${left.providerId}/${left.modelId}`.localeCompare(`${right.providerId}/${right.modelId}`),
+  )) {
+    process.stdout.write(`${model.providerId}/${model.modelId}\n`)
   }
-
-  const id = parsed.positionals[2]
-  if (!id) throw new Error(`Usage: agent-1 model ${sub} <id>`)
-
-  if (sub === "test") {
-    const result = await client.testModelProfile(id)
-    output(
-      json,
-      result,
-      `Model test: ${result.ok ? "ok" : "failed"}, tools=${result.supportsTools ? "yes" : "no"}, ${result.latencyMs}ms${result.text ? `, reply=${result.text}` : ""}`,
-    )
-    return
-  }
-  if (sub === "default") {
-    const result = await client.setDefaultModelProfile(id)
-    output(json, result, `Default model: ${result.profile.name} (${result.profile.id}).`)
-    return
-  }
-  if (sub === "remove") {
-    const result = await client.removeModelProfile(id)
-    output(json, result, `Removed model profile ${id}.`)
-    return
-  }
-  throw new Error("Usage: agent-1 model list|add|test|default|remove")
 }
 
 async function chatCommand(parsed: ParsedArgs): Promise<void> {
   const config = configFor(parsed)
+  const status = await ensureRunning(config)
   const password = await passwordFor(config)
-  const status = await serviceStatus(config)
-  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
   const client = new AgentOneClient({ baseUrl: status.state.url, password, timeoutMs: 120_000 })
 
   let sessionId = flagString(parsed, "session")
   if (!sessionId) {
-    const created = await client.createSession("CLI chat")
+    const created = await client.createSession(parsed.positionals[0] === "run" ? "CLI run" : "CLI chat")
     sessionId = String(created.session.id)
     process.stdout.write(`Session: ${sessionId}\n`)
   }
   const message = flagString(parsed, "message") ?? parsed.positionals.slice(1).join(" ")
   if (!message.trim()) {
-    throw new Error("Usage: agent-1 chat --session <id> --message <text> [--model <profile-id>]")
+    throw new Error("Usage: agent-1 run [message...] [--session <id>] [--model provider/model#variant]")
   }
-  const modelProfileId = flagString(parsed, "model")
-  const started = await client.startMessage(sessionId, message, modelProfileId)
+  const selection = parseModelRef(flagString(parsed, "model"))
+  const started = await client.startMessage(sessionId, message, selection)
   const stream = await client.turnStreamResponse(started.turn.id)
   if (!stream.ok || !stream.body) throw new Error(`Turn stream failed (${stream.status})`)
   const reader = stream.body.getReader()
@@ -935,11 +1010,11 @@ async function main(argv: readonly string[]): Promise<number> {
       await sessionCommand(parsed)
       return 0
     }
-    if (command === "model") {
-      await modelCommand(parsed)
+    if (command === "models") {
+      await modelsCommand(parsed)
       return 0
     }
-    if (command === "chat") {
+    if (command === "run" || command === "chat") {
       await chatCommand(parsed)
       return 0
     }

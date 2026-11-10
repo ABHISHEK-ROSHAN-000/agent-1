@@ -6,7 +6,7 @@ import path from "node:path"
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core"
 import QRCode from "qrcode"
 import { startFakeOpenAI, type FakeOpenAI } from "../src/test/fake-openai"
-import { startTestDaemon, type TestDaemon } from "../src/test/helpers"
+import { configureTestProvider, startTestDaemon, type TestDaemon } from "../src/test/helpers"
 
 const EDGE = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
@@ -22,11 +22,8 @@ let taskDir: string
 beforeAll(async () => {
   fake = startFakeOpenAI()
   daemon = await startTestDaemon()
-  await daemon.client.createModelProfile({
+  await configureTestProvider(daemon.client, fake.url, {
     name: "Browser test model",
-    kind: "cloud",
-    baseUrl: fake.url,
-    modelId: "fake-model",
     apiKey: "sk-browser-test",
     contextWindow: 8192,
     maxOutputTokens: 256,

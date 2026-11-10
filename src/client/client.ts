@@ -2,11 +2,13 @@ import type {
   Approval,
   ApprovalStatus,
   AuditEntry,
+  CatalogModel,
   JournalEntry,
-  ModelProfile,
-  ModelProfileInput,
+  ModelSelection,
   PermissionRule,
+  ProviderInfo,
   RemoteStatus,
+  SelectedModel,
   Turn,
   Workspace,
 } from "../shared/types"
@@ -208,12 +210,16 @@ export class AgentOneClient {
   startMessage(
     sessionId: string,
     content: string,
-    modelProfileId?: string,
+    selection?: ModelSelection,
   ): Promise<{ turn: Turn; streamUrl: string }> {
     return this.request("POST", `/v1/sessions/${encodeURIComponent(sessionId)}/messages`, {
       content,
-      ...(modelProfileId ? { modelProfileId } : {}),
+      ...(selection ? { providerId: selection.providerId, modelId: selection.modelId } : {}),
     })
+  }
+
+  setSessionModel(sessionId: string, selection: ModelSelection): Promise<{ model: SelectedModel }> {
+    return this.request("PATCH", `/v1/sessions/${encodeURIComponent(sessionId)}/model`, selection)
   }
 
   getTurn(id: string): Promise<{ turn: Turn; messages: Array<Record<string, unknown>> }> {
@@ -236,36 +242,91 @@ export class AgentOneClient {
     })
   }
 
-  listModelProfiles(): Promise<{ profiles: ModelProfile[] }> {
-    return this.request("GET", "/v1/model-profiles")
+  listProviders(): Promise<{ providers: ProviderInfo[] }> {
+    return this.request("GET", "/v1/providers")
   }
 
-  createModelProfile(input: ModelProfileInput): Promise<{ profile: ModelProfile }> {
-    return this.request("POST", "/v1/model-profiles", input)
+  createProvider(input: {
+    id?: string
+    name: string
+    baseUrl: string
+    kind?: "cloud" | "local"
+    env?: string[]
+    apiKey?: string
+    models?: Array<Record<string, unknown>>
+  }): Promise<{ provider: ProviderInfo }> {
+    return this.request("POST", "/v1/providers", input)
   }
 
-  updateModelProfile(
-    id: string,
-    input: Partial<ModelProfileInput> & { supportsTools?: boolean },
-  ): Promise<{ profile: ModelProfile }> {
-    return this.request("PATCH", `/v1/model-profiles/${encodeURIComponent(id)}`, input)
+  connectProvider(id: string, apiKey?: string, label?: string): Promise<{ provider: ProviderInfo }> {
+    return this.request("POST", `/v1/providers/${encodeURIComponent(id)}/connect`, {
+      ...(apiKey !== undefined ? { apiKey } : {}),
+      ...(label ? { label } : {}),
+    })
   }
 
-  removeModelProfile(id: string): Promise<{ ok: true }> {
-    return this.request("DELETE", `/v1/model-profiles/${encodeURIComponent(id)}`)
+  connectProviderEnvironment(id: string): Promise<{ provider: ProviderInfo }> {
+    return this.request("POST", `/v1/providers/${encodeURIComponent(id)}/connect-env`, {})
   }
 
-  testModelProfile(id: string): Promise<{
+  refreshProvider(id: string): Promise<{ provider: ProviderInfo }> {
+    return this.request("POST", `/v1/providers/${encodeURIComponent(id)}/refresh`, {})
+  }
+
+  activateProviderCredential(id: string, credentialId: string): Promise<{ provider: ProviderInfo }> {
+    return this.request(
+      "POST",
+      `/v1/providers/${encodeURIComponent(id)}/credentials/${encodeURIComponent(credentialId)}/activate`,
+      {},
+    )
+  }
+
+  removeProviderCredential(id: string, credentialId: string): Promise<{ provider: ProviderInfo }> {
+    return this.request(
+      "DELETE",
+      `/v1/providers/${encodeURIComponent(id)}/credentials/${encodeURIComponent(credentialId)}`,
+    )
+  }
+
+  listModels(providerId?: string, includeDisabled = false): Promise<{ models: CatalogModel[] }> {
+    const query = new URLSearchParams()
+    if (providerId) query.set("provider", providerId)
+    if (includeDisabled) query.set("all", "1")
+    const suffix = query.size > 0 ? `?${query.toString()}` : ""
+    return this.request("GET", `/v1/models${suffix}`)
+  }
+
+  defaultModel(): Promise<{ model: CatalogModel | null }> {
+    return this.request("GET", "/v1/models/default")
+  }
+
+  setDefaultModel(selection: ModelSelection): Promise<{ model: CatalogModel }> {
+    return this.request("PUT", "/v1/models/default", selection)
+  }
+
+  updateModel(
+    providerId: string,
+    modelId: string,
+    input: { enabled?: boolean; favorite?: boolean },
+  ): Promise<{ model: CatalogModel }> {
+    return this.request(
+      "PATCH",
+      `/v1/models/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`,
+      input,
+    )
+  }
+
+  testModel(providerId: string, modelId: string): Promise<{
     ok: boolean
     text: string
     supportsTools: boolean
     latencyMs: number
   }> {
-    return this.request("POST", `/v1/model-profiles/${encodeURIComponent(id)}/test`, {})
-  }
-
-  setDefaultModelProfile(id: string): Promise<{ ok: true; profile: ModelProfile }> {
-    return this.request("POST", `/v1/model-profiles/${encodeURIComponent(id)}/default`, {})
+    return this.request(
+      "POST",
+      `/v1/models/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}/test`,
+      {},
+    )
   }
 
   listRules(): Promise<{ rules: PermissionRule[] }> {

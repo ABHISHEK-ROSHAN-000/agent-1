@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import { SqlClient } from "effect/sql"
 import { SqliteMigrator } from "@effect/sql-sqlite-bun"
 
-export const LATEST_SCHEMA_VERSION = 4
+export const LATEST_SCHEMA_VERSION = 5
 
 const initial = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -77,28 +77,10 @@ const initial = Effect.gen(function* () {
 const agentRuntime = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
 
-  yield* sql`ALTER TABLE sessions ADD COLUMN model_profile_id TEXT`
+  yield* sql`ALTER TABLE sessions ADD COLUMN provider_id TEXT`
+  yield* sql`ALTER TABLE sessions ADD COLUMN model_id TEXT`
   yield* sql`ALTER TABLE sessions ADD COLUMN summary TEXT`
   yield* sql`ALTER TABLE sessions ADD COLUMN summary_through_seq INTEGER`
-
-  yield* sql`
-    CREATE TABLE IF NOT EXISTS model_profiles (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      kind TEXT NOT NULL CHECK (kind IN ('cloud', 'local')),
-      base_url TEXT NOT NULL,
-      model_id TEXT NOT NULL,
-      context_window INTEGER NOT NULL,
-      max_output_tokens INTEGER NOT NULL,
-      cost_input_per_million REAL NOT NULL DEFAULT 0,
-      cost_output_per_million REAL NOT NULL DEFAULT 0,
-      supports_tools INTEGER NOT NULL DEFAULT 0,
-      supports_streaming INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )
-  `
-  yield* sql`CREATE INDEX IF NOT EXISTS model_profiles_name_idx ON model_profiles (name)`
 
   yield* sql`
     CREATE TABLE IF NOT EXISTS messages (
@@ -120,7 +102,8 @@ const agentRuntime = Effect.gen(function* () {
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
       status TEXT NOT NULL,
-      model_profile_id TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
       user_message_id TEXT NOT NULL,
       step_count INTEGER NOT NULL DEFAULT 0,
       input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -285,9 +268,71 @@ const coreTools = Effect.gen(function* () {
   yield* Effect.void
 })
 
+const providerModels = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS providers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('cloud', 'local')),
+      base_url TEXT NOT NULL,
+      env_json TEXT NOT NULL DEFAULT '[]',
+      headers_json TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS provider_credentials (
+      id TEXT PRIMARY KEY,
+      provider_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `
+  yield* sql`CREATE INDEX IF NOT EXISTS provider_credentials_provider_idx ON provider_credentials (provider_id, active)`
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS provider_models (
+      provider_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      family TEXT,
+      type TEXT NOT NULL DEFAULT 'chat',
+      released_at TEXT,
+      status TEXT,
+      context_limit INTEGER NOT NULL DEFAULT 32768,
+      output_limit INTEGER NOT NULL DEFAULT 4096,
+      input_modalities_json TEXT NOT NULL DEFAULT '["text"]',
+      output_modalities_json TEXT NOT NULL DEFAULT '["text"]',
+      tools_supported INTEGER NOT NULL DEFAULT 0,
+      temperature_supported INTEGER NOT NULL DEFAULT 1,
+      reasoning INTEGER NOT NULL DEFAULT 0,
+      cost_input REAL NOT NULL DEFAULT 0,
+      cost_output REAL NOT NULL DEFAULT 0,
+      cost_cache_read REAL NOT NULL DEFAULT 0,
+      cost_cache_write REAL NOT NULL DEFAULT 0,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      favorite INTEGER NOT NULL DEFAULT 0,
+      last_used_at TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (provider_id, model_id)
+    )
+  `
+  yield* sql`CREATE INDEX IF NOT EXISTS provider_models_name_idx ON provider_models (provider_id, name)`
+  yield* sql`CREATE INDEX IF NOT EXISTS provider_models_enabled_idx ON provider_models (enabled, provider_id)`
+
+  yield* Effect.void
+})
+
 export const migrationLoader = SqliteMigrator.fromRecord({
   "0001_initial": initial,
   "0002_agent_runtime": agentRuntime,
   "0003_permissions": permissions,
   "0004_core_tools": coreTools,
+  "0005_provider_models": providerModels,
 })

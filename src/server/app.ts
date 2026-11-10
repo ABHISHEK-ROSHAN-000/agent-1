@@ -11,7 +11,8 @@ import type { EventService } from "../events/service"
 import type { ApprovalStatus, AuthContext } from "../shared/types"
 import { AuthService, SESSION_TTL_SECONDS } from "../auth/auth-service"
 import type { ModelService } from "../models/model-service"
-import { ModelProfileError } from "../models/model-service"
+import type { ProviderService } from "../models/provider-service"
+import { ProviderError } from "../models/provider-service"
 import type { TurnService } from "../agent/turn-service"
 import type { TurnBus } from "../agent/turn-bus"
 import type { PermissionService } from "../permissions/permission-service"
@@ -48,25 +49,56 @@ const createSessionSchema = z.object({
   title: z.string().trim().min(1).max(200).optional(),
 })
 
-const createMessageSchema = z.object({
-  content: z.string().min(1).max(100_000),
-  modelProfileId: z.string().optional(),
+const createMessageSchema = z
+  .object({
+    content: z.string().min(1).max(100_000),
+    providerId: z.string().min(1).max(100).optional(),
+    modelId: z.string().min(1).max(300).optional(),
+  })
+  .refine((value) => Boolean(value.providerId) === Boolean(value.modelId), {
+    message: "providerId and modelId must be provided together",
+  })
+
+const modelSelectionSchema = z.object({
+  providerId: z.string().min(1).max(100),
+  modelId: z.string().min(1).max(300),
 })
 
-const modelProfileSchema = z.object({
-  name: z.string().min(1).max(80),
-  kind: z.enum(["cloud", "local"]),
-  baseUrl: z.string().min(1).max(2_000),
-  modelId: z.string().min(1).max(200),
-  contextWindow: z.number().int().positive().optional(),
-  maxOutputTokens: z.number().int().positive().optional(),
-  costInputPerMillion: z.number().min(0).optional(),
-  costOutputPerMillion: z.number().min(0).optional(),
+const connectProviderSchema = z.object({
   apiKey: z.string().max(10_000).optional(),
+  label: z.string().min(1).max(80).optional(),
 })
 
-const updateModelProfileSchema = modelProfileSchema.partial().extend({
-  supportsTools: z.boolean().optional(),
+const modelUpdateSchema = z.object({
+  enabled: z.boolean().optional(),
+  favorite: z.boolean().optional(),
+})
+
+const customProviderSchema = z.object({
+  id: z.string().min(1).max(80).optional(),
+  name: z.string().min(1).max(100),
+  baseUrl: z.string().min(1).max(2_000),
+  kind: z.enum(["cloud", "local"]).optional(),
+  env: z.array(z.string().min(1).max(100)).max(20).optional(),
+  apiKey: z.string().max(10_000).optional(),
+  models: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(300),
+        name: z.string().min(1).max(200).optional(),
+        contextWindow: z.number().int().positive().optional(),
+        maxOutputTokens: z.number().int().positive().optional(),
+        supportsTools: z.boolean().optional(),
+        supportsTemperature: z.boolean().optional(),
+        reasoning: z.boolean().optional(),
+        inputModalities: z.array(z.string()).optional(),
+        outputModalities: z.array(z.string()).optional(),
+        costInputPerMillion: z.number().min(0).optional(),
+        costOutputPerMillion: z.number().min(0).optional(),
+      }),
+    )
+    .max(1_000)
+    .optional(),
 })
 
 const ruleSchema = z.object({
@@ -132,6 +164,7 @@ export interface AppDependencies {
   readonly auth: AuthService
   readonly events: EventService
   readonly models: ModelService
+  readonly providers: ProviderService
   readonly turns: TurnService
   readonly turnBus: TurnBus
   readonly permissions: PermissionService
@@ -161,8 +194,8 @@ export function loggedPath(pathname: string): string {
 
 function issueHttpError(error: unknown): HttpError {
   if (error instanceof HttpError) return error
-  if (error instanceof ModelProfileError) {
-    return new HttpError(400, "model_profile_error", error.message)
+  if (error instanceof ProviderError) {
+    return new HttpError(400, "provider_error", error.message)
   }
   if (error instanceof PermissionError) {
     return new HttpError(error.status, error.code, error.message)
@@ -187,6 +220,7 @@ export class App {
   private readonly auth: AuthService
   private readonly events: EventService
   private readonly models: ModelService
+  private readonly providers: ProviderService
   private readonly turns: TurnService
   private readonly turnBus: TurnBus
   private readonly permissions: PermissionService
@@ -204,6 +238,7 @@ export class App {
     this.auth = dependencies.auth
     this.events = dependencies.events
     this.models = dependencies.models
+    this.providers = dependencies.providers
     this.turns = dependencies.turns
     this.turnBus = dependencies.turnBus
     this.permissions = dependencies.permissions
@@ -291,7 +326,8 @@ export class App {
           "events",
           "pairing",
           "openapi",
-          "model-profiles",
+          "providers",
+          "models",
           "turns",
           "streaming",
           "permissions",
@@ -441,7 +477,9 @@ export class App {
       const [turns, messages, model] = await Promise.all([
         this.db.listTurns(id, 100),
         this.db.getSessionMessages(id, 500),
-        session.modelProfileId ? this.models.get(session.modelProfileId) : Promise.resolve(null),
+        session.providerId && session.modelId
+          ? this.providers.selected({ providerId: session.providerId, modelId: session.modelId }).catch(() => null)
+          : Promise.resolve(null),
       ])
       return jsonResponse({
         session,
@@ -453,6 +491,7 @@ export class App {
         costUsd: turns.reduce((sum, turn) => sum + turn.costUsd, 0),
         lastActivity: turns[0]?.updatedAt ?? session.updatedAt,
         contextWindow: model?.contextWindow ?? null,
+        supportsTools: model?.supportsTools ?? false,
       })
     }
 
@@ -580,47 +619,103 @@ export class App {
       return jsonResponse({ entries: await this.permissions.listAudit(limit) })
     }
 
-    if (path === "/v1/model-profiles" && method === "GET") {
+    if (path === "/v1/providers" && method === "GET") {
       await this.requireAuth(request)
-      return jsonResponse({ profiles: await this.models.list() })
+      return jsonResponse({ providers: await this.providers.listProviders() })
     }
 
-    if (path === "/v1/model-profiles" && method === "POST") {
+    if (path === "/v1/providers" && method === "POST") {
       await this.requireAuth(request)
-      const parsed = modelProfileSchema.safeParse(await readJson(request))
+      const parsed = customProviderSchema.safeParse(await readJson(request))
       if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
-      const profile = await this.models.create(parsed.data)
-      return jsonResponse({ profile }, 201)
+      return jsonResponse({ provider: await this.providers.createCustom(parsed.data) }, 201)
     }
 
-    const modelProfileMatch = /^\/v1\/model-profiles\/([^/]+)(?:\/(test|default))?$/.exec(path)
-    if (modelProfileMatch) {
+    const providerActionMatch = /^\/v1\/providers\/([^/]+)\/(connect|refresh|connect-env)$/.exec(path)
+    if (providerActionMatch) {
       await this.requireAuth(request)
-      const id = decodeURIComponent(modelProfileMatch[1] ?? "")
-      const action = modelProfileMatch[2]
-      if (action === "test" && method === "POST") {
-        if (!(await this.models.get(id))) throw new HttpError(404, "model_not_found", "Model profile not found")
-        const result = await this.models.test(id)
-        return jsonResponse(result)
+      const providerId = decodeURIComponent(providerActionMatch[1] ?? "")
+      const action = providerActionMatch[2]
+      if (method !== "POST") throw new HttpError(405, "method_not_allowed", "Method not allowed")
+      if (action === "refresh") {
+        await this.providers.refresh(providerId)
+        return jsonResponse({ provider: await this.providers.getProvider(providerId) })
       }
-      if (action === "default" && method === "POST") {
-        await this.models.setDefault(id)
-        const profile = await this.models.get(id)
-        return jsonResponse({ ok: true, profile })
+      if (action === "connect-env") {
+        return jsonResponse({ provider: await this.providers.connectFromEnvironment(providerId) })
       }
-      if (method === "PATCH" && !action) {
-        const parsed = updateModelProfileSchema.safeParse(await readJson(request))
-        if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
-        const profile = await this.models.update(id, parsed.data)
-        if (!profile) throw new HttpError(404, "model_not_found", "Model profile not found")
-        return jsonResponse({ profile })
+      const parsed = connectProviderSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      return jsonResponse({
+        provider: await this.providers.connect(providerId, parsed.data.apiKey ?? "", parsed.data.label),
+      })
+    }
+
+    const credentialActionMatch = /^\/v1\/providers\/([^/]+)\/credentials\/([^/]+)(?:\/(activate))?$/.exec(path)
+    if (credentialActionMatch) {
+      await this.requireAuth(request)
+      const providerId = decodeURIComponent(credentialActionMatch[1] ?? "")
+      const credentialId = decodeURIComponent(credentialActionMatch[2] ?? "")
+      if (credentialActionMatch[3] === "activate" && method === "POST") {
+        return jsonResponse({ provider: await this.providers.switchCredential(providerId, credentialId) })
       }
-      if (method === "DELETE" && !action) {
-        const removed = await this.models.remove(id)
-        if (!removed) throw new HttpError(404, "model_not_found", "Model profile not found")
-        return jsonResponse({ ok: true })
+      if (method === "DELETE") {
+        return jsonResponse({ provider: await this.providers.logout(providerId, credentialId) })
       }
       throw new HttpError(405, "method_not_allowed", "Method not allowed")
+    }
+
+    if (path === "/v1/models" && method === "GET") {
+      await this.requireAuth(request)
+      const providerId = url.searchParams.get("provider") ?? undefined
+      const includeDisabled = url.searchParams.get("all") === "1"
+      return jsonResponse({ models: await this.providers.listModels(providerId, includeDisabled) })
+    }
+
+    if (path === "/v1/models/default" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse({ model: await this.providers.defaultModel() })
+    }
+
+    if (path === "/v1/models/default" && method === "PUT") {
+      await this.requireAuth(request)
+      const parsed = modelSelectionSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      return jsonResponse({ model: await this.providers.setDefault(parsed.data) })
+    }
+
+    const modelTestMatch = /^\/v1\/models\/([^/]+)\/(.+)\/test$/.exec(path)
+    if (modelTestMatch && method === "POST") {
+      await this.requireAuth(request)
+      const providerId = decodeURIComponent(modelTestMatch[1] ?? "")
+      const modelId = decodeURIComponent(modelTestMatch[2] ?? "")
+      return jsonResponse(await this.models.test(providerId, modelId))
+    }
+
+    const modelActionMatch = /^\/v1\/models\/([^/]+)\/(.+)$/.exec(path)
+    if (modelActionMatch) {
+      await this.requireAuth(request)
+      const providerId = decodeURIComponent(modelActionMatch[1] ?? "")
+      const modelId = decodeURIComponent(modelActionMatch[2] ?? "")
+      if (method === "PATCH") {
+        const parsed = modelUpdateSchema.safeParse(await readJson(request))
+        if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+        return jsonResponse({ model: await this.providers.updateModel(providerId, modelId, parsed.data) })
+      }
+      throw new HttpError(405, "method_not_allowed", "Method not allowed")
+    }
+
+    const sessionModelMatch = /^\/v1\/sessions\/([^/]+)\/model$/.exec(path)
+    if (sessionModelMatch && method === "PATCH") {
+      await this.requireAuth(request)
+      const sessionId = decodeURIComponent(sessionModelMatch[1] ?? "")
+      const session = await this.db.getSession(sessionId)
+      if (!session) throw new HttpError(404, "session_not_found", "Session not found")
+      const parsed = modelSelectionSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      const selected = await this.providers.selected(parsed.data)
+      await this.db.setSessionModel(sessionId, parsed.data.providerId, parsed.data.modelId)
+      return jsonResponse({ model: selected })
     }
 
     const sessionMessagesMatch = /^\/v1\/sessions\/([^/]+)\/messages$/.exec(path)
@@ -640,7 +735,9 @@ export class App {
         const result = await this.turns.startTurn(
           sessionId,
           parsed.data.content,
-          parsed.data.modelProfileId,
+          parsed.data.providerId && parsed.data.modelId
+            ? { providerId: parsed.data.providerId, modelId: parsed.data.modelId }
+            : undefined,
         )
         return jsonResponse(
           {

@@ -6,6 +6,7 @@ import { Logger } from "../core/log"
 import { Database } from "../db/database"
 import { EventService } from "../events/service"
 import { ModelService } from "../models/model-service"
+import { ProviderService } from "../models/provider-service"
 import { PermissionService } from "../permissions/permission-service"
 import { JournalService } from "../tools/journal-service"
 import { ToolService } from "../tools/tool-service"
@@ -25,7 +26,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true, maxRetries: 5 })
 })
 
-async function setup() {
+async function setup(contextWindow = 8_192) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "agent-1-turn-"))
   dirs.push(dir)
   const db = await Database.open({
@@ -34,36 +35,56 @@ async function setup() {
   })
   databases.push(db)
   const logger = new Logger({ level: "error" })
-  const modelService = new ModelService(db, logger, path.join(dir, "secrets", "model-keys.dpapi.json"))
+  const providerService = new ProviderService(db, logger, path.join(dir, "secrets", "model-keys.dpapi.json"))
+  await providerService.initialize()
   const fake = startFakeOpenAI()
   servers.push(fake)
-  const profile = await modelService.create({
+  await providerService.createCustom({
+    id: "test-provider",
     name: "fake",
-    kind: "cloud",
     baseUrl: fake.url,
-    modelId: "fake-model",
     apiKey: "test-key",
-    contextWindow: 8_192,
-    maxOutputTokens: 256,
+    models: [
+      {
+        id: "fake-model",
+        name: "Fake model",
+        contextWindow,
+        maxOutputTokens: 256,
+        supportsTools: true,
+      },
+    ],
   })
+  const modelService = new ModelService(providerService, logger)
   const events = new EventService(db, logger)
   const permissions = new PermissionService(db, logger)
   const workspace = new WorkspaceService(db, logger, dir)
   const journal = new JournalService(db, logger)
   const tools = new ToolService(workspace, journal, logger)
   const bus = new TurnBus()
-  const turns = new TurnService(db, events, modelService, permissions, tools, bus, logger, {
+  const turns = new TurnService(db, events, modelService, providerService, permissions, tools, bus, logger, {
     maxSteps: 4,
     maxWallMs: 10_000,
   })
   const session = await db.createSession("Test chat")
-  return { dir, db, logger, modelService, fake, profile, events, bus, turns, session: session.session }
+  return {
+    dir,
+    db,
+    logger,
+    modelService,
+    providerService,
+    fake,
+    selection: { providerId: "test-provider", modelId: "fake-model" },
+    events,
+    bus,
+    turns,
+    session: session.session,
+  }
 }
 
 describe("Turn runtime", () => {
   test("completes a streaming chat turn and persists messages", async () => {
-    const { db, modelService, profile, turns, session } = await setup()
-    const tested = await modelService.test(profile.id)
+    const { db, modelService, turns, session } = await setup()
+    const tested = await modelService.test("test-provider", "fake-model")
     expect(tested.ok).toBe(true)
     expect(tested.supportsTools).toBe(true)
 
@@ -82,8 +103,7 @@ describe("Turn runtime", () => {
   })
 
   test("runs a read-only tool loop", async () => {
-    const { db, profile, turns, session } = await setup()
-    void profile
+    const { db, turns, session } = await setup()
     const started = await turns.startTurn(session.id, "Please echo this")
     const completed = await waitFor(async () => {
       const turn = await db.getTurn(started.turn.id)
@@ -96,8 +116,7 @@ describe("Turn runtime", () => {
   })
 
   test("compacts a long session into a stored summary", async () => {
-    const { db, profile, turns, session } = await setup()
-    await db.updateModelProfile(profile.id, { contextWindow: 1_024 })
+    const { db, turns, session } = await setup(1_024)
     const long = "Please remember this detailed preference and context. ".repeat(24)
     for (let index = 0; index < 5; index++) {
       const started = await turns.startTurn(session.id, `${long} ${index}`)

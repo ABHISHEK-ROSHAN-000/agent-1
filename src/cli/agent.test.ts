@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import path from "node:path"
 import { startFakeOpenAI, type FakeOpenAI } from "../test/fake-openai"
-import { startTestDaemon, type TestDaemon } from "../test/helpers"
+import { configureTestProvider, startTestDaemon, type TestDaemon } from "../test/helpers"
 
 const daemons: TestDaemon[] = []
 const servers: FakeOpenAI[] = []
@@ -26,40 +26,41 @@ async function cli(args: string[]) {
   return { exitCode, stdout, stderr }
 }
 
-describe("CLI model and chat flow", () => {
-  test("configures a model and streams a turn", async () => {
+describe("CLI provider, model, and run flow", () => {
+  test("lists provider models and streams a run turn", async () => {
     const fake = startFakeOpenAI()
     servers.push(fake)
     const daemon = await startTestDaemon()
     daemons.push(daemon)
-    const profile = await daemon.client.createModelProfile({
-      name: "CLI model",
-      kind: "cloud",
-      baseUrl: fake.url,
-      modelId: "fake-model",
+    await configureTestProvider(daemon.client, fake.url, {
+      name: "CLI provider",
       apiKey: "sk-cli-secret",
       contextWindow: 4096,
       maxOutputTokens: 128,
     })
-    expect(profile.profile.id).toStartWith("mdl_")
-    const session = await daemon.client.createSession("CLI chat test")
+    const session = await daemon.client.createSession("CLI run test")
 
-    const listed = await cli(["model", "list", "--data-dir", daemon.dir])
+    const listed = await cli(["auth", "list", "--data-dir", daemon.dir])
     expect(listed.exitCode).toBe(0)
-    expect(listed.stdout).toContain("CLI model")
+    expect(listed.stdout).toContain("CLI provider")
 
-    const chat = await cli([
-      "chat",
+    const models = await cli(["models", "--data-dir", daemon.dir])
+    expect(models.exitCode).toBe(0)
+    expect(models.stdout).toContain("test-provider/fake-model")
+
+    const run = await cli([
+      "run",
+      "hello",
       "--session",
       String(session.session.id),
-      "--message",
-      "hello",
+      "--model",
+      "test-provider/fake-model",
       "--data-dir",
       daemon.dir,
     ])
-    expect(chat.exitCode).toBe(0)
-    expect(chat.stdout).toContain("Fake response")
-    expect(chat.stdout).toContain("turn completed")
-    expect(chat.stdout).not.toContain("sk-cli-secret")
+    expect(run.exitCode).toBe(0)
+    expect(run.stdout).toContain("Fake response")
+    expect(run.stdout).toContain("turn completed")
+    expect(run.stdout).not.toContain("sk-cli-secret")
   }, 45_000)
 })
