@@ -96,7 +96,27 @@ describe("Agent-1 web UI", () => {
     })
     await page.waitForURL(`${daemon.state.url}/new`)
     await page.locator(".new-session-page").waitFor()
+    const centered = await page.evaluate(() => {
+      const row = document.querySelector(".new-session-project")?.getBoundingClientRect()
+      const composer = document.querySelector(".new-session-page .composer")?.getBoundingClientRect()
+      if (!row || !composer) return false
+      return Math.abs(row.left + row.width / 2 - (composer.left + composer.width / 2)) <= 1
+    })
+    expect(centered).toBe(true)
     await page.screenshot({ path: "test-results/new-session-dark.png", fullPage: true })
+    await page.locator(".model-picker-trigger").click()
+    const dialog = page.locator(".model-picker-dialog")
+    await dialog.waitFor({ timeout: 5_000 })
+    const dialogBox = await dialog.boundingBox()
+    const viewport = page.viewportSize()
+    expect(dialogBox).not.toBeNull()
+    expect(dialogBox!.y).toBeGreaterThanOrEqual(0)
+    expect(dialogBox!.x).toBeGreaterThanOrEqual(0)
+    expect(dialogBox!.y + dialogBox!.height).toBeLessThanOrEqual(viewport!.height)
+    expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(viewport!.width)
+    await page.screenshot({ path: "test-results/model-picker-dialog.png", fullPage: true })
+    await page.keyboard.press("Escape")
+    await dialog.waitFor({ state: "hidden", timeout: 5_000 })
     await page.locator(".new-session-page textarea").fill("hello")
     await page.evaluate(() => (document.querySelector(".send-button") as HTMLElement | null)?.click())
     await page.waitForURL(/\/sessions\//)
@@ -213,6 +233,7 @@ describe("Agent-1 web UI", () => {
       "login-dark.png",
       "home-dark.png",
       "new-session-dark.png",
+      "model-picker-dialog.png",
       "session-dark.png",
       "approval-dark.png",
       "files-dark.png",

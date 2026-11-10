@@ -1,4 +1,5 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { For, Show, createMemo, createSignal } from "solid-js"
+import { Dialog } from "@kobalte/core/dialog"
 import DOMPurify from "dompurify"
 import { marked } from "marked"
 import { Icon } from "./icons"
@@ -90,7 +91,7 @@ function ModelPicker(props: {
   const [open, setOpen] = createSignal(false)
   const [query, setQuery] = createSignal("")
   const [active, setActive] = createSignal("")
-  let root: HTMLDivElement | undefined
+  let searchInput: HTMLInputElement | undefined
 
   const key = (model: CatalogModel) => `${model.providerId}/${model.modelId}`
   const selected = () => props.models.find((model) => key(model) === props.value)
@@ -112,13 +113,9 @@ function ModelPicker(props: {
     return [...map.entries()]
   })
 
-  const toggle = () => {
-    const next = !open()
-    if (next) {
-      setQuery("")
-      setActive(props.value ?? "")
-    }
-    setOpen(next)
+  const reset = () => {
+    setQuery("")
+    setActive(props.value ?? "")
   }
 
   const choose = (model: CatalogModel) => {
@@ -141,26 +138,36 @@ function ModelPicker(props: {
     if (model) setActive(key(model))
   }
 
-  onMount(() => {
-    const close = (event: PointerEvent) => {
-      if (root && !root.contains(event.target as Node)) setOpen(false)
-    }
-    document.addEventListener("pointerdown", close)
-    onCleanup(() => document.removeEventListener("pointerdown", close))
-  })
-
   return (
-    <div ref={root} class="composer-control model-picker">
-      <button
-        type="button"
-        class="model-picker-trigger"
-        disabled={props.disabled || props.models.length === 0}
-        onClick={toggle}
-      >
-        {selected()?.name ?? "No model"} <span class="model-picker-caret" aria-hidden="true" />
-      </button>
-      <Show when={open()}>
-        <div class="model-picker-panel">
+    <Dialog
+      open={open()}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (next) reset()
+      }}
+    >
+      <div class="composer-control model-picker">
+        <Dialog.Trigger
+          type="button"
+          class="model-picker-trigger"
+          disabled={props.disabled || props.models.length === 0}
+        >
+          {selected()?.name ?? "No model"} <span class="model-picker-caret" aria-hidden="true" />
+        </Dialog.Trigger>
+      </div>
+      <Dialog.Portal>
+        <Dialog.Overlay class="model-picker-overlay" />
+        <Dialog.Content
+          class="model-picker-dialog"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault()
+            queueMicrotask(() => searchInput?.focus())
+          }}
+        >
+          <Dialog.Title class="sr-only">Select model</Dialog.Title>
+          <Dialog.Description class="sr-only">
+            Search and choose a model for this session.
+          </Dialog.Description>
           <input
             class="form-input model-picker-search"
             value={query()}
@@ -187,40 +194,50 @@ function ModelPicker(props: {
               }
             }}
             placeholder="Search models"
-            ref={(element) => queueMicrotask(() => element.focus())}
+            aria-label="Search models"
+            ref={(element) => {
+              searchInput = element
+            }}
           />
-          <Show when={groups().length > 0} fallback={<div class="model-picker-empty">No matching models</div>}>
-            <For each={groups()}>
-              {([providerId, models]) => (
-                <div class="model-picker-group">
-                  <div class="model-picker-provider">{providerId}</div>
-                  <For each={models}>
-                    {(model) => (
-                      <button
-                        type="button"
-                        class="model-picker-option"
-                        data-active={active() === key(model) ? "" : undefined}
-                        data-selected={props.value === key(model) ? "" : undefined}
-                        onMouseEnter={() => setActive(key(model))}
-                        onClick={() => choose(model)}
-                      >
-                        <span class="truncate">{model.name}</span>
-                        <span class="model-picker-tags">
-                          {model.supportsTools ? <span class="tag green">tools</span> : undefined}
-                          {model.costInputPerMillion === 0 && model.costOutputPerMillion === 0 ? (
-                            <span class="tag">free</span>
-                          ) : undefined}
-                        </span>
-                      </button>
-                    )}
-                  </For>
-                </div>
-              )}
-            </For>
-          </Show>
-        </div>
-      </Show>
-    </div>
+          <div class="model-picker-results">
+            <Show when={groups().length > 0} fallback={<div class="model-picker-empty">No matching models</div>}>
+              <For each={groups()}>
+                {([providerId, models]) => (
+                  <div class="model-picker-group">
+                    <div class="model-picker-provider">{providerId}</div>
+                    <For each={models}>
+                      {(model) => (
+                        <button
+                          type="button"
+                          class="model-picker-option"
+                          data-active={active() === key(model) ? "" : undefined}
+                          data-selected={props.value === key(model) ? "" : undefined}
+                          onMouseEnter={() => setActive(key(model))}
+                          onClick={() => choose(model)}
+                        >
+                          <span class="model-picker-check">
+                            <Show when={props.value === key(model)}>
+                              <Icon name="check" size={13} />
+                            </Show>
+                          </span>
+                          <span class="truncate model-picker-name">{model.name}</span>
+                          <span class="model-picker-tags">
+                            {model.supportsTools ? <span class="tag green">tools</span> : undefined}
+                            {model.costInputPerMillion === 0 && model.costOutputPerMillion === 0 ? (
+                              <span class="tag">free</span>
+                            ) : undefined}
+                          </span>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog>
   )
 }
 export function Composer(props: {

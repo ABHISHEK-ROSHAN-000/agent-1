@@ -106,7 +106,7 @@ bun run check
 84 pass, 0 fail, 453 expect() calls, 32 files
 
 bun run test:e2e
-6 pass, 0 fail, 61 expect() calls, 2 browser suites
+6 pass, 0 fail, 69 expect() calls, 2 browser suites
 ```
 
 Coverage includes Phase 1–4, OpenCode-style web surfaces, static serving/CSP, login and pairing, home/new-session/session flows, streaming chat, approval-gated real file moves and journal undo, files/context panels, Pierre tree/diff review, mobile layout, system light/dark theme, offline/reconnecting/update banners, PWA manifest/service-worker checks, visual pixel baselines, OpenTunnel remote pairing, PROXY v2 visitor forwarding, per-visitor limits, remote cookie/host checks, provider credentials, models.dev catalog parsing, environment-key detection, default selection, output-limit fitting, provider retry/error diagnostics, and per-session model switching. The 500-file injected crash/resume/undo test remains at the tool/journal layer.

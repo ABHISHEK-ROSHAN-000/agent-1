@@ -1074,11 +1074,13 @@ pre,
 }
 
 .new-session-project {
+  width: 100%;
   height: 32px;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 7px;
-  padding: 0 5px;
+  padding: 0;
   color: var(--v2-text-text-muted);
   font-size: 12px;
 }
@@ -1198,23 +1200,43 @@ pre,
   border-top: 4px solid var(--v2-icon-icon-muted);
 }
 
-.model-picker-panel {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 0;
-  z-index: 80;
-  width: min(360px, calc(100vw - 28px));
-  max-height: 360px;
-  overflow: auto;
-  padding: 8px;
+.model-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--v2-overlay-simple-overlay-scrim);
+  backdrop-filter: blur(4px);
+}
+
+.model-picker-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 101;
+  width: min(480px, calc(100vw - 24px));
+  max-height: min(640px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  overflow: hidden;
   border: 1px solid var(--v2-border-border-muted);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--v2-background-bg-base);
-  box-shadow: var(--shadow-md, 0 16px 40px rgb(0 0 0 / 30%));
+  box-shadow: var(--v2-elevation-overlay);
+  outline: none;
+  transform: translate(-50%, -50%);
 }
 
 .model-picker-search {
+  flex: none;
+  height: 32px;
   margin-bottom: 8px;
+}
+
+.model-picker-results {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 2px 4px;
 }
 
 .model-picker-group {
@@ -1222,7 +1244,11 @@ pre,
 }
 
 .model-picker-provider {
-  padding: 4px 6px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 8px;
+  background: var(--v2-background-bg-base);
   color: var(--v2-text-text-faint);
   font-size: 10px;
   text-transform: uppercase;
@@ -1230,15 +1256,16 @@ pre,
 
 .model-picker-option {
   width: 100%;
+  height: 28px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 7px 8px;
+  gap: 6px;
+  padding: 0 6px;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: var(--v2-text-text-base);
+  font-size: 13px;
   text-align: left;
   cursor: pointer;
 }
@@ -1249,6 +1276,19 @@ pre,
 
 .model-picker-option[data-selected] {
   color: var(--v2-text-text-strong, var(--v2-text-text-base));
+}
+
+.model-picker-check {
+  width: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--v2-icon-icon-base);
+}
+
+.model-picker-name {
+  min-width: 0;
+  flex: 1;
 }
 
 .model-picker-tags {
