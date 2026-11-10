@@ -1,3 +1,4 @@
+import { assertSafeMemoryContent, scanForThreats } from "./threats"
 import {
   MemoryError,
   type MemoryOperation,
@@ -135,6 +136,7 @@ export class MemoryStore {
           if (!content) {
             throw new MemoryError("missing_content", "Content is required for the 'add' action.")
           }
+          assertSafeMemoryContent(content)
           if (working.includes(content)) {
             duplicateAdd = true
           } else {
@@ -276,7 +278,8 @@ export class MemoryStore {
     const usage = this.usage
     const title = this.name === "user" ? "USER PROFILE (who the user is)" : "MEMORY (your personal notes)"
     const rule = "═".repeat(46)
-    return `${rule}\n${title} [${usage.percent}% — ${usage.chars.toLocaleString("en-US")}/${usage.limit.toLocaleString("en-US")} chars]\n${rule}\n${this.values.join(ENTRY_DELIMITER)}`
+    const safeEntries = this.values.map((entry) => this.promptEntry(entry))
+    return `${rule}\n${title} [${usage.percent}% — ${usage.chars.toLocaleString("en-US")}/${usage.limit.toLocaleString("en-US")} chars]\n${rule}\n${safeEntries.join(ENTRY_DELIMITER)}`
   }
 
   renderMarkdown(): string {
@@ -352,7 +355,18 @@ export class MemoryStore {
     if (patched === entry) {
       throw new MemoryError("no_op", "The patch leaves the entry unchanged.")
     }
+    assertSafeMemoryContent(patched)
     return patched
+  }
+
+  private promptEntry(entry: string): string {
+    const findings = scanForThreats(entry, "strict")
+    if (findings.length === 0) return entry
+    const filename = this.name === "user" ? "USER.md" : "MEMORY.md"
+    return (
+      `[BLOCKED: ${filename} entry contained threat pattern(s): ${findings.join(", ")}. ` +
+      "Removed from the system prompt; use the memory remove action to delete the original.]"
+    )
   }
 
   private preview(entry: string): string {

@@ -36,6 +36,7 @@ export type MemoryErrorCode =
   | "over_limit"
   | "would_empty"
   | "stale_entry"
+  | "scan_blocked"
   | "already_decided"
   | "already_undone"
   | "nothing_to_undo"
@@ -47,6 +48,7 @@ export interface MemoryErrorDetails {
   readonly requiredFree?: number
   readonly closestEntries?: readonly string[]
   readonly matches?: readonly string[]
+  readonly threats?: readonly string[]
 }
 
 export class MemoryError extends Error {
