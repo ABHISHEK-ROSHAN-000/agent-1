@@ -64,6 +64,174 @@ function PageBody(props: { children?: unknown }) {
 
 /* ------------------------------------------------------------------ session */
 
+type ToolEntry = {
+  id: string
+  toolName: string
+  input?: Record<string, unknown>
+  output?: unknown
+  text: string
+  failed?: boolean
+}
+
+type ChatRow =
+  | { kind: "message"; message: Message }
+  | { kind: "tools"; key: string; turnId: string | null; items: ToolEntry[] }
+
+function contentParts(message: Message): Array<Record<string, unknown>> {
+  const content = message.content as { content?: unknown } | undefined
+  const value = content && typeof content === "object" && "content" in content ? content.content : content
+  return Array.isArray(value)
+    ? value.filter((part): part is Record<string, unknown> =>
+        Boolean(part) && typeof part === "object" && !Array.isArray(part),
+      )
+    : []
+}
+
+function toolLabel(name: string): string {
+  const labels: Record<string, string> = {
+    shell: "Shell",
+    fs_read: "Read",
+    fs_list: "Read",
+    fs_search: "Read",
+    fs_write: "Edit",
+    fs_move: "Edit",
+    fs_apply_moves: "Edit",
+    web_fetch: "Web",
+    web_search: "Web",
+    test_echo: "Echo",
+    test_confirm: "Confirm",
+  }
+  return labels[name] ?? name.replace(/^.*_/, "").replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+function toolOutputText(output: unknown): string {
+  if (typeof output === "string") return output
+  if (!output || typeof output !== "object") return ""
+  const value = output as { value?: unknown; reason?: unknown; error?: unknown }
+  const inner = value.value ?? value.reason ?? value.error
+  if (typeof inner === "string") return inner
+  if (inner && typeof inner === "object") return JSON.stringify(inner)
+  return ""
+}
+
+function toolSubtitle(entry: ToolEntry): string {
+  const input = entry.input ?? {}
+  const value = entry.output as { value?: unknown; reason?: unknown; error?: unknown } | undefined
+  const output = value?.error ?? value?.reason ?? value?.value
+  if (typeof input.command === "string") return input.command
+  if (typeof input.path === "string") return input.path
+  if (typeof input.url === "string") return input.url
+  if (typeof input.query === "string") return input.query
+  const firstString = Object.values(input).find((value): value is string => typeof value === "string")
+  if (firstString) return firstString
+  if (typeof output === "string") return output
+  if (output && typeof output === "object") {
+    const record = output as Record<string, unknown>
+    if (typeof record.error === "string") return record.error
+    if (typeof record.message === "string") return record.message
+    if (typeof record.path === "string") return record.path
+  }
+  return entry.text
+}
+
+function buildChatRows(messages: readonly Message[]): ChatRow[] {
+  const calls = new Map<string, { toolName: string; input?: Record<string, unknown> }>()
+  const rows: ChatRow[] = []
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      const parts = contentParts(message)
+      for (const part of parts) {
+        if (part.type !== "tool-call" || typeof part.toolCallId !== "string") continue
+        calls.set(part.toolCallId, {
+          toolName: typeof part.toolName === "string" ? part.toolName : "tool",
+          ...(part.input && typeof part.input === "object" && !Array.isArray(part.input)
+            ? { input: part.input as Record<string, unknown> }
+            : {}),
+        })
+      }
+      const hasText =
+        message.text.trim().length > 0 ||
+        parts.some((part) => part.type === "text" && typeof part.text === "string" && part.text.trim())
+      if (hasText) rows.push({ kind: "message", message })
+      continue
+    }
+    if (message.role !== "tool") {
+      rows.push({ kind: "message", message })
+      continue
+    }
+    const result = contentParts(message).find((part) => part.type === "tool-result")
+    const call =
+      result && typeof result.toolCallId === "string" ? calls.get(result.toolCallId) : undefined
+    const toolName =
+      (result && typeof result.toolName === "string" ? result.toolName : undefined) ??
+      call?.toolName ??
+      "tool"
+    const output = result?.output
+    const failed =
+      Boolean(output && typeof output === "object" && "type" in output && output.type === "execution-denied") ||
+      Boolean(toolOutputText(output).toLowerCase().includes("error"))
+    const entry: ToolEntry = {
+      id: message.id,
+      toolName,
+      ...(call?.input ? { input: call.input } : {}),
+      ...(output === undefined ? {} : { output }),
+      text: message.text,
+      ...(failed ? { failed: true } : {}),
+    }
+    const last = rows.at(-1)
+    if (last?.kind === "tools" && last.turnId === (message.turnId ?? null)) {
+      last.items.push(entry)
+    } else {
+      rows.push({
+        kind: "tools",
+        key: `${message.turnId ?? "turn"}:${message.id}`,
+        turnId: message.turnId ?? null,
+        items: [entry],
+      })
+    }
+  }
+  return rows
+}
+
+function ToolGroup(props: {
+  group: Extract<ChatRow, { kind: "tools" }>
+  open: boolean
+  onToggle: () => void
+}) {
+  const names = () => [...new Set(props.group.items.map((item) => toolLabel(item.toolName)))]
+  return (
+    <div class="message-tool-group">
+      <button
+        type="button"
+        class="tool-group-trigger"
+        aria-expanded={props.open}
+        onClick={props.onToggle}
+      >
+        <span class="tool-group-summary">
+          <span class="muted">Used</span>
+          <span class="tool-group-count">{props.group.items.length}</span>
+          <span>{names().join(", ")}</span>
+        </span>
+        <span class="tool-group-chevron">
+          <Icon name="chevron" size={12} />
+        </span>
+      </button>
+      <Show when={props.open}>
+        <div class="tool-group-items">
+          <For each={props.group.items}>
+            {(item) => (
+              <div class="tool-group-item">
+                <Icon name={item.failed ? "close" : "check"} size={12} />
+                <span class="tool-group-item-name">{toolLabel(item.toolName)}</span>
+                <span class="tool-group-item-subtitle truncate">{toolSubtitle(item)}</span>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
+    </div>
+  )
+}
 function MessageView(props: { message: Message }) {
   return (
     <div class={`message message-${props.message.role}`}>
@@ -513,7 +681,7 @@ export function SessionPage() {
   const location = useLocation()
   const id = () => params.id ?? ""
   const queryClient = useQueryClient()
-  const [sideTab, setSideTab] = createSignal<"review" | "context" | "files">("review")
+  const [sideTab, setSideTab] = createSignal<"review" | "context" | "files">("context")
   const [sideOpen, setSideOpen] = createSignal(false)
   const [busy, setBusy] = createSignal(false)
   const [liveText, setLiveText] = createSignal("")
@@ -563,6 +731,17 @@ export function SessionPage() {
   const sessionApprovals = () => (approvals.data?.approvals ?? []).filter((approval) => approval.sessionId === id())
   const pendingApprovals = () => sessionApprovals().filter((approval) => approval.status === "pending")
   const sessionJournal = () => (journal.data?.entries ?? []).filter((entry) => entry.sessionId === id())
+  const chatRows = createMemo(() => buildChatRows(messages.data?.messages ?? []))
+  const [openToolGroups, setOpenToolGroups] = createSignal<Set<string>>(new Set())
+
+  const toggleToolGroup = (key: string) => {
+    setOpenToolGroups((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
 
   let appliedContextModel = false
   createEffect(
@@ -771,32 +950,44 @@ export function SessionPage() {
 
   return (
     <div class="session-screen">
-      <div class="session-header">
-        <div class="session-header-title">
-          <strong>{session()?.title ?? "Session"}</strong>
-          <span class="session-header-path">Agent-1 local</span>
-        </div>
-        <div class="session-header-actions">
-          <Show when={busy()}>
-            <span class="tag amber">working</span>
-          </Show>
-          <Show when={pendingApprovals().length > 0}>
-            <span class="tag amber">{pendingApprovals().length} approval</span>
-          </Show>
-          <ContextUsage
-            context={context.data}
-            onOpen={() => {
-              setSideOpen(true)
-              setSideTab("context")
-            }}
-          />
-          <button class="icon-button" type="button" onClick={() => setSideOpen((value) => !value)} title="Toggle review panel">
-            <Icon name="panel" size={15} />
-          </button>
-        </div>
-      </div>
       <div class="session-body">
         <div class="chat-pane" ref={chatPane}>
+          <div class="session-header">
+            <div class="session-header-title">
+              <strong>{session()?.title ?? "Session"}</strong>
+              <span class="session-header-path">Agent-1 local</span>
+            </div>
+            <div class="session-header-actions">
+              <Show when={busy()}>
+                <span class="tag amber">working</span>
+              </Show>
+              <Show when={pendingApprovals().length > 0}>
+                <span class="tag amber">{pendingApprovals().length} approval</span>
+              </Show>
+              <ContextUsage
+                context={context.data}
+                onOpen={() => {
+                  setSideOpen(true)
+                  setSideTab("context")
+                }}
+              />
+              <button
+                class="icon-button"
+                type="button"
+                onClick={() => {
+                  if (sideOpen()) {
+                    setSideOpen(false)
+                  } else {
+                    setSideTab("context")
+                    setSideOpen(true)
+                  }
+                }}
+                title="Toggle context panel"
+              >
+                <Icon name="panel" size={15} />
+              </button>
+            </div>
+          </div>
           <div class="messages" ref={messagesEl}>
             <div class="messages-inner" ref={messagesInner}>
               <Show when={(messages.data?.messages.length ?? 0) === 0 && !busy()}>
@@ -809,7 +1000,19 @@ export function SessionPage() {
                   </div>
                 </Empty>
               </Show>
-              <For each={messages.data?.messages ?? []}>{(message) => <MessageView message={message} />}</For>
+              <For each={chatRows()}>
+                {(row) =>
+                  row.kind === "tools" ? (
+                    <ToolGroup
+                      group={row}
+                      open={openToolGroups().has(row.key)}
+                      onToggle={() => toggleToolGroup(row.key)}
+                    />
+                  ) : (
+                    <MessageView message={row.message} />
+                  )
+                }
+              </For>
               <Show when={liveText()}>
                 <div class="message message-assistant">
                   <div class="message-meta">assistant</div>

@@ -1621,6 +1621,8 @@ select.composer-control {
   min-height: 0;
   flex: 1;
   display: flex;
+  gap: 8px;
+  padding: 8px;
 }
 
 .chat-pane {
@@ -1630,6 +1632,10 @@ select.composer-control {
   flex: 1;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--v2-background-bg-base);
+  box-shadow: var(--v2-elevation-raised);
 }
 
 .messages {
@@ -1718,6 +1724,94 @@ select.composer-control {
   border-radius: 7px;
   background: var(--v2-background-bg-layer-01);
   box-shadow: 0 0 0 0.5px var(--v2-border-border-base);
+}
+
+.message-tool-group {
+  min-width: 0;
+}
+
+.tool-group-trigger {
+  width: 100%;
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--v2-text-text-base);
+  font-size: 13px;
+  font-weight: 440;
+  text-align: left;
+}
+
+.tool-group-trigger:hover {
+  color: var(--v2-text-text-strong, var(--v2-text-text-base));
+}
+
+.tool-group-summary {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.tool-group-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-group-chevron {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--v2-icon-icon-muted);
+}
+
+.tool-group-chevron svg {
+  transform: rotate(90deg);
+  transition: transform 120ms ease;
+}
+
+.tool-group-trigger[aria-expanded="true"] .tool-group-chevron svg {
+  transform: rotate(-90deg);
+}
+
+.tool-group-items {
+  margin: 4px 0 8px 20px;
+  padding-left: 10px;
+  border-left: 0.5px solid var(--v2-border-border-muted);
+}
+
+.tool-group-item {
+  min-height: 25px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--v2-text-text-muted);
+  font-size: 12px;
+}
+
+.tool-group-item > svg {
+  flex: none;
+  color: var(--v2-icon-icon-faint);
+}
+
+.tool-group-item-name {
+  flex: none;
+  color: var(--v2-text-text-base);
+  font-weight: 440;
+}
+
+.tool-group-item-subtitle {
+  min-width: 0;
+  color: var(--v2-text-text-faint);
+  font-family: var(--font-family-mono);
+  font-size: 11px;
 }
 
 .tool-line {
@@ -1836,7 +1930,7 @@ select.composer-control {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  margin: 8px 8px 8px 0;
+  margin: 0;
   overflow: hidden;
   border: 0.5px solid var(--v2-border-border-muted);
   border-radius: 10px;
@@ -2353,6 +2447,11 @@ select.composer-control {
 
   .new-session-wordmark {
     width: 92%;
+  }
+
+  .session-body {
+    gap: 4px;
+    padding: 4px;
   }
 
   .messages {

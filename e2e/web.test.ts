@@ -347,7 +347,7 @@ describe("Agent-1 web UI", () => {
     await mobilePage.waitForURL(/\/sessions\//)
     await mobilePage.locator(".session-screen").waitFor()
     await mobilePage.evaluate(() => {
-      const button = document.querySelector('.session-header button[title="Toggle review panel"]') as HTMLElement | null
+      const button = document.querySelector(".session-header .icon-button") as HTMLElement | null
       button?.click()
     })
     await mobilePage.locator(".side-panel").waitFor()
