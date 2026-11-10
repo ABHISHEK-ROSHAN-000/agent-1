@@ -10,11 +10,12 @@ import type {
   ProviderCredential,
   ProviderInfo,
   ProviderKind,
+  ReasoningOption,
   SelectedModel,
 } from "../shared/types"
 
 const DEFAULT_MODEL_SETTING = "model.default"
-const CATALOG_SEEDED_SETTING = "catalog.models_dev.seeded.v1"
+const CATALOG_SEEDED_SETTING = "catalog.models_dev.seeded.v2"
 
 interface ModelsDevModel {
   readonly id?: string
@@ -24,6 +25,12 @@ interface ModelsDevModel {
   readonly tool_call?: boolean
   readonly temperature?: boolean
   readonly reasoning?: boolean
+  readonly reasoning_options?: readonly {
+    readonly type?: string
+    readonly values?: readonly string[]
+    readonly min?: number
+    readonly max?: number
+  }[]
   readonly modalities?: {
     readonly input?: readonly string[]
     readonly output?: readonly string[]
@@ -101,6 +108,27 @@ function strings(value: readonly unknown[] | undefined, fallback: readonly strin
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [...fallback]
 }
 
+function reasoningOptions(value: ModelsDevModel["reasoning_options"]): ReasoningOption[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((option): ReasoningOption[] => {
+    if (option.type === "effort") {
+      const values = strings(option.values, []).filter((item) => item !== "default")
+      return values.length > 0 ? [{ type: "effort", values }] : []
+    }
+    if (option.type === "toggle") return [{ type: "toggle" }]
+    if (option.type === "budget_tokens") {
+      return [
+        {
+          type: "budget_tokens",
+          ...(typeof option.min === "number" ? { min: option.min } : {}),
+          ...(typeof option.max === "number" ? { max: option.max } : {}),
+        },
+      ]
+    }
+    return []
+  })
+}
+
 function catalogModels(providerId: string, source: ModelsDevProvider): CatalogModel[] {
   return Object.entries(source.models).flatMap(([key, model]) => {
     if (model.type && model.type !== "chat") return []
@@ -119,6 +147,7 @@ function catalogModels(providerId: string, source: ModelsDevProvider): CatalogMo
         supportsTools: model.tool_call === true,
         supportsTemperature: model.temperature !== false,
         reasoning: model.reasoning === true,
+        reasoningOptions: reasoningOptions(model.reasoning_options),
         costInputPerMillion: numeric(model.cost?.input),
         costOutputPerMillion: numeric(model.cost?.output),
         costCacheReadPerMillion: numeric(model.cost?.cache_read),
@@ -393,6 +422,7 @@ export class ProviderService {
       supportsTools?: boolean
       supportsTemperature?: boolean
       reasoning?: boolean
+      reasoningOptions?: readonly ReasoningOption[]
       inputModalities?: readonly string[]
       outputModalities?: readonly string[]
       costInputPerMillion?: number
@@ -421,6 +451,7 @@ export class ProviderService {
       supportsTools: model.supportsTools ?? false,
       supportsTemperature: model.supportsTemperature ?? true,
       reasoning: model.reasoning ?? false,
+      reasoningOptions: model.reasoningOptions ?? [],
       costInputPerMillion: model.costInputPerMillion ?? 0,
       costOutputPerMillion: model.costOutputPerMillion ?? 0,
       costCacheReadPerMillion: 0,

@@ -35,6 +35,7 @@ interface SessionRow {
   readonly updated_at: string
   readonly provider_id: string | null
   readonly model_id: string | null
+  readonly reasoning_effort: string | null
   readonly summary: string | null
   readonly summary_through_seq: number | null
 }
@@ -96,6 +97,7 @@ interface ProviderModelRow {
   readonly tools_supported: number
   readonly temperature_supported: number
   readonly reasoning: number
+  readonly reasoning_options_json: string
   readonly cost_input: number
   readonly cost_output: number
   readonly cost_cache_read: number
@@ -131,6 +133,7 @@ interface TurnRow {
   readonly cost_usd: number
   readonly error: string | null
   readonly error_details_json: string | null
+  readonly reasoning_effort: string | null
   readonly started_at: string
   readonly updated_at: string
   readonly completed_at: string | null
@@ -290,6 +293,7 @@ function rowToSession(row: SessionRow): Session {
     updatedAt: row.updated_at,
     providerId: row.provider_id,
     modelId: row.model_id,
+    reasoningEffort: row.reasoning_effort,
     summary: row.summary,
     summaryThroughSeq: row.summary_through_seq,
   }
@@ -299,6 +303,34 @@ function jsonStrings(value: string): string[] {
   try {
     const parsed = JSON.parse(value) as unknown
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []
+  } catch {
+    return []
+  }
+}
+
+function jsonReasoningOptions(value: string): import("../shared/types").ReasoningOption[] {
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((item): import("../shared/types").ReasoningOption[] => {
+      if (!item || typeof item !== "object") return []
+      const option = item as Record<string, unknown>
+      if (option.type === "effort" && Array.isArray(option.values)) {
+        const values = option.values.filter((entry): entry is string => typeof entry === "string")
+        return values.length > 0 ? [{ type: "effort", values }] : []
+      }
+      if (option.type === "toggle") return [{ type: "toggle" }]
+      if (option.type === "budget_tokens") {
+        return [
+          {
+            type: "budget_tokens",
+            ...(typeof option.min === "number" ? { min: option.min } : {}),
+            ...(typeof option.max === "number" ? { max: option.max } : {}),
+          },
+        ]
+      }
+      return []
+    })
   } catch {
     return []
   }
@@ -353,6 +385,7 @@ function rowToCatalogModel(row: ProviderModelRow): import("../shared/types").Cat
     supportsTools: row.tools_supported === 1,
     supportsTemperature: row.temperature_supported === 1,
     reasoning: row.reasoning === 1,
+    reasoningOptions: jsonReasoningOptions(row.reasoning_options_json),
     costInputPerMillion: row.cost_input,
     costOutputPerMillion: row.cost_output,
     costCacheReadPerMillion: row.cost_cache_read,
@@ -409,6 +442,7 @@ function rowToTurn(row: TurnRow): Turn {
     status: row.status as TurnStatus,
     providerId: row.provider_id,
     modelId: row.model_id,
+    reasoningEffort: row.reasoning_effort,
     userMessageId: row.user_message_id,
     stepCount: row.step_count,
     inputTokens: row.input_tokens,
@@ -686,7 +720,7 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<SessionRow>`
-          SELECT id, title, created_at, updated_at, provider_id, model_id, summary, summary_through_seq
+          SELECT id, title, created_at, updated_at, provider_id, model_id, reasoning_effort, summary, summary_through_seq
           FROM sessions
           ORDER BY updated_at DESC, id DESC
         `
@@ -699,7 +733,7 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<SessionRow>`
-          SELECT id, title, created_at, updated_at, provider_id, model_id, summary, summary_through_seq
+          SELECT id, title, created_at, updated_at, provider_id, model_id, reasoning_effort, summary, summary_through_seq
           FROM sessions
           WHERE id = ${id}
         `
@@ -1071,14 +1105,16 @@ export class Database {
               INSERT INTO provider_models
                 (provider_id, model_id, name, family, type, released_at, status,
                  context_limit, output_limit, input_modalities_json, output_modalities_json,
-                 tools_supported, temperature_supported, reasoning, cost_input, cost_output,
-                 cost_cache_read, cost_cache_write, enabled, favorite, metadata_json, updated_at)
+                 tools_supported, temperature_supported, reasoning, reasoning_options_json,
+                 cost_input, cost_output, cost_cache_read, cost_cache_write, enabled, favorite,
+                 metadata_json, updated_at)
               VALUES
                 (${model.providerId}, ${model.modelId}, ${model.name}, ${model.family ?? null}, 'chat',
                  ${null}, ${model.status ?? null}, ${model.contextWindow}, ${model.maxOutputTokens},
                  ${JSON.stringify(model.inputModalities)}, ${JSON.stringify(model.outputModalities)},
                  ${model.supportsTools ? 1 : 0}, ${model.supportsTemperature ? 1 : 0},
-                 ${model.reasoning ? 1 : 0}, ${model.costInputPerMillion}, ${model.costOutputPerMillion},
+                 ${model.reasoning ? 1 : 0}, ${JSON.stringify(model.reasoningOptions)},
+                 ${model.costInputPerMillion}, ${model.costOutputPerMillion},
                  ${model.costCacheReadPerMillion}, ${model.costCacheWritePerMillion},
                  ${model.enabled ? 1 : 0}, ${model.favorite ? 1 : 0}, '{}', ${now})
               ON CONFLICT(provider_id, model_id) DO UPDATE SET
@@ -1091,6 +1127,7 @@ export class Database {
                 tools_supported = excluded.tools_supported,
                 temperature_supported = excluded.temperature_supported,
                 reasoning = excluded.reasoning,
+                reasoning_options_json = excluded.reasoning_options_json,
                 cost_input = excluded.cost_input,
                 cost_output = excluded.cost_output,
                 cost_cache_read = excluded.cost_cache_read,
@@ -1110,9 +1147,9 @@ export class Database {
           ? yield* sql<ProviderModelRow>`
               SELECT provider_id, model_id, name, family, type, released_at, status,
                      context_limit, output_limit, input_modalities_json, output_modalities_json,
-                     tools_supported, temperature_supported, reasoning, cost_input, cost_output,
-                     cost_cache_read, cost_cache_write, enabled, favorite, last_used_at,
-                     metadata_json, updated_at
+                     tools_supported, temperature_supported, reasoning, reasoning_options_json,
+                     cost_input, cost_output, cost_cache_read, cost_cache_write, enabled, favorite,
+                     last_used_at, metadata_json, updated_at
               FROM provider_models
               WHERE provider_id = ${providerId} ${includeDisabled ? sql`` : sql`AND enabled = 1`}
               ORDER BY name ASC, model_id ASC
@@ -1120,9 +1157,9 @@ export class Database {
           : yield* sql<ProviderModelRow>`
               SELECT provider_id, model_id, name, family, type, released_at, status,
                      context_limit, output_limit, input_modalities_json, output_modalities_json,
-                     tools_supported, temperature_supported, reasoning, cost_input, cost_output,
-                     cost_cache_read, cost_cache_write, enabled, favorite, last_used_at,
-                     metadata_json, updated_at
+                     tools_supported, temperature_supported, reasoning, reasoning_options_json,
+                     cost_input, cost_output, cost_cache_read, cost_cache_write, enabled, favorite,
+                     last_used_at, metadata_json, updated_at
               FROM provider_models
               WHERE 1 = 1 ${includeDisabled ? sql`` : sql`AND enabled = 1`}
               ORDER BY provider_id ASC, name ASC, model_id ASC
@@ -1141,9 +1178,9 @@ export class Database {
         const rows = yield* sql<ProviderModelRow>`
           SELECT provider_id, model_id, name, family, type, released_at, status,
                  context_limit, output_limit, input_modalities_json, output_modalities_json,
-                 tools_supported, temperature_supported, reasoning, cost_input, cost_output,
-                 cost_cache_read, cost_cache_write, enabled, favorite, last_used_at,
-                 metadata_json, updated_at
+                 tools_supported, temperature_supported, reasoning, reasoning_options_json,
+                 cost_input, cost_output, cost_cache_read, cost_cache_write, enabled, favorite,
+                 last_used_at, metadata_json, updated_at
           FROM provider_models
           WHERE provider_id = ${providerId} AND model_id = ${modelId}
         `
@@ -1180,10 +1217,16 @@ export class Database {
     )
   }
 
-  async setSessionModel(sessionId: string, providerId: string | null, modelId: string | null): Promise<void> {
+  async setSessionModel(
+    sessionId: string,
+    providerId: string | null,
+    modelId: string | null,
+    reasoningEffort: string | null = null,
+  ): Promise<void> {
     await this.query((sql) =>
       sql`
-        UPDATE sessions SET provider_id = ${providerId}, model_id = ${modelId}, updated_at = ${nowIso()}
+        UPDATE sessions SET provider_id = ${providerId}, model_id = ${modelId},
+          reasoning_effort = ${reasoningEffort}, updated_at = ${nowIso()}
         WHERE id = ${sessionId}
       `.pipe(Effect.asVoid),
     )
@@ -1212,8 +1255,8 @@ export class Database {
       Effect.gen(function* () {
         const rows = yield* sql<TurnRow>`
           SELECT id, session_id, status, provider_id, model_id, user_message_id, step_count,
-                 input_tokens, output_tokens, cost_usd, error, error_details_json, started_at, updated_at,
-                 completed_at
+                 input_tokens, output_tokens, cost_usd, error, error_details_json, reasoning_effort,
+                 started_at, updated_at, completed_at
           FROM turns
           WHERE id = ${turnId}
         `
@@ -1228,8 +1271,8 @@ export class Database {
       Effect.gen(function* () {
         const rows = yield* sql<TurnRow>`
           SELECT id, session_id, status, provider_id, model_id, user_message_id, step_count,
-                 input_tokens, output_tokens, cost_usd, error, error_details_json, started_at, updated_at,
-                 completed_at
+                 input_tokens, output_tokens, cost_usd, error, error_details_json, reasoning_effort,
+                 started_at, updated_at, completed_at
           FROM turns
           WHERE session_id = ${sessionId}
           ORDER BY started_at DESC
@@ -1245,6 +1288,7 @@ export class Database {
     providerId: string,
     modelId: string,
     text: string,
+    reasoningEffort: string | null = null,
   ): Promise<{ turn: Turn; userMessage: Message }> {
     const turnId = newId("turn")
     const messageId = newId("msg")
@@ -1263,12 +1307,12 @@ export class Database {
             if (seq === undefined) throw new Error("Failed to persist user message")
             yield* sql`
               INSERT INTO turns
-                (id, session_id, status, provider_id, model_id, user_message_id, step_count,
-                 input_tokens, output_tokens, cost_usd, error, checkpoint_json,
+                (id, session_id, status, provider_id, model_id, reasoning_effort, user_message_id,
+                 step_count, input_tokens, output_tokens, cost_usd, error, checkpoint_json,
                  started_at, updated_at, completed_at)
               VALUES
-                (${turnId}, ${sessionId}, 'queued', ${providerId}, ${modelId}, ${messageId}, 0,
-                 0, 0, 0, NULL, NULL, ${now}, ${now}, NULL)
+                (${turnId}, ${sessionId}, 'queued', ${providerId}, ${modelId}, ${reasoningEffort},
+                 ${messageId}, 0, 0, 0, 0, NULL, NULL, ${now}, ${now}, NULL)
             `
             yield* sql`UPDATE sessions SET updated_at = ${now} WHERE id = ${sessionId}`
             const turn: Turn = {
@@ -1277,6 +1321,7 @@ export class Database {
               status: "queued",
               providerId,
               modelId,
+              reasoningEffort,
               userMessageId: messageId,
               stepCount: 0,
               inputTokens: 0,
@@ -1435,8 +1480,8 @@ export class Database {
       Effect.gen(function* () {
         const rows = yield* sql<TurnRow>`
           SELECT id, session_id, status, provider_id, model_id, user_message_id, step_count,
-                 input_tokens, output_tokens, cost_usd, error, error_details_json, started_at, updated_at,
-                 completed_at
+                 input_tokens, output_tokens, cost_usd, error, error_details_json, reasoning_effort,
+                 started_at, updated_at, completed_at
           FROM turns
           WHERE status IN ('queued', 'running', 'resuming', 'waiting_approval')
           ORDER BY started_at ASC

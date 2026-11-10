@@ -15,6 +15,8 @@ interface ChatRequest {
   readonly stream?: boolean
   readonly messages?: ChatMessage[]
   readonly tools?: Array<{ readonly function?: { readonly name?: string } }>
+  readonly reasoning_effort?: string
+  readonly reasoning?: { readonly effort?: string }
 }
 
 export interface FakeOpenAI {

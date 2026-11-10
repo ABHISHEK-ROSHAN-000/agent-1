@@ -5,9 +5,15 @@ export interface Session {
   readonly updatedAt: string
   readonly providerId?: string | null
   readonly modelId?: string | null
+  readonly reasoningEffort?: string | null
   readonly summary?: string | null
   readonly summaryThroughSeq?: number | null
 }
+
+export type ReasoningOption =
+  | { readonly type: "effort"; readonly values: readonly string[] }
+  | { readonly type: "toggle" }
+  | { readonly type: "budget_tokens"; readonly min?: number; readonly max?: number }
 
 export type ProviderKind = "cloud" | "local"
 export type CredentialSource = "stored" | "environment" | "none"
@@ -43,6 +49,7 @@ export interface CatalogModel {
   readonly supportsTools: boolean
   readonly supportsTemperature: boolean
   readonly reasoning: boolean
+  readonly reasoningOptions: readonly ReasoningOption[]
   readonly costInputPerMillion: number
   readonly costOutputPerMillion: number
   readonly costCacheReadPerMillion: number
@@ -55,6 +62,7 @@ export interface CatalogModel {
 export interface ModelSelection {
   readonly providerId: string
   readonly modelId: string
+  readonly reasoningEffort?: string | null
 }
 
 export interface SelectedModel extends ModelSelection {
@@ -104,6 +112,7 @@ export interface Turn {
   readonly status: TurnStatus
   readonly providerId: string
   readonly modelId: string
+  readonly reasoningEffort?: string | null
   readonly userMessageId: string
   readonly stepCount: number
   readonly inputTokens: number

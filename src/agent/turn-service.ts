@@ -119,18 +119,29 @@ export class TurnService {
           ? { providerId: session.providerId, modelId: session.modelId }
           : undefined),
     )
-    await this.db.setSessionModel(sessionId, resolved.provider.id, resolved.model.modelId)
+    const reasoningEffort = this.models.reasoningEffortFor(
+      resolved.model,
+      selection ? selection.reasoningEffort : session.reasoningEffort,
+    )
+    await this.db.setSessionModel(
+      sessionId,
+      resolved.provider.id,
+      resolved.model.modelId,
+      reasoningEffort ?? null,
+    )
     const created = await this.db.createTurnWithUserMessage(
       sessionId,
       resolved.provider.id,
       resolved.model.modelId,
       content,
+      reasoningEffort ?? null,
     )
     this.bus.publish(created.turn.id, { type: "status", status: "queued" })
     await this.events.append("turn.started", sessionId, {
       turnId: created.turn.id,
       providerId: resolved.provider.id,
       modelId: resolved.model.modelId,
+      reasoningEffort: reasoningEffort ?? null,
     })
     await this.providers.touchModel(resolved.provider.id, resolved.model.modelId)
     void this.runTurn(created.turn.id, false)
@@ -271,6 +282,7 @@ export class TurnService {
           resolved,
           state.messages,
           controller.signal,
+          turn.reasoningEffort,
         )
 
         state = {
@@ -606,8 +618,9 @@ export class TurnService {
     resolved: ResolvedModel,
     messages: ModelMessage[],
     signal: AbortSignal,
+    reasoningEffort?: string | null,
   ): Promise<StepResult> {
-    const model = this.models.createModel(resolved)
+    const model = this.models.createModel(resolved, reasoningEffort)
     const system = this.systemPrompt(session, resolved.model)
     const maxOutputTokens = outputLimit(
       resolved.model,

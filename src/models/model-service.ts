@@ -13,14 +13,34 @@ export interface ResolvedModel {
 export class ModelService {
   constructor(private readonly providers: ProviderService) {}
 
-  createModel(resolved: ResolvedModel) {
+  createModel(resolved: ResolvedModel, reasoningEffort?: string | null) {
     const provider = createOpenAICompatible({
       name: resolved.provider.id,
       baseURL: resolved.provider.baseUrl,
       apiKey: resolved.apiKey ?? "local",
       headers: resolved.provider.headers,
+      ...(reasoningEffort
+        ? {
+            transformRequestBody: (body: Record<string, unknown>) =>
+              resolved.provider.id === "openrouter"
+                ? {
+                    ...body,
+                    reasoning: {
+                      ...(body.reasoning && typeof body.reasoning === "object" ? body.reasoning : {}),
+                      effort: reasoningEffort,
+                    },
+                  }
+                : { ...body, reasoning_effort: reasoningEffort },
+          }
+        : {}),
     })
     return provider.chatModel(resolved.model.modelId)
+  }
+
+  reasoningEffortFor(model: CatalogModel, requested?: string | null): string | undefined {
+    if (!requested || requested === "default") return undefined
+    const effort = model.reasoningOptions.find((option) => option.type === "effort")
+    return effort?.type === "effort" && effort.values.includes(requested) ? requested : undefined
   }
 
   async resolve(selection?: ModelSelection): Promise<ResolvedModel> {

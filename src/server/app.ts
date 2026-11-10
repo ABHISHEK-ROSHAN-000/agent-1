@@ -54,6 +54,7 @@ const createMessageSchema = z
     content: z.string().min(1).max(100_000),
     providerId: z.string().min(1).max(100).optional(),
     modelId: z.string().min(1).max(300).optional(),
+    reasoningEffort: z.string().min(1).max(50).nullable().optional(),
   })
   .refine((value) => Boolean(value.providerId) === Boolean(value.modelId), {
     message: "providerId and modelId must be provided together",
@@ -62,6 +63,7 @@ const createMessageSchema = z
 const modelSelectionSchema = z.object({
   providerId: z.string().min(1).max(100),
   modelId: z.string().min(1).max(300),
+  reasoningEffort: z.string().min(1).max(50).nullable().optional(),
 })
 
 const connectProviderSchema = z.object({
@@ -91,6 +93,20 @@ const customProviderSchema = z.object({
         supportsTools: z.boolean().optional(),
         supportsTemperature: z.boolean().optional(),
         reasoning: z.boolean().optional(),
+        reasoningOptions: z
+          .array(
+            z.union([
+              z.object({ type: z.literal("effort"), values: z.array(z.string().min(1).max(50)).max(50) }),
+              z.object({ type: z.literal("toggle") }),
+              z.object({
+                type: z.literal("budget_tokens"),
+                min: z.number().int().positive().optional(),
+                max: z.number().int().positive().optional(),
+              }),
+            ]),
+          )
+          .max(10)
+          .optional(),
         inputModalities: z.array(z.string()).optional(),
         outputModalities: z.array(z.string()).optional(),
         costInputPerMillion: z.number().min(0).optional(),
@@ -706,7 +722,10 @@ export class App {
       const parsed = modelSelectionSchema.safeParse(await readJson(request))
       if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
       const selected = await this.providers.selected(parsed.data)
-      await this.db.setSessionModel(sessionId, parsed.data.providerId, parsed.data.modelId)
+      const model = await this.providers.getModel(parsed.data.providerId, parsed.data.modelId)
+      if (!model) throw new HttpError(404, "model_not_found", "Model not found")
+      const effort = this.models.reasoningEffortFor(model, parsed.data.reasoningEffort)
+      await this.db.setSessionModel(sessionId, parsed.data.providerId, parsed.data.modelId, effort ?? null)
       return jsonResponse({ model: selected })
     }
 
@@ -728,7 +747,11 @@ export class App {
           sessionId,
           parsed.data.content,
           parsed.data.providerId && parsed.data.modelId
-            ? { providerId: parsed.data.providerId, modelId: parsed.data.modelId }
+            ? {
+                providerId: parsed.data.providerId,
+                modelId: parsed.data.modelId,
+                reasoningEffort: parsed.data.reasoningEffort,
+              }
             : undefined,
         )
         return jsonResponse(

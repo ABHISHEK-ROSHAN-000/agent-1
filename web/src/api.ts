@@ -16,6 +16,7 @@ export interface Session {
   updatedAt: string
   providerId?: string | null
   modelId?: string | null
+  reasoningEffort?: string | null
   summary?: string | null
   summaryThroughSeq?: number | null
 }
@@ -34,6 +35,9 @@ export interface Message {
 export interface Turn {
   id: string
   sessionId: string
+  providerId?: string
+  modelId?: string
+  reasoningEffort?: string | null
   status:
     | "queued"
     | "running"
@@ -126,6 +130,11 @@ export interface ProviderInfo {
   modelCount: number
 }
 
+export type ReasoningOption =
+  | { type: "effort"; values: string[] }
+  | { type: "toggle" }
+  | { type: "budget_tokens"; min?: number; max?: number }
+
 export interface CatalogModel {
   providerId: string
   modelId: string
@@ -138,6 +147,7 @@ export interface CatalogModel {
   supportsTools: boolean
   supportsTemperature: boolean
   reasoning: boolean
+  reasoningOptions: ReasoningOption[]
   costInputPerMillion: number
   costOutputPerMillion: number
   costCacheReadPerMillion: number
@@ -150,6 +160,7 @@ export interface CatalogModel {
 export interface ModelSelection {
   providerId: string
   modelId: string
+  reasoningEffort?: string | null
 }
 
 export function modelKey(model: Pick<CatalogModel, "providerId" | "modelId">): string {
@@ -255,7 +266,18 @@ export const api = {
     request<{ turn: Turn; streamUrl: string }>(
       "POST",
       `/v1/sessions/${encodeURIComponent(sessionId)}/messages`,
-      { content, ...(selection ? { providerId: selection.providerId, modelId: selection.modelId } : {}) },
+      {
+        content,
+        ...(selection
+          ? {
+              providerId: selection.providerId,
+              modelId: selection.modelId,
+              ...(selection.reasoningEffort !== undefined
+                ? { reasoningEffort: selection.reasoningEffort }
+                : {}),
+            }
+          : {}),
+      },
     ),
   setSessionModel: (sessionId: string, selection: ModelSelection) =>
     request<{ model: SelectedModel }>(

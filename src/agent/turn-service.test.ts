@@ -54,6 +54,8 @@ async function setup(
         contextWindow,
         maxOutputTokens: 256,
         supportsTools: true,
+        reasoning: true,
+        reasoningOptions: [{ type: "effort", values: ["none", "low", "high", "max"] }],
       },
     ],
   })
@@ -100,6 +102,22 @@ describe("Turn runtime", () => {
     expect(messages.length).toBeGreaterThanOrEqual(2)
     expect(messages.some((message) => message.role === "assistant")).toBe(true)
     expect(messages[0]?.text).toBe("Hello there")
+  })
+
+  test("persists and sends the selected reasoning effort", async () => {
+    const { db, fake, turns, session, selection } = await setup()
+    const started = await turns.startTurn(session.id, "Think carefully", {
+      ...selection,
+      reasoningEffort: "max",
+    })
+    const completed = await waitFor(async () => {
+      const turn = await db.getTurn(started.turn.id)
+      return turn && (turn.status === "completed" || turn.status === "failed") ? turn : undefined
+    }, 10_000)
+    expect(completed.status).toBe("completed")
+    expect(completed.reasoningEffort).toBe("max")
+    expect(fake.requests.at(-1)?.reasoning_effort).toBe("max")
+    expect((await db.getSession(session.id))?.reasoningEffort).toBe("max")
   })
 
   test("runs a read-only tool loop", async () => {

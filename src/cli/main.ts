@@ -680,9 +680,13 @@ async function sessionCommand(parsed: ParsedArgs): Promise<void> {
   throw new Error("Usage: agent-1 session create|list")
 }
 
-function parseModelRef(value: string | undefined): { providerId: string; modelId: string } | undefined {
+function parseModelRef(
+  value: string | undefined,
+): { providerId: string; modelId: string; reasoningEffort?: string } | undefined {
   if (!value) return undefined
-  const withoutVariant = value.split("#", 1)[0] ?? value
+  const variantAt = value.indexOf("#")
+  const withoutVariant = variantAt === -1 ? value : value.slice(0, variantAt)
+  const reasoningEffort = variantAt === -1 ? undefined : value.slice(variantAt + 1)
   const separator = withoutVariant.indexOf("/")
   if (separator <= 0 || separator === withoutVariant.length - 1) {
     throw new Error("Model must be in provider/model format")
@@ -690,6 +694,7 @@ function parseModelRef(value: string | undefined): { providerId: string; modelId
   return {
     providerId: withoutVariant.slice(0, separator),
     modelId: withoutVariant.slice(separator + 1),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
   }
 }
 

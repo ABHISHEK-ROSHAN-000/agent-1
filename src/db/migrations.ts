@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import { SqlClient } from "effect/sql"
 import { SqliteMigrator } from "@effect/sql-sqlite-bun"
 
-export const LATEST_SCHEMA_VERSION = 6
+export const LATEST_SCHEMA_VERSION = 7
 
 const initial = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -337,6 +337,16 @@ const turnErrorDetails = Effect.gen(function* () {
   yield* Effect.void
 })
 
+const reasoningEffort = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`ALTER TABLE provider_models ADD COLUMN reasoning_options_json TEXT NOT NULL DEFAULT '[]'`
+  yield* sql`ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT`
+  yield* sql`ALTER TABLE turns ADD COLUMN reasoning_effort TEXT`
+
+  yield* Effect.void
+})
+
 export const migrationLoader = SqliteMigrator.fromRecord({
   "0001_initial": initial,
   "0002_agent_runtime": agentRuntime,
@@ -344,4 +354,5 @@ export const migrationLoader = SqliteMigrator.fromRecord({
   "0004_core_tools": coreTools,
   "0005_provider_models": providerModels,
   "0006_turn_error_details": turnErrorDetails,
+  "0007_reasoning_effort": reasoningEffort,
 })

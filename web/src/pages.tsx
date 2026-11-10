@@ -430,6 +430,7 @@ export function SessionPage() {
   const [liveTurnId, setLiveTurnId] = createSignal<string>()
   const [turnError, setTurnError] = createSignal<string>()
   const [selectedModel, setSelectedModel] = createSignal<string>()
+  const [selectedEffort, setSelectedEffort] = createSignal<string | null>(null)
   let stream: { abort(): void } | undefined
   let messagesEl: HTMLDivElement | undefined
 
@@ -476,6 +477,7 @@ export function SessionPage() {
       () => {
         appliedContextModel = false
         setSelectedModel("")
+        setSelectedEffort(null)
       },
     ),
   )
@@ -486,6 +488,7 @@ export function SessionPage() {
     if (contextModel && !appliedContextModel) {
       appliedContextModel = true
       setSelectedModel(contextModel)
+      setSelectedEffort(context.data?.session.reasoningEffort ?? null)
       return
     }
     const fallback = defaultModel.data?.model
@@ -550,7 +553,12 @@ export function SessionPage() {
     setBusy(true)
     setTurnError(undefined)
     try {
-      const started = await api.startMessage(id(), text, parseModelKey(selectedModel()))
+      const selection = parseModelKey(selectedModel())
+      const started = await api.startMessage(
+        id(),
+        text,
+        selection ? { ...selection, reasoningEffort: selectedEffort() } : undefined,
+      )
       await attachStream(started.turn.id)
     } catch (error) {
       setTurnError(errorMessage(error))
@@ -652,12 +660,23 @@ export function SessionPage() {
             busy={busy()}
             models={models.data?.models ?? []}
             modelId={selectedModel()}
+            reasoningEffort={selectedEffort()}
             onModel={(value) => {
               setSelectedModel(value)
+              setSelectedEffort(null)
               const selection = parseModelKey(value)
               if (!selection) return
               void api
                 .setSessionModel(id(), selection)
+                .then(() => queryClient.invalidateQueries({ queryKey: ["context", id()] }))
+                .catch((error) => toast.error(errorMessage(error)))
+            }}
+            onReasoningEffort={(value) => {
+              setSelectedEffort(value ?? null)
+              const selection = parseModelKey(selectedModel())
+              if (!selection) return
+              void api
+                .setSessionModel(id(), { ...selection, reasoningEffort: value ?? null })
                 .then(() => queryClient.invalidateQueries({ queryKey: ["context", id()] }))
                 .catch((error) => toast.error(errorMessage(error)))
             }}

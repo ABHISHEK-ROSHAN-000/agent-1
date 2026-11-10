@@ -50,7 +50,7 @@ describe("Database", () => {
       await db.close()
     }
 
-    expect(schemaVersion(dbPath)).toBe(6)
+    expect(schemaVersion(dbPath)).toBe(7)
 
     const reopened = await Database.open({ dbPath, backupDir })
     try {
@@ -68,7 +68,7 @@ describe("Database", () => {
     const db = await Database.open({ dbPath, backupDir })
     await db.close()
 
-    const backup = backupIfNeeded(dbPath, backupDir, 7)
+    const backup = backupIfNeeded(dbPath, backupDir, 8)
     expect(backup).toBeDefined()
     const files = await readdir(backupDir)
     expect(files.some((name) => name.endsWith(".db"))).toBe(true)

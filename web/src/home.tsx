@@ -187,6 +187,7 @@ export function NewSessionPage() {
   const queryClient = useQueryClient()
   const [busy, setBusy] = createSignal(false)
   const [selectedModel, setSelectedModel] = createSignal("")
+  const [selectedEffort, setSelectedEffort] = createSignal<string | null>(null)
   const [selectedWorkspace, setSelectedWorkspace] = createSignal("")
   const models = useQuery(() => ({ queryKey: ["models"], queryFn: () => api.models() }))
   const defaultModel = useQuery(() => ({ queryKey: ["default-model"], queryFn: api.defaultModel }))
@@ -197,6 +198,11 @@ export function NewSessionPage() {
     if (!selectedModel() && preferred) setSelectedModel(modelKey(preferred))
   })
 
+  const changeModel = (value: string) => {
+    setSelectedModel(value)
+    setSelectedEffort(null)
+  }
+
   const send = async (text: string) => {
     if (busy()) return
     setBusy(true)
@@ -204,7 +210,12 @@ export function NewSessionPage() {
       const result = await api.createSession(text.slice(0, 70))
       await queryClient.invalidateQueries({ queryKey: ["sessions"] })
       try {
-        const started = await api.startMessage(result.session.id, text, parseModelKey(selectedModel()))
+        const selection = parseModelKey(selectedModel())
+        const started = await api.startMessage(
+          result.session.id,
+          text,
+          selection ? { ...selection, reasoningEffort: selectedEffort() } : undefined,
+        )
         navigate(`/sessions/${encodeURIComponent(result.session.id)}?turn=${encodeURIComponent(started.turn.id)}`)
       } catch (error) {
         toast.error(errorMessage(error))
@@ -227,7 +238,9 @@ export function NewSessionPage() {
             busy={busy()}
             models={models.data?.models ?? []}
             modelId={selectedModel()}
-            onModel={setSelectedModel}
+            onModel={changeModel}
+            reasoningEffort={selectedEffort()}
+            onReasoningEffort={setSelectedEffort}
             placeholder="Ask Agent-1 anything…"
           />
           <div class="new-session-project">

@@ -38,6 +38,8 @@ describe("provider and model catalog API", () => {
             contextWindow: 4096,
             maxOutputTokens: 128,
             supportsTools: true,
+            reasoning: true,
+            reasoningOptions: [{ type: "effort", values: ["low", "high", "max"] }],
           },
         ],
       }),
@@ -59,10 +61,18 @@ describe("provider and model catalog API", () => {
       headers: { authorization: basic(daemon.password) },
     })
     expect(models.status).toBe(200)
-    const modelList = (await models.json()) as { models: Array<{ providerId: string; modelId: string }> }
-    expect(
-      modelList.models.some((model) => model.providerId === "local-test" && model.modelId === "fake-model"),
-    ).toBe(true)
+    const modelList = (await models.json()) as {
+      models: Array<{
+        providerId: string
+        modelId: string
+        reasoningOptions: Array<{ type: string; values?: string[] }>
+      }>
+    }
+    const model = modelList.models.find(
+      (entry) => entry.providerId === "local-test" && entry.modelId === "fake-model",
+    )
+    expect(model).toBeDefined()
+    expect(model?.reasoningOptions).toEqual([{ type: "effort", values: ["low", "high", "max"] }])
 
 
     const updated = await fetch(`${daemon.state.url}/v1/models/local-test/fake-model`, {

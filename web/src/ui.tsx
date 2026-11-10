@@ -1,5 +1,6 @@
 import { For, Show, createMemo, createSignal } from "solid-js"
-import { Dialog } from "@kobalte/core/dialog"
+import { A } from "@solidjs/router"
+import { Popover } from "@kobalte/core/popover"
 import DOMPurify from "dompurify"
 import { marked } from "marked"
 import { Icon } from "./icons"
@@ -112,6 +113,7 @@ function ModelPicker(props: {
     }
     return [...map.entries()]
   })
+  const activeModel = () => filtered().find((model) => key(model) === active()) ?? selected()
 
   const reset = () => {
     setQuery("")
@@ -139,105 +141,202 @@ function ModelPicker(props: {
   }
 
   return (
-    <Dialog
+    <Popover
       open={open()}
       onOpenChange={(next) => {
         setOpen(next)
         if (next) reset()
       }}
+      placement="top-start"
+      gutter={8}
     >
       <div class="composer-control model-picker">
-        <Dialog.Trigger
+        <Popover.Trigger
           type="button"
           class="model-picker-trigger"
           disabled={props.disabled || props.models.length === 0}
         >
           {selected()?.name ?? "No model"} <span class="model-picker-caret" aria-hidden="true" />
-        </Dialog.Trigger>
+        </Popover.Trigger>
       </div>
-      <Dialog.Portal>
-        <Dialog.Overlay class="model-picker-overlay" />
-        <Dialog.Content
-          class="model-picker-dialog"
-          onOpenAutoFocus={(event) => {
-            event.preventDefault()
-            queueMicrotask(() => searchInput?.focus())
-          }}
-        >
-          <Dialog.Title class="sr-only">Select model</Dialog.Title>
-          <Dialog.Description class="sr-only">
-            Search and choose a model for this session.
-          </Dialog.Description>
-          <input
-            class="form-input model-picker-search"
-            value={query()}
-            onInput={(event) => {
-              setQuery(event.currentTarget.value)
-              setActive(filtered()[0] ? key(filtered()[0]!) : "")
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "ArrowDown") {
-                event.preventDefault()
-                move(1)
-              } else if (event.key === "ArrowUp") {
-                event.preventDefault()
-                move(-1)
-              } else if (event.key === "Enter") {
-                const model = filtered().find((item) => key(item) === active())
-                if (model) {
+      <Popover.Portal>
+        <Popover.Content class="model-picker-popover" aria-label="Select model">
+          <div class="model-picker-main">
+            <input
+              class="form-input model-picker-search"
+              value={query()}
+              onInput={(event) => {
+                setQuery(event.currentTarget.value)
+                setActive(filtered()[0] ? key(filtered()[0]!) : "")
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
                   event.preventDefault()
-                  choose(model)
+                  move(1)
+                } else if (event.key === "ArrowUp") {
+                  event.preventDefault()
+                  move(-1)
+                } else if (event.key === "Enter") {
+                  const model = filtered().find((item) => key(item) === active())
+                  if (model) {
+                    event.preventDefault()
+                    choose(model)
+                  }
+                } else if (event.key === "Escape") {
+                  event.preventDefault()
+                  setOpen(false)
                 }
-              } else if (event.key === "Escape") {
-                event.preventDefault()
-                setOpen(false)
-              }
-            }}
-            placeholder="Search models"
-            aria-label="Search models"
-            ref={(element) => {
-              searchInput = element
-            }}
-          />
-          <div class="model-picker-results">
-            <Show when={groups().length > 0} fallback={<div class="model-picker-empty">No matching models</div>}>
-              <For each={groups()}>
-                {([providerId, models]) => (
-                  <div class="model-picker-group">
-                    <div class="model-picker-provider">{providerId}</div>
-                    <For each={models}>
-                      {(model) => (
-                        <button
-                          type="button"
-                          class="model-picker-option"
-                          data-active={active() === key(model) ? "" : undefined}
-                          data-selected={props.value === key(model) ? "" : undefined}
-                          onMouseEnter={() => setActive(key(model))}
-                          onClick={() => choose(model)}
-                        >
-                          <span class="model-picker-check">
-                            <Show when={props.value === key(model)}>
-                              <Icon name="check" size={13} />
-                            </Show>
-                          </span>
-                          <span class="truncate model-picker-name">{model.name}</span>
-                          <span class="model-picker-tags">
-                            {model.supportsTools ? <span class="tag green">tools</span> : undefined}
-                            {model.costInputPerMillion === 0 && model.costOutputPerMillion === 0 ? (
-                              <span class="tag">free</span>
-                            ) : undefined}
-                          </span>
-                        </button>
-                      )}
-                    </For>
-                  </div>
-                )}
-              </For>
-            </Show>
+              }}
+              placeholder="Search models"
+              aria-label="Search models"
+              ref={(element) => {
+                searchInput = element
+                queueMicrotask(() => element.focus())
+              }}
+            />
+            <div class="model-picker-results">
+              <Show when={groups().length > 0} fallback={<div class="model-picker-empty">No matching models</div>}>
+                <For each={groups()}>
+                  {([providerId, models]) => (
+                    <div class="model-picker-group">
+                      <div class="model-picker-provider">{providerId}</div>
+                      <For each={models}>
+                        {(model) => (
+                          <button
+                            type="button"
+                            class="model-picker-option"
+                            data-active={active() === key(model) ? "" : undefined}
+                            data-selected={props.value === key(model) ? "" : undefined}
+                            onMouseEnter={() => setActive(key(model))}
+                            onClick={() => choose(model)}
+                          >
+                            <span class="model-picker-check">
+                              <Show when={props.value === key(model)}>
+                                <Icon name="check" size={13} />
+                              </Show>
+                            </span>
+                            <span class="truncate model-picker-name">{model.name}</span>
+                            <span class="model-picker-tags">
+                              {model.supportsTools ? <span class="tag green">tools</span> : undefined}
+                              {model.costInputPerMillion === 0 && model.costOutputPerMillion === 0 ? (
+                                <span class="tag">free</span>
+                              ) : undefined}
+                            </span>
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                  )}
+                </For>
+              </Show>
+            </div>
+            <A class="model-picker-manage" href="/models" onClick={() => setOpen(false)}>
+              <Icon name="settings" size={13} />
+              <span>Manage models</span>
+            </A>
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog>
+          <Show when={activeModel()} keyed>
+            {(model) => (
+              <div class="model-picker-detail">
+                <div class="model-picker-detail-name">{model.name}</div>
+                <dl>
+                  <div>
+                    <dt>Provider</dt>
+                    <dd>{model.providerId}</dd>
+                  </div>
+                  <div>
+                    <dt>Inputs</dt>
+                    <dd>{model.inputModalities.join(", ")}</dd>
+                  </div>
+                  <div>
+                    <dt>Reasoning</dt>
+                    <dd>{model.reasoning ? "Yes" : "No reasoning"}</dd>
+                  </div>
+                  <div>
+                    <dt>Context</dt>
+                    <dd>{model.contextWindow.toLocaleString()}</dd>
+                  </div>
+                </dl>
+              </div>
+            )}
+          </Show>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover>
+  )
+}
+
+function effortLabel(value: string): string {
+  if (value === "xhigh") return "Extra high"
+  if (value === "minimal") return "Minimal"
+  return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
+function ReasoningPicker(props: {
+  model?: CatalogModel
+  value?: string
+  onChange?: (value: string | null | undefined) => void
+  disabled?: boolean
+}) {
+  const [open, setOpen] = createSignal(false)
+  const efforts = () => {
+    const option = props.model?.reasoningOptions.find((item) => item.type === "effort")
+    return option?.type === "effort" ? option.values.filter((value) => value !== "none") : []
+  }
+
+  return (
+    <Show when={efforts().length > 0}>
+      <Popover
+        open={open()}
+        onOpenChange={setOpen}
+        placement="top-start"
+        gutter={6}
+      >
+        <div class="composer-control effort-picker">
+          <Popover.Trigger
+            type="button"
+            class="effort-picker-trigger"
+            disabled={props.disabled}
+            title="Reasoning effort"
+          >
+            {props.value ? effortLabel(props.value) : "Default"}
+            <span class="model-picker-caret" aria-hidden="true" />
+          </Popover.Trigger>
+        </div>
+        <Popover.Portal>
+          <Popover.Content class="effort-picker-popover" aria-label="Reasoning effort">
+            <button
+              type="button"
+              class="effort-picker-option"
+              data-selected={!props.value ? "" : undefined}
+              onClick={() => {
+                props.onChange?.(undefined)
+                setOpen(false)
+              }}
+            >
+              <span>Default</span>
+              <Show when={!props.value}><Icon name="check" size={13} /></Show>
+            </button>
+            <For each={efforts()}>
+              {(effort) => (
+                <button
+                  type="button"
+                  class="effort-picker-option"
+                  data-selected={props.value === effort ? "" : undefined}
+                  onClick={() => {
+                    props.onChange?.(effort)
+                    setOpen(false)
+                  }}
+                >
+                  <span>{effortLabel(effort)}</span>
+                  <Show when={props.value === effort}><Icon name="check" size={13} /></Show>
+                </button>
+              )}
+            </For>
+          </Popover.Content>
+        </Popover.Portal>
+      </Popover>
+    </Show>
   )
 }
 export function Composer(props: {
@@ -248,10 +347,14 @@ export function Composer(props: {
   models: CatalogModel[]
   modelId?: string
   onModel?: (id: string) => void
+  reasoningEffort?: string | null
+  onReasoningEffort?: (value: string | null | undefined) => void
   placeholder?: string
   compact?: boolean
 }) {
   const [value, setValue] = createSignal("")
+  const selectedModel = () =>
+    props.models.find((model) => `${model.providerId}/${model.modelId}` === props.modelId)
   let textarea: HTMLTextAreaElement | undefined
 
   const submit = async () => {
@@ -286,13 +389,16 @@ export function Composer(props: {
           <button class="composer-control" type="button" title="Add context" disabled={props.disabled}>
             <Icon name="plus" size={14} />
           </button>
-          <span class="composer-control" title="Agent-1 one mode">
-            Agent
-          </span>
           <ModelPicker
             models={props.models}
             value={props.modelId}
             onChange={props.onModel}
+            disabled={props.disabled}
+          />
+          <ReasoningPicker
+            model={selectedModel()}
+            value={props.reasoningEffort ?? undefined}
+            onChange={props.onReasoningEffort}
             disabled={props.disabled}
           />
           <div class="composer-spacer" />

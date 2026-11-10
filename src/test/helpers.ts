@@ -92,6 +92,7 @@ export async function configureTestProvider(
     readonly apiKey?: string
     readonly contextWindow?: number
     readonly maxOutputTokens?: number
+    readonly reasoningOptions?: readonly import("../shared/types").ReasoningOption[]
   } = {},
 ): Promise<void> {
   await client.createProvider({
@@ -107,6 +108,7 @@ export async function configureTestProvider(
         contextWindow: options.contextWindow ?? 8192,
         maxOutputTokens: options.maxOutputTokens ?? 256,
         supportsTools: true,
+        ...(options.reasoningOptions ? { reasoningOptions: options.reasoningOptions } : {}),
       },
     ],
   })

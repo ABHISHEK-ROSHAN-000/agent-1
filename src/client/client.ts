@@ -214,7 +214,15 @@ export class AgentOneClient {
   ): Promise<{ turn: Turn; streamUrl: string }> {
     return this.request("POST", `/v1/sessions/${encodeURIComponent(sessionId)}/messages`, {
       content,
-      ...(selection ? { providerId: selection.providerId, modelId: selection.modelId } : {}),
+      ...(selection
+        ? {
+            providerId: selection.providerId,
+            modelId: selection.modelId,
+            ...(selection.reasoningEffort !== undefined
+              ? { reasoningEffort: selection.reasoningEffort }
+              : {}),
+          }
+        : {}),
     })
   }
 

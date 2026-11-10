@@ -27,6 +27,7 @@ beforeAll(async () => {
     apiKey: "sk-browser-test",
     contextWindow: 8192,
     maxOutputTokens: 256,
+    reasoningOptions: [{ type: "effort", values: ["none", "low", "high", "max"] }],
   })
   workspaceDir = await mkdtemp(path.join(os.tmpdir(), "agent-1-web-workspace-"))
   await writeFile(path.join(workspaceDir, "hello.txt"), "Web file content", "utf8")
@@ -103,24 +104,44 @@ describe("Agent-1 web UI", () => {
       return Math.abs(row.left + row.width / 2 - (composer.left + composer.width / 2)) <= 1
     })
     expect(centered).toBe(true)
+    expect(await page.locator(".composer-footer").getByText("Agent", { exact: true }).count()).toBe(0)
     await page.screenshot({ path: "test-results/new-session-dark.png", fullPage: true })
     await page.locator(".model-picker-trigger").click()
-    const dialog = page.locator(".model-picker-dialog")
-    await dialog.waitFor({ timeout: 5_000 })
-    const dialogBox = await dialog.boundingBox()
+    const popover = page.locator(".model-picker-popover")
+    await popover.waitFor({ timeout: 5_000 })
+    const popoverBox = await popover.boundingBox()
+    const triggerBox = await page.locator(".model-picker-trigger").boundingBox()
     const viewport = page.viewportSize()
-    expect(dialogBox).not.toBeNull()
-    expect(dialogBox!.y).toBeGreaterThanOrEqual(0)
-    expect(dialogBox!.x).toBeGreaterThanOrEqual(0)
-    expect(dialogBox!.y + dialogBox!.height).toBeLessThanOrEqual(viewport!.height)
-    expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(viewport!.width)
-    await page.screenshot({ path: "test-results/model-picker-dialog.png", fullPage: true })
-    await page.keyboard.press("Escape")
-    await dialog.waitFor({ state: "hidden", timeout: 5_000 })
+    expect(popoverBox).not.toBeNull()
+    expect(triggerBox).not.toBeNull()
+    expect(popoverBox!.y).toBeGreaterThanOrEqual(0)
+    expect(popoverBox!.x).toBeGreaterThanOrEqual(0)
+    expect(popoverBox!.y + popoverBox!.height).toBeLessThanOrEqual(viewport!.height)
+    expect(popoverBox!.x + popoverBox!.width).toBeLessThanOrEqual(viewport!.width)
+    expect(popoverBox!.y + popoverBox!.height).toBeLessThanOrEqual(triggerBox!.y + 1)
+    await page.locator(".model-picker-detail").waitFor()
+    await page.screenshot({ path: "test-results/model-picker-popover.png", fullPage: true })
+    await page.locator(".model-picker-option").first().click()
+    await popover.waitFor({ state: "hidden", timeout: 5_000 })
+    await page.locator(".effort-picker-trigger").click()
+    const effortPopover = page.locator(".effort-picker-popover")
+    await effortPopover.waitFor({ timeout: 5_000 })
+    await page.screenshot({ path: "test-results/effort-picker-popover.png", fullPage: true })
+    await effortPopover.getByRole("button", { name: "Max", exact: true }).click()
+    await effortPopover.waitFor({ state: "hidden", timeout: 5_000 })
+    expect(await page.locator(".effort-picker-trigger").innerText()).toContain("Max")
     await page.locator(".new-session-page textarea").fill("hello")
     await page.evaluate(() => (document.querySelector(".send-button") as HTMLElement | null)?.click())
     await page.waitForURL(/\/sessions\//)
     await page.locator(".session-screen textarea").waitFor()
+    await page.locator(".effort-picker-trigger").waitFor({ timeout: 10_000 })
+    await page.waitForFunction(
+      () => document.querySelector(".effort-picker-trigger")?.textContent?.includes("Max") === true,
+      undefined,
+      { timeout: 10_000 },
+    )
+    expect(await page.locator(".effort-picker-trigger").innerText()).toContain("Max")
+    expect(fake.requests.some((request) => request.reasoning_effort === "max")).toBe(true)
     await visible("Fake response: hello", page, 15_000)
     await page.locator(".send-button.stop").waitFor({ state: "hidden", timeout: 15_000 }).catch(() => undefined)
 
@@ -233,7 +254,8 @@ describe("Agent-1 web UI", () => {
       "login-dark.png",
       "home-dark.png",
       "new-session-dark.png",
-      "model-picker-dialog.png",
+      "model-picker-popover.png",
+      "effort-picker-popover.png",
       "session-dark.png",
       "approval-dark.png",
       "files-dark.png",
