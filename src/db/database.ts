@@ -37,6 +37,7 @@ import type {
   NewMemoryPending,
   NewMemoryReviewRun,
 } from "../memory/types"
+import type { SessionSearchHit } from "../memory/session-search-types"
 import { backupIfNeeded, schemaVersion } from "./backup"
 import { LATEST_SCHEMA_VERSION, migrationLoader } from "./migrations"
 
@@ -281,6 +282,18 @@ interface MemoryReviewRunRow {
   readonly error: string | null
   readonly started_at: string
   readonly completed_at: string | null
+}
+
+interface SessionSearchHitRow {
+  readonly message_id: string
+  readonly seq: number
+  readonly session_id: string
+  readonly session_title: string
+  readonly session_updated_at: string
+  readonly role: MessageRole
+  readonly text: string
+  readonly snippet: string | null
+  readonly created_at: string
 }
 
 interface EventRow {
@@ -700,6 +713,20 @@ function rowToMemoryHistory(row: MemoryHistoryRow): MemoryHistoryRecord {
     createdAt: row.created_at,
     undoneAt: row.undone_at,
     undoHistoryId: row.undo_history_id,
+  }
+}
+
+function rowToSessionSearchHit(row: SessionSearchHitRow): SessionSearchHit {
+  return {
+    messageId: row.message_id,
+    seq: row.seq,
+    sessionId: row.session_id,
+    sessionTitle: row.session_title,
+    sessionUpdatedAt: row.session_updated_at,
+    role: row.role,
+    text: row.text,
+    snippet: row.snippet ?? row.text,
+    createdAt: row.created_at,
   }
 }
 
@@ -1448,6 +1475,49 @@ export class Database {
           LIMIT 1
         `
         return rows.length > 0
+      }),
+    )
+  }
+
+  async searchMessages(
+    query: string,
+    limit = 300,
+    excludeSessionId?: string | null,
+    sort: "relevance" | "newest" | "oldest" = "relevance",
+  ): Promise<SessionSearchHit[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const order =
+          sort === "newest"
+            ? sql`m.created_at DESC, m.seq DESC`
+            : sort === "oldest"
+              ? sql`m.created_at ASC, m.seq ASC`
+              : sql`bm25(messages_fts), m.seq DESC`
+        const rows = excludeSessionId
+          ? yield* sql<SessionSearchHitRow>`
+              SELECT m.id AS message_id, m.seq, m.session_id, s.title AS session_title,
+                     s.updated_at AS session_updated_at, m.role, m.text, m.created_at,
+                     snippet(messages_fts, 0, '', '', '…', 12) AS snippet
+              FROM messages_fts
+              JOIN messages m ON m.seq = messages_fts.rowid
+              JOIN sessions s ON s.id = m.session_id
+              WHERE messages_fts MATCH ${query}
+                AND m.session_id <> ${excludeSessionId}
+              ORDER BY ${order}
+              LIMIT ${limit}
+            `
+          : yield* sql<SessionSearchHitRow>`
+              SELECT m.id AS message_id, m.seq, m.session_id, s.title AS session_title,
+                     s.updated_at AS session_updated_at, m.role, m.text, m.created_at,
+                     snippet(messages_fts, 0, '', '', '…', 12) AS snippet
+              FROM messages_fts
+              JOIN messages m ON m.seq = messages_fts.rowid
+              JOIN sessions s ON s.id = m.session_id
+              WHERE messages_fts MATCH ${query}
+              ORDER BY ${order}
+              LIMIT ${limit}
+            `
+        return rows.map(rowToSessionSearchHit)
       }),
     )
   }

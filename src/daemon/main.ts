@@ -3,6 +3,7 @@ import { Logger, resolveLogLevel } from "../core/log"
 import { Database } from "../db/database"
 import { MemoryReviewService } from "../memory/memory-review-service"
 import { MemoryService } from "../memory/memory-service"
+import { SessionSearchService } from "../memory/session-search-service"
 import { AuthService } from "../auth/auth-service"
 import { SecretStore } from "../auth/secret-store"
 import { EventService } from "../events/service"
@@ -81,7 +82,8 @@ async function main(): Promise<void> {
     const memory = new MemoryService(db)
     const memoryReview = new MemoryReviewService(db, events, models, memory, logger)
     await memoryReview.initialize()
-    const tools = new ToolService(workspace, journal, logger, memory)
+    const sessionSearch = new SessionSearchService(db)
+    const tools = new ToolService(workspace, journal, logger, memory, sessionSearch)
     const turnBus = new TurnBus()
     const turns = new TurnService(
       db,
@@ -110,6 +112,8 @@ async function main(): Promise<void> {
       workspace,
       journal,
       tools,
+      memory,
+      sessionSearch,
       remote: remoteService,
       logger,
       startedAt: Date.now(),

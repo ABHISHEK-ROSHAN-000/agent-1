@@ -6,6 +6,7 @@ type IconName =
   | "rules"
   | "folder"
   | "journal"
+  | "memory"
   | "model"
   | "settings"
   | "plus"
@@ -34,6 +35,7 @@ const names: Record<IconName, string> = {
   rules: "sliders",
   folder: "folder",
   journal: "outline-list-changelog",
+  memory: "brain",
   model: "models",
   settings: "settings-gear",
   plus: "plus",

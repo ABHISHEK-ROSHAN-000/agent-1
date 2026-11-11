@@ -22,6 +22,9 @@ import type { WorkspaceService } from "../tools/workspace-service"
 import { WorkspaceError } from "../tools/workspace-service"
 import type { JournalService } from "../tools/journal-service"
 import { JournalError } from "../tools/journal-service"
+import type { SessionSearchService } from "../memory/session-search-service"
+import type { MemoryService } from "../memory/memory-service"
+import { MemoryError } from "../memory/types"
 import type { RemoteService } from "../remote/remote-service"
 import { createTurnStream } from "./turn-stream"
 import { serveWeb } from "./static"
@@ -140,6 +143,26 @@ const workspaceSchema = z.object({
 
 const journalUndoSchema = z.object({ batchId: z.string().min(1).optional() })
 
+const memoryOperationSchema = z.object({
+  action: z.enum(["add", "patch", "remove"]),
+  content: z.string().min(1).max(20_000).optional(),
+  oldText: z.string().min(1).max(20_000).optional(),
+})
+
+const memoryUpdateSchema = z.object({
+  store: z.enum(["user", "memory"]),
+  operations: z.array(memoryOperationSchema).min(1).max(50),
+})
+
+const memoryPendingDecisionSchema = z.object({
+  decision: z.enum(["approve", "reject"]),
+  reason: z.string().max(2_000).optional(),
+})
+
+const memoryUndoSchema = z.object({
+  historyId: z.string().min(1).max(100).optional(),
+})
+
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 
 function workspaceFilePaths(root: string, limit = 5_000, maxDepth = 12): string[] {
@@ -187,6 +210,8 @@ export interface AppDependencies {
   readonly workspace: WorkspaceService
   readonly journal: JournalService
   readonly tools: ToolService
+  readonly memory: MemoryService
+  readonly sessionSearch: SessionSearchService
   readonly remote: RemoteService
   readonly logger: Logger
   readonly startedAt: number
@@ -222,6 +247,13 @@ function issueHttpError(error: unknown): HttpError {
   if (error instanceof JournalError) {
     return new HttpError(409, "journal_error", error.message)
   }
+  if (error instanceof MemoryError) {
+    return new HttpError(
+      error.code === "stale_entry" || error.code === "already_decided" ? 409 : 400,
+      error.code,
+      error.message,
+    )
+  }
   return new HttpError(500, "internal_error", "Internal server error")
 }
 
@@ -243,6 +275,8 @@ export class App {
   private readonly workspace: WorkspaceService
   private readonly journal: JournalService
   private readonly tools: ToolService
+  private readonly memory: MemoryService
+  private readonly sessionSearch: SessionSearchService
   private readonly remote: RemoteService
   private readonly logger: Logger
   private readonly startedAt: number
@@ -261,6 +295,8 @@ export class App {
     this.workspace = dependencies.workspace
     this.journal = dependencies.journal
     this.tools = dependencies.tools
+    this.memory = dependencies.memory
+    this.sessionSearch = dependencies.sessionSearch
     this.remote = dependencies.remote
     this.logger = dependencies.logger
     this.startedAt = dependencies.startedAt
@@ -352,6 +388,8 @@ export class App {
           "workspaces",
           "journal",
           "tools",
+          "memory",
+          "session_search",
           "remote",
         ],
       })
@@ -438,6 +476,89 @@ export class App {
     if (path === "/v1/tools" && method === "GET") {
       await this.requireAuth(request)
       return jsonResponse({ tools: this.tools.list() })
+    }
+
+    if (path === "/v1/memory" && method === "GET") {
+      await this.requireAuth(request)
+      const snapshot = await this.memory.snapshot()
+      return jsonResponse({
+        generatedAt: snapshot.generatedAt,
+        user: snapshot.user,
+        memory: snapshot.memory,
+        pending: await this.memory.listPending("pending"),
+        history: await this.memory.listHistory(50),
+      })
+    }
+
+    if (path === "/v1/memory" && method === "PATCH") {
+      await this.requireAuth(request)
+      const parsed = memoryUpdateSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      return jsonResponse({
+        mutation: await this.memory.mutate({
+          store: parsed.data.store,
+          operations: parsed.data.operations,
+          actor: "user",
+        }),
+      })
+    }
+
+    if (path === "/v1/memory/pending" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse({ pending: await this.memory.listPending("pending") })
+    }
+
+    const memoryPendingMatch = /^\/v1\/memory\/pending\/([^/]+)\/decision$/.exec(path)
+    if (memoryPendingMatch && method === "POST") {
+      await this.requireAuth(request)
+      const parsed = memoryPendingDecisionSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      const id = decodeURIComponent(memoryPendingMatch[1] ?? "")
+      if (parsed.data.decision === "approve") {
+        const mutation = await this.memory.approvePending(id, "user", parsed.data.reason ?? null)
+        return jsonResponse({ mutation, pending: await this.memory.listPending("pending") })
+      }
+      await this.memory.rejectPending(id, parsed.data.reason ?? null, "user")
+      return jsonResponse({ pending: await this.memory.listPending("pending") })
+    }
+
+    if (path === "/v1/memory/undo" && method === "POST") {
+      await this.requireAuth(request)
+      const parsed = memoryUndoSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      return jsonResponse({
+        mutation: await this.memory.undo(parsed.data.historyId, "user"),
+      })
+    }
+
+    if (path === "/v1/memory/export" && method === "GET") {
+      await this.requireAuth(request)
+      return new Response(await this.memory.exportMarkdown(), {
+        headers: {
+          "content-type": "text/markdown; charset=utf-8",
+          "content-disposition": 'attachment; filename="agent-1-memory.md"',
+        },
+      })
+    }
+
+    if (path === "/v1/sessions/search" && method === "GET") {
+      await this.requireAuth(request)
+      const sortRaw = url.searchParams.get("sort")
+      const sort =
+        sortRaw === "newest" || sortRaw === "oldest" || sortRaw === "relevance" ? sortRaw : undefined
+      const windowRaw = Number(url.searchParams.get("window") ?? "")
+      const limitRaw = Number(url.searchParams.get("limit") ?? "")
+      return jsonResponse(
+        await this.sessionSearch.search({
+          query: url.searchParams.get("query") ?? undefined,
+          sessionId: url.searchParams.get("sessionId") ?? undefined,
+          aroundMessageId: url.searchParams.get("aroundMessageId") ?? undefined,
+          ...(Number.isInteger(windowRaw) ? { window: windowRaw } : {}),
+          ...(Number.isInteger(limitRaw) ? { limit: limitRaw } : {}),
+          ...(sort ? { sort } : {}),
+          roleFilter: url.searchParams.get("roleFilter") ?? undefined,
+        }),
+      )
     }
 
     if (path === "/v1/workspaces" && method === "GET") {

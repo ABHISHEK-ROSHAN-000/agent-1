@@ -35,6 +35,14 @@ Commands:
   remote on [--yes]|off|status
   session create [--title <title>]
   session list
+  sessions search <query> [--limit <n>] [--sort relevance|newest|oldest]
+  sessions show <id>
+  memory list
+  memory pending
+  memory approve <id>
+  memory reject <id> [--reason <text>]
+  memory undo [history-id]
+  memory export
   models                         List provider/model pairs
   run [message...] [--session <id>] [--model provider/model#variant]
   chat [message...] [--session <id>] [--model provider/model#variant]
@@ -1044,6 +1052,132 @@ async function journalCommand(parsed: ParsedArgs): Promise<void> {
   throw new Error("Usage: agent-1 journal list|show|undo")
 }
 
+async function memoryCommand(parsed: ParsedArgs): Promise<void> {
+  const sub = parsed.positionals[1]
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+
+  if (sub === "list" || !sub) {
+    const result = await client.getMemory()
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    for (const store of [result.user, result.memory]) {
+      process.stdout.write(`${store.store.toUpperCase()}  ${store.usage.chars}/${store.usage.limit} chars (${store.usage.percent}%)\n`)
+      if (store.entries.length === 0) process.stdout.write("  (empty)\n")
+      for (const entry of store.entries) process.stdout.write(`  - ${entry}\n`)
+    }
+    process.stdout.write(`Pending: ${result.pending.length}  History: ${result.history.length}\n`)
+    return
+  }
+
+  if (sub === "pending") {
+    const result = await client.listMemoryPending()
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    if (result.pending.length === 0) {
+      process.stdout.write("No pending memory changes.\n")
+      return
+    }
+    for (const pending of result.pending) {
+      process.stdout.write(`${pending.id}  ${pending.action.padEnd(6)} ${pending.store}  ${pending.summary}\n`)
+    }
+    return
+  }
+
+  if (sub === "approve" || sub === "reject") {
+    const id = parsed.positionals[2]
+    if (!id) throw new Error(`Usage: agent-1 memory ${sub} <id>`)
+    const reason = flagString(parsed, "reason")
+    const result = await client.decideMemoryPending(id, sub === "approve" ? "approve" : "reject", reason)
+    output(json, result, sub === "approve" ? `Approved pending memory change ${id}.` : `Rejected pending memory change ${id}.`)
+    return
+  }
+
+  if (sub === "undo") {
+    const result = await client.undoMemory(parsed.positionals[2])
+    output(json, result, result.mutation.message)
+    return
+  }
+
+  if (sub === "export") {
+    const text = await client.exportMemory()
+    if (json) {
+      output(true, { markdown: text }, "")
+    } else {
+      process.stdout.write(text.endsWith("\n") ? text : `${text}\n`)
+    }
+    return
+  }
+
+  throw new Error("Usage: agent-1 memory list|pending|approve|reject|undo|export")
+}
+
+async function sessionsCommand(parsed: ParsedArgs): Promise<void> {
+  const sub = parsed.positionals[1]
+  const json = hasFlag(parsed, "json")
+  const config = configFor(parsed)
+  const password = await passwordFor(config)
+  const status = await serviceStatus(config)
+  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
+  const client = new AgentOneClient({ baseUrl: status.state.url, password })
+
+  if (sub === "search") {
+    const query = parsed.positionals.slice(2).join(" ").trim()
+    if (!query) throw new Error("Usage: agent-1 sessions search <query>")
+    const limitRaw = flagString(parsed, "limit")
+    const sort = flagString(parsed, "sort")
+    const result = await client.searchSessions({
+      query,
+      ...(limitRaw ? { limit: Number(limitRaw) } : {}),
+      ...(sort === "newest" || sort === "oldest" || sort === "relevance" ? { sort } : {}),
+    })
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    if (!result.ok) {
+      process.stderr.write(`${result.error ?? "Search failed"}\n`)
+      return
+    }
+    for (const group of result.results ?? []) {
+      process.stdout.write(`${group.sessionId}  ${group.title}\n`)
+      for (const match of group.matches) {
+        process.stdout.write(`  ${match.role}: ${match.snippet}\n`)
+      }
+    }
+    return
+  }
+
+  if (sub === "show") {
+    const id = parsed.positionals[2]
+    if (!id) throw new Error("Usage: agent-1 sessions show <id>")
+    const result = await client.searchSessions({ sessionId: id })
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    if (!result.ok) {
+      process.stderr.write(`${result.error ?? "Session not found"}\n`)
+      return
+    }
+    process.stdout.write(`${result.title ?? id}\n`)
+    for (const message of result.messages ?? []) {
+      process.stdout.write(`[${message.role}] ${message.text}\n`)
+    }
+    return
+  }
+
+  throw new Error("Usage: agent-1 sessions search <query>|show <id>")
+}
+
 async function toolsCommand(parsed: ParsedArgs): Promise<void> {
   const json = hasFlag(parsed, "json")
   const config = configFor(parsed)
@@ -1135,6 +1269,14 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     if (command === "tools") {
       await toolsCommand(parsed)
+      return 0
+    }
+    if (command === "memory") {
+      await memoryCommand(parsed)
+      return 0
+    }
+    if (command === "sessions") {
+      await sessionsCommand(parsed)
       return 0
     }
     process.stderr.write(`Unknown command: ${command}\n\n`)

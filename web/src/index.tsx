@@ -8,6 +8,7 @@ import { HomePage, NewSessionPage } from "./home"
 import {
   ApprovalsPage,
   JournalPage,
+  MemoryPage,
   ModelsPage,
   ProvidersPage,
   RulesPage,
@@ -58,6 +59,7 @@ render(
         <Route path="/rules" component={RulesPage} />
         <Route path="/workspaces" component={WorkspacesPage} />
         <Route path="/journal" component={JournalPage} />
+        <Route path="/memory" component={MemoryPage} />
         <Route path="/providers" component={ProvidersPage} />
         <Route path="/models" component={ModelsPage} />
         <Route path="/settings" component={SettingsPage} />

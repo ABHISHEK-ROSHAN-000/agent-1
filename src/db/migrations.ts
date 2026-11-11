@@ -388,6 +388,7 @@ const initial = Effect.gen(function* () {
     ["rule_ask_connectors", "connector.*", "*", "ask", 42, "Future connector actions"],
     ["rule_allow_web_fetch", "web.fetch", "*", "allow", 50, "Fetch public web content with SSRF guard"],
     ["rule_allow_web_search", "web.search", "*", "allow", 51, "Search with configured provider"],
+    ["rule_allow_session_search", "session.search", "*", "allow", 52, "Read-only historical conversation search"],
     ["rule_ask_fs_write", "fs.write", "*", "ask", 60, "File writes require approval"],
     ["rule_ask_fs_mkdir", "fs.mkdir", "*", "ask", 61, "Directory creation requires approval"],
     ["rule_ask_fs_moves", "fs.apply_moves", "*", "ask", 62, "Batch moves require approval"],

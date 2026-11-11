@@ -2208,6 +2208,98 @@ select.composer-control {
   box-shadow: 0 0 0 0.5px var(--v2-border-border-base);
 }
 
+.memory-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.memory-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.memory-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.memory-usage-bar {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--v2-background-bg-layer-02);
+}
+
+.memory-usage-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--v2-text-text-accent);
+}
+
+.memory-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.memory-entry {
+  padding: 8px 0;
+  border-top: 0.5px solid var(--v2-border-border-muted);
+}
+
+.memory-entry-text {
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.memory-entry-actions {
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.memory-edit {
+  width: 100%;
+  min-height: 74px;
+  resize: vertical;
+}
+
+.memory-add {
+  margin-top: 14px;
+}
+
+.memory-section {
+  margin-top: 22px;
+}
+
+.memory-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.memory-search-match {
+  padding-top: 7px;
+  margin-top: 7px;
+  border-top: 0.5px solid var(--v2-border-border-muted);
+  line-height: 1.5;
+}
+
+.memory-history-row {
+  margin-bottom: 8px;
+}
+
+@media (max-width: 900px) {
+  .memory-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .row {
   display: flex;
   align-items: center;

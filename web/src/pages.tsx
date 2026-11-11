@@ -10,9 +10,13 @@ import {
   type CatalogModel,
   type ContextInfo,
   type JournalEntry,
+  type MemoryHistoryRecord,
+  type MemoryPendingRecord,
+  type MemoryStoreView,
   type Message,
   type ProviderInfo,
   type Session,
+  type SessionSearchResult,
   type Workspace,
   modelKey,
   parseModelKey,
@@ -34,6 +38,7 @@ const settingsNav = [
   { href: "/rules", label: "Rules", icon: "rules" as const },
   { href: "/workspaces", label: "Workspaces", icon: "folder" as const },
   { href: "/journal", label: "Journal", icon: "journal" as const },
+  { href: "/memory", label: "Memory", icon: "memory" as const },
 ]
 
 function PageBody(props: { children?: unknown }) {
@@ -1341,6 +1346,399 @@ export function JournalPage() {
     <PageBody>
       <PageHeader title="Journal" subtitle="Every filesystem action is recorded with hashes and undo data." />
       <JournalList entries={journal.data?.entries ?? []} onUndo={(batchId) => void undo(batchId)} />
+    </PageBody>
+  )
+}
+
+function MemoryUsageBar(props: { store: MemoryStoreView }) {
+  return (
+    <div class="memory-usage">
+      <div class="memory-usage-bar">
+        <span style={{ width: `${props.store.usage.percent}%` }} />
+      </div>
+      <span class="tiny faint">
+        {props.store.usage.chars.toLocaleString()} / {props.store.usage.limit.toLocaleString()} chars
+        {" · "}
+        {props.store.usage.percent}%
+      </span>
+    </div>
+  )
+}
+
+export function MemoryPage() {
+  const queryClient = useQueryClient()
+  const memory = useQuery(() => ({ queryKey: ["memory"], queryFn: api.memory }))
+  const [addStore, setAddStore] = createSignal<"user" | "memory">("user")
+  const [addText, setAddText] = createSignal("")
+  const [editing, setEditing] = createSignal<{ store: "user" | "memory"; oldText: string; value: string }>()
+  const [searchText, setSearchText] = createSignal("")
+  const [searchResult, setSearchResult] = createSignal<SessionSearchResult>()
+  const [busy, setBusy] = createSignal(false)
+
+  const refresh = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["memory"] })
+  }
+
+  const run = async (fn: () => Promise<unknown>, success: string) => {
+    setBusy(true)
+    try {
+      await fn()
+      await refresh()
+      toast.success(success)
+    } catch (error) {
+      toast.error(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const add = () => {
+    const content = addText().trim()
+    if (!content) return
+    void run(
+      () => api.updateMemory({ store: addStore(), operations: [{ action: "add", content }] }),
+      "Memory entry added.",
+    )
+    setAddText("")
+  }
+
+  const saveEdit = () => {
+    const current = editing()
+    if (!current) return
+    if (current.value.trim() === current.oldText.trim()) {
+      setEditing(undefined)
+      return
+    }
+    void run(
+      () =>
+        api.updateMemory({
+          store: current.store,
+          operations: [{ action: "patch", oldText: current.oldText, content: current.value }],
+        }),
+      "Memory entry updated.",
+    )
+    setEditing(undefined)
+  }
+
+  const remove = (store: "user" | "memory", entry: string) => {
+    if (!window.confirm("Remove this memory entry?")) return
+    void run(
+      () => api.updateMemory({ store, operations: [{ action: "remove", oldText: entry }] }),
+      "Memory entry removed.",
+    )
+  }
+
+  const decide = (pending: MemoryPendingRecord, decision: "approve" | "reject") => {
+    void run(
+      () => api.decideMemoryPending(pending.id, decision),
+      decision === "approve" ? "Memory change approved." : "Memory change rejected.",
+    )
+  }
+
+  const undo = (history: MemoryHistoryRecord) => {
+    void run(() => api.undoMemory(history.id), "Memory change undone.")
+  }
+
+  const search = async () => {
+    const query = searchText().trim()
+    if (!query) {
+      setSearchResult(undefined)
+      return
+    }
+    setBusy(true)
+    try {
+      setSearchResult(await api.searchSessions({ query, limit: 5 }))
+    } catch (error) {
+      toast.error(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <PageBody>
+      <PageHeader
+        title="What Agent-1 knows"
+        subtitle="Durable user and environment memory, pending review changes, history, and past-session recall."
+      />
+      <Show when={memory.data} fallback={<Empty>Loading memory…</Empty>}>
+        {(data) => (
+          <>
+            <div class="memory-grid">
+              <For each={[data().user, data().memory]}>
+                {(store) => (
+                  <section class="list-card memory-panel">
+                    <div class="row-between">
+                      <div>
+                        <div class="list-card-title">{store.store === "user" ? "User profile" : "Agent memory"}</div>
+                        <div class="small muted">
+                          {store.store === "user" ? "Identity, preferences, and communication style." : "Environment facts, conventions, and lessons."}
+                        </div>
+                      </div>
+                      <span class="tag">{store.entries.length} entries</span>
+                    </div>
+                    <MemoryUsageBar store={store} />
+                    <div class="memory-entries">
+                      <Show when={store.entries.length > 0} fallback={<div class="small faint">No entries yet.</div>}>
+                        <For each={store.entries}>
+                          {(entry) => (
+                            <div class="memory-entry">
+                              <Show
+                                when={
+                                  editing()?.store === store.store && editing()?.oldText === entry
+                                }
+                                fallback={
+                                  <>
+                                    <div class="memory-entry-text">{entry}</div>
+                                    <div class="row memory-entry-actions">
+                                      <button
+                                        class="button button-ghost button-small"
+                                        type="button"
+                                        onClick={() => setEditing({ store: store.store, oldText: entry, value: entry })}
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        class="button button-ghost button-small"
+                                        type="button"
+                                        onClick={() => remove(store.store, entry)}
+                                      >
+                                        Remove
+                                      </button>
+                                    </div>
+                                  </>
+                                }
+                              >
+                                <textarea
+                                  class="form-input memory-edit"
+                                  value={editing()?.value ?? ""}
+                                  onInput={(event) =>
+                                    setEditing((current) =>
+                                      current ? { ...current, value: event.currentTarget.value } : current,
+                                    )
+                                  }
+                                />
+                                <div class="row memory-entry-actions">
+                                  <button class="button button-primary button-small" type="button" onClick={saveEdit}>
+                                    Save
+                                  </button>
+                                  <button
+                                    class="button button-ghost button-small"
+                                    type="button"
+                                    onClick={() => setEditing(undefined)}
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </Show>
+                            </div>
+                          )}
+                        </For>
+                      </Show>
+                    </div>
+                  </section>
+                )}
+              </For>
+            </div>
+
+            <section class="list-card memory-add">
+              <div class="list-card-title">Add memory</div>
+              <div class="form-row">
+                <select
+                  class="form-select"
+                  value={addStore()}
+                  onChange={(event) => setAddStore(event.currentTarget.value as "user" | "memory")}
+                >
+                  <option value="user">User profile</option>
+                  <option value="memory">Agent memory</option>
+                </select>
+                <input
+                  class="form-input"
+                  value={addText()}
+                  placeholder="A compact, durable fact"
+                  onInput={(event) => setAddText(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") add()
+                  }}
+                />
+                <button class="button button-primary" type="button" disabled={busy()} onClick={add}>
+                  Add
+                </button>
+              </div>
+            </section>
+
+            <section class="memory-section">
+              <div class="row-between">
+                <div>
+                  <div class="list-card-title">Pending background changes</div>
+                  <div class="small muted">Destructive edits from the background review wait for your decision.</div>
+                </div>
+                <span class="tag">{data().pending.length} pending</span>
+              </div>
+              <Show when={data().pending.length > 0} fallback={<Empty>No pending memory changes.</Empty>}>
+                <div class="list">
+                  <For each={data().pending}>
+                    {(pending) => (
+                      <div class="list-card">
+                        <div class="row-between">
+                          <div>
+                            <span class="tag">{pending.action}</span>{" "}
+                            <span class="tag">{pending.store}</span>
+                            <span class="small muted" style={{ "margin-left": "8px" }}>{pending.origin}</span>
+                          </div>
+                          <span class="tiny faint">{formatDate(pending.createdAt)}</span>
+                        </div>
+                        <div class="small" style={{ "margin-top": "8px" }}>{pending.summary}</div>
+                        <Show when={pending.matchedEntry}>
+                          <div class="small muted" style={{ "margin-top": "5px" }}>
+                            Target: {pending.matchedEntry}
+                          </div>
+                        </Show>
+                        <div class="row" style={{ "margin-top": "10px" }}>
+                          <button
+                            class="button button-primary button-small"
+                            type="button"
+                            disabled={busy()}
+                            onClick={() => decide(pending, "approve")}
+                          >
+                            Approve
+                          </button>
+                          <button
+                            class="button button-ghost button-small"
+                            type="button"
+                            disabled={busy()}
+                            onClick={() => decide(pending, "reject")}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </section>
+
+            <section class="memory-section">
+              <div class="row-between">
+                <div>
+                  <div class="list-card-title">History and undo</div>
+                  <div class="small muted">Every applied memory change is journaled.</div>
+                </div>
+                <a class="button button-secondary button-small" href="/v1/memory/export">
+                  Export Markdown
+                </a>
+              </div>
+              <Show when={data().history.length > 0} fallback={<Empty>No memory history yet.</Empty>}>
+                <div class="list">
+                  <For each={data().history.slice(0, 20)}>
+                    {(history) => (
+                      <div class="list-card memory-history-row">
+                        <div class="row-between">
+                          <div>
+                            <strong>{history.action}</strong>{" "}
+                            <span class="tag">{history.store}</span>{" "}
+                            <span class="tiny faint">{history.actor}</span>
+                          </div>
+                          <span class="tiny faint">{formatDate(history.createdAt)}</span>
+                        </div>
+                        <div class="row-between" style={{ "margin-top": "8px" }}>
+                          <div class="small muted">
+                            {history.before.length} → {history.after.length} entries
+                            {history.pendingId ? " · from background review" : ""}
+                          </div>
+                          <Show
+                            when={!history.undoneAt}
+                            fallback={<span class="tiny faint">Undone</span>}
+                          >
+                            <button
+                              class="button button-ghost button-small"
+                              type="button"
+                              disabled={busy()}
+                              onClick={() => undo(history)}
+                            >
+                              Undo
+                            </button>
+                          </Show>
+                        </div>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </section>
+
+            <section class="memory-section">
+              <div class="list-card-title">Search past sessions</div>
+              <div class="form-row" style={{ "margin-top": "10px" }}>
+                <input
+                  class="form-input"
+                  value={searchText()}
+                  placeholder="Search actual past messages"
+                  onInput={(event) => setSearchText(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void search()
+                  }}
+                />
+                <button class="button button-secondary" type="button" disabled={busy()} onClick={() => void search()}>
+                  Search
+                </button>
+              </div>
+              <Show when={searchResult()}>
+                {(result) => (
+                  <div class="memory-search-results">
+                    <Show when={result().ok} fallback={<div class="small red">{result().error}</div>}>
+                      <Show when={result().results?.length} fallback={null}>
+                        <For each={result().results}>
+                          {(group) => (
+                            <div class="list-card">
+                              <A class="bold" href={`/sessions/${encodeURIComponent(group.sessionId)}`}>
+                                {group.title}
+                              </A>
+                              <For each={group.matches}>
+                                {(match) => (
+                                  <div class="memory-search-match">
+                                    <span class="tag">{match.role}</span>{" "}
+                                    <span class="small muted">{match.snippet}</span>
+                                  </div>
+                                )}
+                              </For>
+                            </div>
+                          )}
+                        </For>
+                      </Show>
+                      <Show when={result().messages?.length}>
+                        <div class="list-card">
+                          <div class="bold">{result().title ?? "Session"}</div>
+                          <For each={result().messages}>
+                            {(message) => (
+                              <div class="memory-search-match">
+                                <span class="tag">{message.role}</span>{" "}
+                                <span class="small muted">{message.text}</span>
+                              </div>
+                            )}
+                          </For>
+                        </div>
+                      </Show>
+                      <Show when={result().sessions?.length}>
+                        <div class="list-card">
+                          <For each={result().sessions}>
+                            {(session) => (
+                              <div class="memory-search-match">
+                                <A href={`/sessions/${encodeURIComponent(session.id)}`}>{session.title}</A>
+                              </div>
+                            )}
+                          </For>
+                        </div>
+                      </Show>
+                    </Show>
+                  </div>
+                )}
+              </Show>
+            </section>
+          </>
+        )}
+      </Show>
     </PageBody>
   )
 }

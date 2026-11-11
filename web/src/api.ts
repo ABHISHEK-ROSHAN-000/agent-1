@@ -216,6 +216,96 @@ export interface ToolInfo {
   approvalRequired?: boolean
 }
 
+export interface MemoryUsage {
+  chars: number
+  limit: number
+  percent: number
+}
+
+export interface MemoryStoreView {
+  store: "user" | "memory"
+  entries: string[]
+  usage: MemoryUsage
+  block: string | null
+}
+
+export interface MemoryPendingRecord {
+  id: string
+  sessionId: string | null
+  turnId: string | null
+  store: "user" | "memory"
+  action: "add" | "patch" | "remove"
+  payload: { action: "add" | "patch" | "remove"; content?: string; oldText?: string }
+  summary: string
+  origin: string
+  status: "pending" | "approved" | "rejected" | "expired" | "invalidated"
+  matchedEntry: string | null
+  createdAt: string
+  decidedAt: string | null
+  decidedBy: string | null
+  reason: string | null
+}
+
+export interface MemoryHistoryRecord {
+  id: string
+  store: "user" | "memory"
+  action: string
+  before: string[]
+  after: string[]
+  pendingId: string | null
+  actor: string
+  note: string | null
+  createdAt: string
+  undoneAt: string | null
+  undoHistoryId: string | null
+}
+
+export interface MemoryMutationResult {
+  store: "user" | "memory"
+  actions: string[]
+  changed: boolean
+  message: string
+  entries: string[]
+  usage: MemoryUsage
+  history: MemoryHistoryRecord | null
+}
+
+export interface SessionSearchResult {
+  ok: boolean
+  mode?: "discover" | "read" | "browse" | "scroll"
+  query?: string
+  sessionId?: string
+  title?: string
+  results?: Array<{
+    sessionId: string
+    title: string
+    updatedAt: string
+    matches: Array<{
+      messageId: string
+      role: string
+      snippet: string
+      text: string
+      createdAt: string
+    }>
+  }>
+  sessions?: Array<{ id: string; title: string; updatedAt: string }>
+  messages?: Array<{
+    id: string
+    seq: number
+    role: string
+    text: string
+    createdAt: string
+    sessionId: string
+  }>
+  count?: number
+  total?: number
+  truncated?: boolean
+  messagesBefore?: number
+  messagesAfter?: number
+  window?: number
+  error?: string
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, {
     method,
@@ -373,6 +463,46 @@ export const api = {
 
   tools: () => request<{ tools: ToolInfo[] }>("GET", "/v1/tools"),
   audit: (limit = 100) => request<{ entries: unknown[] }>("GET", `/v1/audit?limit=${limit}`),
+  memory: () =>
+    request<{
+      generatedAt: string
+      user: MemoryStoreView
+      memory: MemoryStoreView
+      pending: MemoryPendingRecord[]
+      history: MemoryHistoryRecord[]
+    }>("GET", "/v1/memory"),
+  updateMemory: (input: {
+    store: "user" | "memory"
+    operations: Array<{ action: "add" | "patch" | "remove"; content?: string; oldText?: string }>
+  }) => request<{ mutation: MemoryMutationResult }>("PATCH", "/v1/memory", input),
+  memoryPending: () => request<{ pending: MemoryPendingRecord[] }>("GET", "/v1/memory/pending"),
+  decideMemoryPending: (id: string, decision: "approve" | "reject", reason?: string) =>
+    request<{ mutation?: MemoryMutationResult; pending: MemoryPendingRecord[] }>(
+      "POST",
+      `/v1/memory/pending/${encodeURIComponent(id)}/decision`,
+      { decision, ...(reason ? { reason } : {}) },
+    ),
+  undoMemory: (historyId?: string) =>
+    request<{ mutation: MemoryMutationResult }>(
+      "POST",
+      "/v1/memory/undo",
+      historyId ? { historyId } : {},
+    ),
+  searchSessions: (input: {
+    query?: string
+    sessionId?: string
+    aroundMessageId?: string
+    window?: number
+    limit?: number
+    sort?: "relevance" | "newest" | "oldest"
+    roleFilter?: string
+  } = {}) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(input)) {
+      if (value !== undefined && value !== "") params.set(key, String(value))
+    }
+    return request<SessionSearchResult>("GET", `/v1/sessions/search?${params.toString()}`)
+  },
 }
 
 export type TurnStreamEvent =

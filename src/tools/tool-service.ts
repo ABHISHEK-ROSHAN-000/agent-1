@@ -19,6 +19,7 @@ import type { Logger } from "../core/log"
 import { sha256 } from "../core/ids"
 import type { MemoryService } from "../memory/memory-service"
 import { memoryToolInputSchema } from "../memory/memory-tool-schema"
+import type { SessionSearchService } from "../memory/session-search-service"
 import { MemoryError } from "../memory/types"
 import type { ToolRisk } from "../shared/types"
 import type { JournalService } from "./journal-service"
@@ -45,6 +46,16 @@ interface ToolEntry extends ToolInfo {
   readonly inputSchema: z.ZodType<unknown>
   execute(input: unknown, context: ToolContext): Promise<unknown>
 }
+
+const sessionSearchInput = z.object({
+  query: z.string().max(500).optional(),
+  sessionId: z.string().max(200).optional(),
+  aroundMessageId: z.string().max(200).optional(),
+  window: z.number().int().min(1).max(20).optional(),
+  limit: z.number().int().min(1).max(10).optional(),
+  sort: z.enum(["relevance", "newest", "oldest"]).optional(),
+  roleFilter: z.string().max(100).optional(),
+})
 
 const moveInput = z.object({
   from: z.string().min(1).max(4_000),
@@ -132,6 +143,7 @@ export class ToolService {
     private readonly journal: JournalService,
     private readonly logger: Logger,
     private readonly memory?: MemoryService,
+    private readonly sessionSearch?: SessionSearchService,
   ) {
     this.entries = new Map()
     this.register({
@@ -309,6 +321,24 @@ export class ToolService {
         approvalRequired: false,
         inputSchema: memoryToolInputSchema,
         execute: async (input, context) => this.executeMemory(input, context),
+      })
+    }
+    if (this.sessionSearch) {
+      this.register({
+        name: "session_search",
+        action: "session.search",
+        description:
+          "Search or read past conversations using the FTS5 index. Use a query for discovery, a sessionId for reading, a sessionId plus aroundMessageId for a window, or no arguments to browse recent sessions. Returns actual stored messages, never LLM summaries. Read-only.",
+        risk: "read",
+        readOnly: true,
+        inputSchema: sessionSearchInput,
+        execute: async (input, context) => {
+          const parsed = sessionSearchInput.parse(input)
+          return this.sessionSearch!.search({
+            ...parsed,
+            currentSessionId: context.sessionId,
+          })
+        },
       })
     }
   }

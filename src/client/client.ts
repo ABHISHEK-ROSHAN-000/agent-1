@@ -35,6 +35,100 @@ interface ErrorEnvelope {
   readonly error?: { readonly code?: string; readonly message?: string }
 }
 
+export interface MemoryUsage {
+  readonly chars: number
+  readonly limit: number
+  readonly percent: number
+}
+
+export interface MemoryStoreView {
+  readonly store: "user" | "memory"
+  readonly entries: readonly string[]
+  readonly usage: MemoryUsage
+  readonly block: string | null
+}
+
+export interface MemoryPendingRecord {
+  readonly id: string
+  readonly sessionId: string | null
+  readonly turnId: string | null
+  readonly store: "user" | "memory"
+  readonly action: "add" | "patch" | "remove"
+  readonly payload: {
+    readonly action: "add" | "patch" | "remove"
+    readonly content?: string
+    readonly oldText?: string
+  }
+  readonly summary: string
+  readonly origin: string
+  readonly status: "pending" | "approved" | "rejected" | "expired" | "invalidated"
+  readonly matchedEntry: string | null
+  readonly createdAt: string
+  readonly decidedAt: string | null
+  readonly decidedBy: string | null
+  readonly reason: string | null
+}
+
+export interface MemoryHistoryRecord {
+  readonly id: string
+  readonly store: "user" | "memory"
+  readonly action: string
+  readonly before: readonly string[]
+  readonly after: readonly string[]
+  readonly pendingId: string | null
+  readonly actor: string
+  readonly note: string | null
+  readonly createdAt: string
+  readonly undoneAt: string | null
+  readonly undoHistoryId: string | null
+}
+
+export interface MemoryMutationResult {
+  readonly store: "user" | "memory"
+  readonly actions: readonly string[]
+  readonly changed: boolean
+  readonly message: string
+  readonly entries: readonly string[]
+  readonly usage: MemoryUsage
+  readonly history: MemoryHistoryRecord | null
+}
+
+export interface SessionSearchResult {
+  readonly ok: boolean
+  readonly mode?: "discover" | "read" | "browse" | "scroll"
+  readonly query?: string
+  readonly sessionId?: string
+  readonly title?: string
+  readonly results?: ReadonlyArray<{
+    readonly sessionId: string
+    readonly title: string
+    readonly updatedAt: string
+    readonly matches: ReadonlyArray<{
+      readonly messageId: string
+      readonly role: string
+      readonly snippet: string
+      readonly text: string
+      readonly createdAt: string
+    }>
+  }>
+  readonly sessions?: ReadonlyArray<{ readonly id: string; readonly title: string; readonly updatedAt: string }>
+  readonly messages?: ReadonlyArray<{
+    readonly id: string
+    readonly seq: number
+    readonly role: string
+    readonly text: string
+    readonly createdAt: string
+    readonly sessionId: string
+  }>
+  readonly count?: number
+  readonly total?: number
+  readonly truncated?: boolean
+  readonly messagesBefore?: number
+  readonly messagesAfter?: number
+  readonly window?: number
+  readonly error?: string
+}
+
 export class AgentOneClient {
   readonly baseUrl: string
   private password?: string
@@ -56,6 +150,45 @@ export class AgentOneClient {
     return this.cookie
   }
 
+  private authHeaders(): Record<string, string> {
+    if (this.cookie) return { cookie: `agent1_session=${this.cookie}` }
+    if (this.password) {
+      return {
+        authorization: `Basic ${Buffer.from(`agent-1:${this.password}`, "utf8").toString("base64")}`,
+      }
+    }
+    return {}
+  }
+
+  private async requestText(path: string): Promise<string> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+    try {
+      const response = await fetch(`${this.baseUrl}${path}`, {
+        method: "GET",
+        headers: { accept: "text/markdown", ...this.authHeaders() },
+        signal: controller.signal,
+      })
+      const text = await response.text()
+      if (!response.ok) {
+        let parsed: ErrorEnvelope = {}
+        try {
+          parsed = JSON.parse(text) as ErrorEnvelope
+        } catch {
+          // Keep the raw message.
+        }
+        throw new ClientError(
+          response.status,
+          parsed.error?.code ?? "request_failed",
+          parsed.error?.message ?? (text || response.statusText),
+        )
+      }
+      return text
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   private async request<T>(
     method: string,
     path: string,
@@ -69,10 +202,7 @@ export class AgentOneClient {
       ...extraHeaders,
     }
     if (body !== undefined) headers["content-type"] = "application/json"
-    if (this.cookie) headers.cookie = `agent1_session=${this.cookie}`
-    else if (this.password) {
-      headers.authorization = `Basic ${Buffer.from(`agent-1:${this.password}`, "utf8").toString("base64")}`
-    }
+    Object.assign(headers, this.authHeaders())
 
     try {
       const response = await fetch(`${this.baseUrl}${path}`, {
@@ -393,6 +523,66 @@ export class AgentOneClient {
     }>
   }> {
     return this.request("GET", "/v1/tools")
+  }
+
+  getMemory(): Promise<{
+    generatedAt: string
+    user: MemoryStoreView
+    memory: MemoryStoreView
+    pending: MemoryPendingRecord[]
+    history: MemoryHistoryRecord[]
+  }> {
+    return this.request("GET", "/v1/memory")
+  }
+
+  updateMemory(input: {
+    store: "user" | "memory"
+    operations: ReadonlyArray<{
+      action: "add" | "patch" | "remove"
+      content?: string
+      oldText?: string
+    }>
+  }): Promise<{ mutation: MemoryMutationResult }> {
+    return this.request("PATCH", "/v1/memory", input)
+  }
+
+  listMemoryPending(): Promise<{ pending: MemoryPendingRecord[] }> {
+    return this.request("GET", "/v1/memory/pending")
+  }
+
+  decideMemoryPending(
+    id: string,
+    decision: "approve" | "reject",
+    reason?: string,
+  ): Promise<{ mutation?: MemoryMutationResult; pending: MemoryPendingRecord[] }> {
+    return this.request("POST", `/v1/memory/pending/${encodeURIComponent(id)}/decision`, {
+      decision,
+      ...(reason ? { reason } : {}),
+    })
+  }
+
+  undoMemory(historyId?: string): Promise<{ mutation: MemoryMutationResult }> {
+    return this.request("POST", "/v1/memory/undo", historyId ? { historyId } : {})
+  }
+
+  exportMemory(): Promise<string> {
+    return this.requestText("/v1/memory/export")
+  }
+
+  searchSessions(input: {
+    query?: string
+    sessionId?: string
+    aroundMessageId?: string
+    window?: number
+    limit?: number
+    sort?: "relevance" | "newest" | "oldest"
+    roleFilter?: string
+  } = {}): Promise<SessionSearchResult> {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(input)) {
+      if (value !== undefined && value !== "") params.set(key, String(value))
+    }
+    return this.request("GET", `/v1/sessions/search?${params.toString()}`)
   }
 
   listWorkspaces(): Promise<{ workspaces: Workspace[] }> {

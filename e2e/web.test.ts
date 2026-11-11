@@ -287,6 +287,28 @@ describe("Agent-1 web UI", () => {
     }
   }, 90_000)
 
+  test("manages memory and searches past sessions", async () => {
+    await page.goto(`${daemon.state.url}/memory`)
+    await page.locator(".memory-grid").waitFor()
+    await visible("What Agent-1 knows")
+
+    const addInput = page.locator(".memory-add input")
+    await addInput.fill("User prefers concise replies.")
+    await page.locator(".memory-add button", { hasText: "Add" }).click()
+    await visible("User prefers concise replies.")
+    await page.locator(".memory-history-row button", { hasText: "Undo" }).first().click()
+    await page.waitForFunction(
+      () => document.querySelector(".memory-panel")?.textContent?.includes("User prefers concise replies.") !== true,
+      undefined,
+      { timeout: 10_000 },
+    )
+
+    await page.getByPlaceholder("Search actual past messages").fill("slow")
+    await page.getByRole("button", { name: "Search", exact: true }).click()
+    await visible("slow **bold** hello", page, 10_000)
+    await page.screenshot({ path: "test-results/memory-dark.png", fullPage: true })
+  })
+
   test("accepts a one-time pairing link and signs the device in", async () => {
     const pairing = await daemon.client.pair()
     const paired = await browser.newContext({ viewport: { width: 1024, height: 768 }, colorScheme: "dark" })

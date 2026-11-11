@@ -111,6 +111,63 @@ export const openApiDocument = {
         responses: { "200": { description: "Tools" } },
       },
     },
+    "/v1/memory": {
+      get: {
+        summary: "Read USER and MEMORY stores, pending changes, and history",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Memory state" } },
+      },
+      patch: {
+        summary: "Apply foreground memory operations",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Memory mutation" }, "400": { description: "Invalid memory operation" } },
+      },
+    },
+    "/v1/memory/pending": {
+      get: {
+        summary: "List pending background memory changes",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Pending memory changes" } },
+      },
+    },
+    "/v1/memory/pending/{id}/decision": {
+      post: {
+        summary: "Approve or reject a pending memory change",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Decision applied" }, "409": { description: "Stale or already decided" } },
+      },
+    },
+    "/v1/memory/undo": {
+      post: {
+        summary: "Undo a memory history entry",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Memory undo" }, "400": { description: "Nothing to undo" } },
+      },
+    },
+    "/v1/memory/export": {
+      get: {
+        summary: "Export USER and MEMORY stores as Markdown",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Markdown export" } },
+      },
+    },
+    "/v1/sessions/search": {
+      get: {
+        summary: "Discover, read, browse, or scroll past sessions using FTS5",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [
+          { name: "query", in: "query", schema: { type: "string" } },
+          { name: "sessionId", in: "query", schema: { type: "string" } },
+          { name: "aroundMessageId", in: "query", schema: { type: "string" } },
+          { name: "window", in: "query", schema: { type: "integer" } },
+          { name: "limit", in: "query", schema: { type: "integer" } },
+          { name: "sort", in: "query", schema: { type: "string", enum: ["relevance", "newest", "oldest"] } },
+          { name: "roleFilter", in: "query", schema: { type: "string" } },
+        ],
+        responses: { "200": { description: "Session search result" } },
+      },
+    },
     "/v1/workspaces": {
       get: {
         summary: "List workspace grants",
