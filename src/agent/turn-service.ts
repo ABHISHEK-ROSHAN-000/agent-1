@@ -17,6 +17,7 @@ import {
 import { outputLimit } from "./token-budget"
 import type { Database, NewMessage } from "../db/database"
 import type { EventService } from "../events/service"
+import type { MemoryReviewService } from "../memory/memory-review-service"
 import type { MemoryService } from "../memory/memory-service"
 import type { MemorySnapshot } from "../memory/types"
 import type { Message, ModelSelection, Session, TokenUsage, Turn } from "../shared/types"
@@ -100,6 +101,7 @@ export class TurnService {
     private readonly bus: TurnBus,
     private readonly logger: Logger,
     private readonly memory?: MemoryService,
+    private readonly memoryReview?: MemoryReviewService,
     options: TurnServiceOptions = {},
   ) {
     this.maxSteps = options.maxSteps ?? Number(process.env.AGENT1_TURN_MAX_STEPS ?? "8")
@@ -116,6 +118,7 @@ export class TurnService {
   ): Promise<{ turn: Turn; userMessage: Message }> {
     const session = await this.db.getSession(sessionId)
     if (!session) throw new Error("Session not found")
+    this.memoryReview?.cancel(sessionId)
     const resolved = await this.models.resolve(
       selection ??
         (session.providerId && session.modelId
@@ -329,6 +332,12 @@ export class TurnService {
             inputTokens: state.usage.inputTokens,
             outputTokens: state.usage.outputTokens,
             costUsd: state.usage.costUsd,
+          })
+          void this.memoryReview?.maybeReview(session.id).catch((error) => {
+            this.logger.warn("memory.review.trigger_failed", {
+              sessionId: session.id,
+              error: error instanceof Error ? error.message : String(error),
+            })
           })
           return
         }

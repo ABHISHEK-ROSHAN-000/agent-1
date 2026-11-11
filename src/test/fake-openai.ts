@@ -23,6 +23,7 @@ export interface FakeOpenAI {
   readonly url: string
   readonly requests: ChatRequest[]
   failNext(status?: number, headers?: Record<string, string>): void
+  delayNext(delayMs?: number): void
   close(): void
 }
 
@@ -37,6 +38,10 @@ function contentText(content: unknown): string {
       return ""
     })
     .join("")
+}
+
+function memoryToolAvailable(toolNames: readonly string[]): boolean {
+  return toolNames.includes("memory")
 }
 
 function completionBody(model: string, text: string, finishReason = "stop") {
@@ -101,6 +106,7 @@ function sseChunk(model: string, delta: Record<string, unknown>, finishReason: s
 export function startFakeOpenAI(): FakeOpenAI {
   const requests: ChatRequest[] = []
   let failure: { status: number; headers: Record<string, string> } | undefined
+  let nextDelayMs = 0
   let server: ReturnType<typeof Bun.serve>
   server = Bun.serve({
     hostname: "127.0.0.1",
@@ -113,6 +119,11 @@ export function startFakeOpenAI(): FakeOpenAI {
       }
       const body = (await request.json()) as ChatRequest
       requests.push(body)
+      if (nextDelayMs > 0) {
+        const delay = nextDelayMs
+        nextDelayMs = 0
+        await Bun.sleep(delay)
+      }
       if (failure) {
         const current = failure
         failure = undefined
@@ -141,6 +152,9 @@ export function startFakeOpenAI(): FakeOpenAI {
       const wantsConfirm = /confirm/i.test(userText) && toolNames.includes("test_confirm")
       const wantsLoop = /loop/i.test(userText) && toolNames.includes("test_echo")
       const memoryMatch = /remember(?:\s+that)?\s+(.+)/i.exec(userText)
+      const reviewMode = /background memory reviewer/i.test(systemText)
+      const reviewAdd = /review save:\s*(.+)/i.exec(userText)
+      const reviewRemove = /review remove:\s*(.+)/i.exec(userText)
       const slow = /slow/i.test(userText)
       const isSummarize = /summarize the earlier conversation/i.test(userText) || /summarize/i.test(systemText)
       const applyMatch = /apply moves:\s*(\{[\s\S]*\})/i.exec(userText)
@@ -154,7 +168,25 @@ export function startFakeOpenAI(): FakeOpenAI {
       if (applyMatch && toolNames.includes("fs_apply_moves") && !hasToolResult) {
         tool = { name: "fs_apply_moves", args: JSON.parse(applyMatch[1]!) as Record<string, unknown> }
       } else if (wantsLoop) tool = { name: "test_echo", args: { message: "loop" } }
-      else if (memoryMatch && toolNames.includes("memory") && !hasToolResult) {
+      else if (reviewMode && memoryToolAvailable(toolNames) && !hasToolResult) {
+        if (reviewRemove) {
+          tool = {
+            name: "memory",
+            args: {
+              target: "user",
+              operations: [{ action: "remove", oldText: reviewRemove[1]!.trim() }],
+            },
+          }
+        } else if (reviewAdd) {
+          tool = {
+            name: "memory",
+            args: {
+              target: "user",
+              operations: [{ action: "add", content: reviewAdd[1]!.trim() }],
+            },
+          }
+        }
+      } else if (memoryMatch && toolNames.includes("memory") && !hasToolResult) {
         tool = {
           name: "memory",
           args: {
@@ -233,6 +265,9 @@ export function startFakeOpenAI(): FakeOpenAI {
     requests,
     failNext(status = 500, headers = {}) {
       failure = { status, headers }
+    },
+    delayNext(delayMs = 250) {
+      nextDelayMs = delayMs
     },
     close: () => server.stop(true),
   }

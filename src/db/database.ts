@@ -31,8 +31,11 @@ import type {
   MemoryHistoryRecord,
   MemoryPendingRecord,
   MemoryPendingStatus,
+  MemoryReviewRun,
+  MemoryReviewStatus,
   MemoryStoreName,
   NewMemoryPending,
+  NewMemoryReviewRun,
 } from "../memory/types"
 import { backupIfNeeded, schemaVersion } from "./backup"
 import { LATEST_SCHEMA_VERSION, migrationLoader } from "./migrations"
@@ -263,6 +266,21 @@ interface MemoryHistoryRow {
   readonly created_at: string
   readonly undone_at: string | null
   readonly undo_history_id: string | null
+}
+
+interface MemoryReviewRunRow {
+  readonly id: string
+  readonly session_id: string
+  readonly status: MemoryReviewStatus
+  readonly trigger: MemoryReviewRun["trigger"]
+  readonly provider_id: string | null
+  readonly model_id: string | null
+  readonly turns_since_memory: number
+  readonly input_tokens: number
+  readonly output_tokens: number
+  readonly error: string | null
+  readonly started_at: string
+  readonly completed_at: string | null
 }
 
 interface EventRow {
@@ -682,6 +700,23 @@ function rowToMemoryHistory(row: MemoryHistoryRow): MemoryHistoryRecord {
     createdAt: row.created_at,
     undoneAt: row.undone_at,
     undoHistoryId: row.undo_history_id,
+  }
+}
+
+function rowToMemoryReviewRun(row: MemoryReviewRunRow): MemoryReviewRun {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    status: row.status,
+    trigger: row.trigger,
+    providerId: row.provider_id,
+    modelId: row.model_id,
+    turnsSinceMemory: row.turns_since_memory,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    error: row.error,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
   }
 }
 
@@ -1399,6 +1434,20 @@ export class Database {
         `
         const row = rows[0]
         return row ? rowToTurn(row) : null
+      }),
+    )
+  }
+
+  async hasActiveTurn(sessionId: string): Promise<boolean> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ active: number }>`
+          SELECT 1 AS active FROM turns
+          WHERE session_id = ${sessionId}
+            AND status IN ('queued', 'running', 'waiting_approval', 'resuming')
+          LIMIT 1
+        `
+        return rows.length > 0
       }),
     )
   }
@@ -2269,6 +2318,140 @@ export class Database {
         `
         const row = rows[0]
         return row ? rowToMemoryHistory(row) : null
+      }),
+    )
+  }
+
+  async createMemoryReviewRun(input: NewMemoryReviewRun): Promise<MemoryReviewRun> {
+    const id = newId("mrev")
+    const now = nowIso()
+    await this.query((sql) =>
+      sql`
+        INSERT INTO memory_review_runs
+          (id, session_id, status, trigger, provider_id, model_id, turns_since_memory,
+           input_tokens, output_tokens, error, started_at, completed_at)
+        VALUES
+          (${id}, ${input.sessionId}, 'running', ${input.trigger}, ${input.providerId ?? null},
+           ${input.modelId ?? null}, ${input.turnsSinceMemory}, 0, 0, NULL, ${now}, NULL)
+      `.pipe(Effect.asVoid),
+    )
+    return {
+      id,
+      sessionId: input.sessionId,
+      status: "running",
+      trigger: input.trigger,
+      providerId: input.providerId ?? null,
+      modelId: input.modelId ?? null,
+      turnsSinceMemory: input.turnsSinceMemory,
+      inputTokens: 0,
+      outputTokens: 0,
+      error: null,
+      startedAt: now,
+      completedAt: null,
+    }
+  }
+
+  async completeMemoryReviewRun(
+    id: string,
+    status: Exclude<MemoryReviewStatus, "running">,
+    usage: { inputTokens: number; outputTokens: number } = { inputTokens: 0, outputTokens: 0 },
+    error: string | null = null,
+  ): Promise<MemoryReviewRun | null> {
+    await this.query((sql) =>
+      sql`
+        UPDATE memory_review_runs
+        SET status = ${status}, input_tokens = ${usage.inputTokens},
+            output_tokens = ${usage.outputTokens}, error = ${error}, completed_at = ${nowIso()}
+        WHERE id = ${id} AND status = 'running'
+      `.pipe(Effect.asVoid),
+    )
+    return this.getMemoryReviewRun(id)
+  }
+
+  async getMemoryReviewRun(id: string): Promise<MemoryReviewRun | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<MemoryReviewRunRow>`
+          SELECT id, session_id, status, trigger, provider_id, model_id, turns_since_memory,
+                 input_tokens, output_tokens, error, started_at, completed_at
+          FROM memory_review_runs
+          WHERE id = ${id}
+        `
+        const row = rows[0]
+        return row ? rowToMemoryReviewRun(row) : null
+      }),
+    )
+  }
+
+  async listMemoryReviewRuns(sessionId?: string, limit = 50): Promise<MemoryReviewRun[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = sessionId
+          ? yield* sql<MemoryReviewRunRow>`
+              SELECT id, session_id, status, trigger, provider_id, model_id, turns_since_memory,
+                     input_tokens, output_tokens, error, started_at, completed_at
+              FROM memory_review_runs
+              WHERE session_id = ${sessionId}
+              ORDER BY started_at DESC, rowid DESC
+              LIMIT ${limit}
+            `
+          : yield* sql<MemoryReviewRunRow>`
+              SELECT id, session_id, status, trigger, provider_id, model_id, turns_since_memory,
+                     input_tokens, output_tokens, error, started_at, completed_at
+              FROM memory_review_runs
+              ORDER BY started_at DESC, rowid DESC
+              LIMIT ${limit}
+            `
+        return rows.map(rowToMemoryReviewRun)
+      }),
+    )
+  }
+
+  async latestTerminalMemoryReview(sessionId: string): Promise<MemoryReviewRun | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<MemoryReviewRunRow>`
+          SELECT id, session_id, status, trigger, provider_id, model_id, turns_since_memory,
+                 input_tokens, output_tokens, error, started_at, completed_at
+          FROM memory_review_runs
+          WHERE session_id = ${sessionId} AND status IN ('completed', 'failed', 'cancelled')
+          ORDER BY completed_at DESC, rowid DESC
+          LIMIT 1
+        `
+        const row = rows[0]
+        return row ? rowToMemoryReviewRun(row) : null
+      }),
+    )
+  }
+
+  async countUserMessagesSince(sessionId: string, since: string | null): Promise<number> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = since
+          ? yield* sql<{ count: number }>`
+              SELECT COUNT(*) AS count FROM messages
+              WHERE session_id = ${sessionId} AND role = 'user' AND created_at > ${since}
+            `
+          : yield* sql<{ count: number }>`
+              SELECT COUNT(*) AS count FROM messages
+              WHERE session_id = ${sessionId} AND role = 'user'
+            `
+        return Number(rows[0]?.count ?? 0)
+      }),
+    )
+  }
+
+  async failRunningMemoryReviews(): Promise<number> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ id: string }>`
+          UPDATE memory_review_runs
+          SET status = 'failed', error = 'daemon restarted before the review completed',
+              completed_at = ${nowIso()}
+          WHERE status = 'running'
+          RETURNING id
+        `
+        return rows.length
       }),
     )
   }

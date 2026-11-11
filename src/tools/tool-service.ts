@@ -18,6 +18,7 @@ import { z } from "zod"
 import type { Logger } from "../core/log"
 import { sha256 } from "../core/ids"
 import type { MemoryService } from "../memory/memory-service"
+import { memoryToolInputSchema } from "../memory/memory-tool-schema"
 import { MemoryError } from "../memory/types"
 import type { ToolRisk } from "../shared/types"
 import type { JournalService } from "./journal-service"
@@ -51,19 +52,7 @@ const moveInput = z.object({
   sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
 })
 
-const memoryInput = z.object({
-  target: z.enum(["user", "memory"]),
-  operations: z
-    .array(
-      z.object({
-        action: z.enum(["add", "patch", "remove"]),
-        content: z.string().min(1).max(20_000).optional(),
-        oldText: z.string().min(1).max(20_000).optional(),
-      }),
-    )
-    .min(1)
-    .max(50),
-})
+
 
 const jsonValue = (value: unknown) => JSON.parse(JSON.stringify(value)) as unknown
 
@@ -318,7 +307,7 @@ export class ToolService {
         risk: "write",
         readOnly: false,
         approvalRequired: false,
-        inputSchema: memoryInput,
+        inputSchema: memoryToolInputSchema,
         execute: async (input, context) => this.executeMemory(input, context),
       })
     }
@@ -327,7 +316,7 @@ export class ToolService {
   private async executeMemory(input: unknown, context: ToolContext): Promise<unknown> {
     const memory = this.memory
     if (!memory) throw new Error("Memory is not available.")
-    const parsed = memoryInput.parse(input)
+    const parsed = memoryToolInputSchema.parse(input)
     try {
       const result = await memory.mutate({
         store: parsed.target,

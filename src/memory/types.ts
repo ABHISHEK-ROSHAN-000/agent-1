@@ -146,6 +146,32 @@ export interface MemorySnapshot {
   readonly generatedAt: string
 }
 
+export type MemoryReviewStatus = "running" | "completed" | "failed" | "cancelled"
+export type MemoryReviewTrigger = "nudge" | "manual" | "session_end"
+
+export interface MemoryReviewRun {
+  readonly id: string
+  readonly sessionId: string
+  readonly status: MemoryReviewStatus
+  readonly trigger: MemoryReviewTrigger
+  readonly providerId: string | null
+  readonly modelId: string | null
+  readonly turnsSinceMemory: number
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly error: string | null
+  readonly startedAt: string
+  readonly completedAt: string | null
+}
+
+export interface NewMemoryReviewRun {
+  readonly sessionId: string
+  readonly trigger: MemoryReviewTrigger
+  readonly providerId?: string | null
+  readonly modelId?: string | null
+  readonly turnsSinceMemory: number
+}
+
 export interface CommitMemoryMutation {
   readonly store: MemoryStoreName
   readonly entries: readonly string[]
