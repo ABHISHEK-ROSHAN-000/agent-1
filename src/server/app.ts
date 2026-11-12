@@ -33,12 +33,14 @@ import {
   htmlResponse,
   HttpError,
   isHostAllowed,
-  isOriginAllowed,
+  isSameOrigin,
   jsonResponse,
+  LEGACY_SESSION_COOKIE,
   normalizeHost,
   parseCookies,
   readJson,
   sessionCookie,
+  sessionCookieName,
 } from "./http"
 import { openApiDocument } from "./openapi"
 import { createEventStream } from "./sse"
@@ -196,6 +198,22 @@ export interface AppDependencies {
   readonly logger: Logger
   readonly startedAt: number
   readonly shutdown: (reason: string) => void | Promise<void>
+}
+
+function challengeRequest(request: Request): boolean {
+  const mode = request.headers.get("sec-fetch-mode")
+  return mode === null || mode === "navigate"
+}
+
+function cookieResponse(
+  body: unknown,
+  status: number,
+  cookies: readonly string[],
+  headers: Record<string, string> = {},
+): Response {
+  const response = jsonResponse(body, status, headers)
+  for (const cookie of cookies) response.headers.append("set-cookie", cookie)
+  return response
 }
 
 function pairingPage(message: string): string {
@@ -421,11 +439,7 @@ export class App {
       const auth = await this.requireAuth(request)
       await this.auth.logout(auth.sessionId)
       await this.events.append("auth.logout", null, {})
-      return jsonResponse(
-        { ok: true },
-        200,
-        { "set-cookie": clearSessionCookie(this.secureFor(request)) },
-      )
+      return cookieResponse({ ok: true }, 200, this.clearSessionCookies(request))
     }
 
     if (path === "/v1/auth/pair" && method === "POST") {
@@ -433,7 +447,7 @@ export class App {
       const pairing = await this.auth.createPairingToken()
       const urls = this.pairingUrls(this.requestOrigin(request, url.origin))
       const primary = urls[0] ?? url.origin
-      const pairUrl = `${primary}/pair?token=${encodeURIComponent(pairing.token)}`
+      const pairUrl = `${primary}/auth/connect/${encodeURIComponent(pairing.token)}`
       await this.events.append("auth.pair_created", null, { expiresAt: pairing.expiresAt })
       return jsonResponse({
         code: pairing.token,
@@ -448,11 +462,7 @@ export class App {
       await this.requireAuth(request)
       const password = await this.auth.rotatePassword()
       await this.events.append("auth.password_rotated", null, {})
-      return jsonResponse(
-        { password },
-        200,
-        { "set-cookie": clearSessionCookie(this.secureFor(request)) },
-      )
+      return cookieResponse({ password }, 200, this.clearSessionCookies(request))
     }
 
     if (path === "/pair" && method === "GET") {
@@ -1093,11 +1103,7 @@ export class App {
     }
 
     await this.events.append("auth.login", null, {})
-    return jsonResponse(
-      { ok: true, expiresAt: token.expiresAt },
-      200,
-      { "set-cookie": sessionCookie(token.token, SESSION_TTL_SECONDS, this.secureFor(request)) },
-    )
+    return cookieResponse({ ok: true, expiresAt: token.expiresAt }, 200, this.issueSessionCookies(request, token.token))
   }
 
   private allowedHosts(): string[] {
@@ -1118,6 +1124,24 @@ export class App {
 
   private secureFor(request: Request): boolean {
     return this.config.secureCookies || this.isRemoteRequest(request)
+  }
+
+  private issueSessionCookies(request: Request, token: string): string[] {
+    const name = sessionCookieName(request)
+    const secure = this.secureFor(request)
+    return [
+      sessionCookie(token, SESSION_TTL_SECONDS, secure, name),
+      ...(name === LEGACY_SESSION_COOKIE ? [] : [clearSessionCookie(secure, LEGACY_SESSION_COOKIE)]),
+    ]
+  }
+
+  private clearSessionCookies(request: Request): string[] {
+    const name = sessionCookieName(request)
+    const secure = this.secureFor(request)
+    return [
+      clearSessionCookie(secure, name),
+      ...(name === LEGACY_SESSION_COOKIE ? [] : [clearSessionCookie(secure, LEGACY_SESSION_COOKIE)]),
+    ]
   }
 
   private loginRateKey(request: Request): string {
@@ -1164,13 +1188,14 @@ export class App {
     const session = await this.auth.consumePairingToken(token)
     if (!session) return htmlResponse(pairingPage("This pairing link is invalid, expired, or already used."), 400)
     await this.events.append("auth.paired", null, {})
-    return new Response(null, {
+    const response = new Response(null, {
       status: 303,
-      headers: {
-        location: "/",
-        "set-cookie": sessionCookie(session.token, SESSION_TTL_SECONDS, this.secureFor(request)),
-      },
+      headers: { location: "/" },
     })
+    for (const cookie of this.issueSessionCookies(request, session.token)) {
+      response.headers.append("set-cookie", cookie)
+    }
+    return response
   }
 
   private async createSession(request: Request, requestId: string): Promise<Response> {
@@ -1225,14 +1250,16 @@ export class App {
   private async requireAuth(request: Request): Promise<AuthContext> {
     const auth = await this.authenticate(request)
     if (!auth) {
-      throw new HttpError(401, "unauthorized", "Authentication required", {
-        "www-authenticate": 'Basic realm="Agent-1"',
-      })
+      throw new HttpError(
+        401,
+        "unauthorized",
+        "Authentication required",
+        challengeRequest(request) ? { "www-authenticate": 'Basic realm="Agent-1"' } : {},
+      )
     }
     if (
       auth.kind === "cookie" &&
-      request.method.toUpperCase() !== "GET" &&
-      !isOriginAllowed(request.headers.get("origin"), this.allowedHosts())
+      !isSameOrigin(request.headers.get("origin"), request.headers.get("host"))
     ) {
       throw new HttpError(403, "origin_not_allowed", "Origin is not allowed")
     }
@@ -1258,7 +1285,9 @@ export class App {
     }
 
     const cookies = parseCookies(request.headers.get("cookie"))
-    const token = cookies.agent1_session
+    const token =
+      cookies[sessionCookieName(request)] ??
+      cookies[LEGACY_SESSION_COOKIE]
     if (token) {
       const session = await this.auth.verifySessionToken(token)
       if (session) return { kind: "cookie", sessionId: session.sessionId }

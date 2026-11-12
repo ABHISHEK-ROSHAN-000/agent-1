@@ -66,6 +66,17 @@ describe("AuthService", () => {
     }
   })
 
+  test("unused pairing tokens do not survive a service restart", async () => {
+    const { db, secrets, auth } = await setup()
+    try {
+      const pairing = await auth.createPairingToken()
+      const restarted = new AuthService(db, secrets, new Logger())
+      expect(await restarted.consumePairingToken(pairing.token)).toBeNull()
+    } finally {
+      await db.close()
+    }
+  })
+
   test("login rate limiter blocks repeated failures", () => {
     const limiter = new LoginRateLimiter(2, 1000)
     limiter.fail("test")

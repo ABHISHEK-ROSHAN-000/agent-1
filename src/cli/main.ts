@@ -13,6 +13,7 @@ import { parseArgs, flagString, hasFlag, type ParsedArgs } from "./args"
 import { renderUnicodeCompact } from "./qr"
 import { CLI_NAME, PRODUCT_NAME, VERSION } from "../core/version"
 import { ensureDataDirs, resolveConfig, type AppConfig } from "../core/config"
+import { readServiceConfig, updateServiceConfig } from "../core/service-config"
 import { SecretStore } from "../auth/secret-store"
 import { AgentOneClient } from "../client/client"
 import { autostartStatus, disableAutostart, enableAutostart } from "../daemon/autostart"
@@ -25,6 +26,7 @@ Usage: ${CLI_NAME} <command> [options]
 
 Commands:
   service start|stop|status|restart
+  service set port [port]
   service autostart on|off|status
   tui                            Open the terminal client
   status
@@ -108,6 +110,33 @@ async function serviceCommand(parsed: ParsedArgs): Promise<void> {
   const sub = parsed.positionals[1]
   const json = hasFlag(parsed, "json")
   const config = configFor(parsed)
+
+  if (sub === "set") {
+    if (parsed.positionals[2] !== "port") {
+      throw new Error("Usage: agent-1 service set port [port]")
+    }
+    const value = parsed.positionals[3]
+    if (value === undefined) {
+      const current = readServiceConfig(config.serviceConfigPath)
+      const port = current?.port ?? config.port
+      output(json, { port }, `Agent-1 service port: ${port}`)
+      return
+    }
+    const port = Number(value)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error("Port must be an integer between 1 and 65535")
+    }
+    updateServiceConfig(config.serviceConfigPath, { port })
+    const running = (await serviceStatus(config)).status === "running"
+    output(
+      json,
+      { port, restartRequired: running },
+      running
+        ? `Agent-1 service port set to ${port}. Restart the service to apply it.`
+        : `Agent-1 service port set to ${port}.`,
+    )
+    return
+  }
 
   if (!sub || sub === "status") {
     const status = await serviceStatus(config)
@@ -196,7 +225,7 @@ async function serviceCommand(parsed: ParsedArgs): Promise<void> {
     throw new Error("Usage: agent-1 service autostart on|off|status")
   }
 
-  throw new Error("Usage: agent-1 service start|stop|status|restart|autostart")
+  throw new Error("Usage: agent-1 service start|stop|status|restart|set port|autostart")
 }
 
 class CliCancelled extends Error {

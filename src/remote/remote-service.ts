@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto"
 import { create, isValidRouteName, type OpenTunnelPromiseClient, type OpenTunnelConnection } from "@opentunnel/client"
 import type { Database } from "../db/database"
 import type { Logger } from "../core/log"
+import { readServiceConfig, updateServiceConfig } from "../core/service-config"
 import type { RemoteStatus, RemoteTunnelState } from "../shared/types"
 import { startTunnelProxy, type TunnelProxy } from "./tunnel-proxy"
 
@@ -41,17 +42,34 @@ export class RemoteService {
     private readonly db: Database,
     private readonly logger: Logger,
     private readonly target: () => string,
+    private readonly serviceConfigPath?: string,
   ) {}
 
   async initialize(): Promise<void> {
-    this.enabled = (await this.db.getSetting(REMOTE_ENABLED)) === "true"
-    this.accepted = (await this.db.getSetting(REMOTE_ACCEPTED)) === "true"
-    this.route = (await this.db.getSetting(REMOTE_ROUTE)) ?? ""
+    const persisted = this.serviceConfigPath
+      ? readServiceConfig(this.serviceConfigPath)?.remote
+      : undefined
+    this.enabled = persisted?.enabled ?? (await this.db.getSetting(REMOTE_ENABLED)) === "true"
+    this.accepted = persisted?.accepted ?? (await this.db.getSetting(REMOTE_ACCEPTED)) === "true"
+    const storedRoute = persisted?.route ?? (await this.db.getSetting(REMOTE_ROUTE)) ?? ""
+    this.route = isValidRouteName(storedRoute) ? storedRoute : ""
     if (!this.route) {
       this.route = newRoute()
       await this.db.setSetting(REMOTE_ROUTE, this.route)
     }
+    this.persist()
     if (this.enabled) void this.start()
+  }
+
+  private persist(): void {
+    if (!this.serviceConfigPath) return
+    updateServiceConfig(this.serviceConfigPath, {
+      remote: {
+        route: this.route,
+        accepted: this.accepted,
+        enabled: this.enabled,
+      },
+    })
   }
 
   async status(): Promise<RemoteStatus> {
@@ -69,6 +87,7 @@ export class RemoteService {
   async accept(): Promise<void> {
     this.accepted = true
     await this.db.setSetting(REMOTE_ACCEPTED, "true")
+    this.persist()
   }
 
   async enable(): Promise<RemoteStatus> {
@@ -76,6 +95,7 @@ export class RemoteService {
     this.enabled = true
     await this.db.setSetting(REMOTE_ACCEPTED, "true")
     await this.db.setSetting(REMOTE_ENABLED, "true")
+    this.persist()
     void this.start()
     return this.status()
   }
@@ -83,6 +103,7 @@ export class RemoteService {
   async disable(): Promise<RemoteStatus> {
     this.enabled = false
     await this.db.setSetting(REMOTE_ENABLED, "false")
+    this.persist()
     await this.stop()
     return this.status()
   }

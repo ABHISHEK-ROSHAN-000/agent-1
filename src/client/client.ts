@@ -163,8 +163,17 @@ export class AgentOneClient {
     return this.cookie
   }
 
+  private cookieName(): string {
+    try {
+      const port = new URL(this.baseUrl).port
+      return port ? `agent1_session_${port}` : "agent1_session"
+    } catch {
+      return "agent1_session"
+    }
+  }
+
   private authHeaders(): Record<string, string> {
-    if (this.cookie) return { cookie: `agent1_session=${this.cookie}` }
+    if (this.cookie) return { cookie: `${this.cookieName()}=${this.cookie}` }
     if (this.password) {
       return {
         authorization: `Basic ${Buffer.from(`agent-1:${this.password}`, "utf8").toString("base64")}`,
@@ -284,7 +293,7 @@ export class AgentOneClient {
         throw new ClientError(response.status, "login_failed", text || "Login failed")
       }
       const setCookie = response.headers.get("set-cookie") ?? ""
-      const match = /(?:^|,\s*)agent1_session=([^;]+)/.exec(setCookie)
+      const match = /(?:^|,\s*)agent1_session(?:_\d+)?=([^;]+)/.exec(setCookie)
       if (match?.[1]) this.cookie = match[1]
       this.password = password
       return JSON.parse(text) as { expiresAt: string }
@@ -468,7 +477,7 @@ export class AgentOneClient {
 
   async turnStreamResponse(turnId: string, signal?: AbortSignal): Promise<Response> {
     const headers: Record<string, string> = { accept: "text/event-stream" }
-    if (this.cookie) headers.cookie = `agent1_session=${this.cookie}`
+    if (this.cookie) headers.cookie = `${this.cookieName()}=${this.cookie}`
     else if (this.password) {
       headers.authorization = `Basic ${Buffer.from(`agent-1:${this.password}`, "utf8").toString("base64")}`
     }
@@ -736,7 +745,7 @@ export class AgentOneClient {
   async eventsResponse(after = 0, signal?: AbortSignal): Promise<Response> {
     const headers: Record<string, string> = { accept: "text/event-stream" }
     if (after > 0) headers["last-event-id"] = String(after)
-    if (this.cookie) headers.cookie = `agent1_session=${this.cookie}`
+    if (this.cookie) headers.cookie = `${this.cookieName()}=${this.cookie}`
     else if (this.password) {
       headers.authorization = `Basic ${Buffer.from(`agent-1:${this.password}`, "utf8").toString("base64")}`
     }

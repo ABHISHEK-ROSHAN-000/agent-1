@@ -56,6 +56,9 @@ export class LoginRateLimiter {
 
 export class AuthService {
   private readonly limiter: LoginRateLimiter
+  // Pairing links are intentionally process-local and one-time. A daemon
+  // restart invalidates unused links, matching OpenCode's 5-minute cache.
+  private readonly pairingTokens = new Map<string, number>()
 
   constructor(
     private readonly db: Database,
@@ -120,16 +123,21 @@ export class AuthService {
   }
 
   async createPairingToken(): Promise<PairingToken> {
+    this.prunePairingTokens()
     const token = newToken(32)
     const expiresAt = nowPlusSeconds(PAIRING_TTL_SECONDS)
-    await this.db.createPairingToken(sha256(token), expiresAt)
+    this.pairingTokens.set(sha256(token), Date.parse(expiresAt))
     return { token, expiresAt }
   }
 
   async consumePairingToken(token: string): Promise<SessionToken | null> {
     if (!token) return null
-    const ok = await this.db.consumePairingToken(sha256(token))
-    if (!ok) return null
+    this.prunePairingTokens()
+    const tokenHash = sha256(token)
+    const expiresAt = this.pairingTokens.get(tokenHash)
+    if (expiresAt === undefined) return null
+    this.pairingTokens.delete(tokenHash)
+    if (expiresAt <= Date.now()) return null
     return this.createSessionToken()
   }
 
@@ -140,6 +148,7 @@ export class AuthService {
     await this.secrets.writePassword(password)
     await this.db.deleteAllAuthSessions()
     await this.db.deleteAllPairingTokens()
+    this.pairingTokens.clear()
     this.logger.info("auth.password_rotated")
     return password
   }
@@ -147,6 +156,14 @@ export class AuthService {
   async pruneExpired(): Promise<void> {
     await this.db.pruneExpiredAuthSessions()
     await this.db.pruneExpiredPairingTokens()
+    this.prunePairingTokens()
+  }
+
+  private prunePairingTokens(): void {
+    const now = Date.now()
+    for (const [token, expiresAt] of this.pairingTokens) {
+      if (expiresAt <= now) this.pairingTokens.delete(token)
+    }
   }
 
   isExpired(value: string): boolean {

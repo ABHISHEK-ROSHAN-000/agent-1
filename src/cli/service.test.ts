@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { SecretStore } from "../auth/secret-store"
 import { resolveConfig } from "../core/config"
+import { readServiceConfig } from "../core/service-config"
 import { readState } from "../daemon/state"
 
 const dirs: string[] = []
@@ -31,7 +32,7 @@ describe("CLI service flow", () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "agent-1-cli-service-"))
     dirs.push(dir)
     try {
-      const start = cli(["service", "start", "--data-dir", dir, "--json"])
+      const start = cli(["service", "start", "--data-dir", dir, "--port", "0", "--json"])
       expect(start.exitCode).toBe(0)
       const started = json<{ status: string; pid: number; url: string }>(start.stdout)
       expect(started.status).toBe("running")
@@ -60,6 +61,17 @@ describe("CLI service flow", () => {
       expect(stopped.exitCode).toBe(0)
       expect(json<{ stopped: boolean }>(stopped.stdout).stopped).toBe(true)
       expect(existsSync(path.join(dir, "state", "service.json"))).toBe(false)
+
+      const setPort = cli(["service", "set", "port", "32123", "--data-dir", dir, "--json"])
+      expect(setPort.exitCode).toBe(0)
+      expect(json<{ port: number; restartRequired: boolean }>(setPort.stdout)).toEqual({
+        port: 32123,
+        restartRequired: false,
+      })
+      const serviceConfig = readServiceConfig(
+        resolveConfig({ ...process.env, AGENT1_DATA_DIR: dir }).serviceConfigPath,
+      )
+      expect(serviceConfig?.port).toBe(32123)
     } finally {
       const config = resolveConfig({ ...process.env, AGENT1_DATA_DIR: dir })
       const state = readState(config.statePath)

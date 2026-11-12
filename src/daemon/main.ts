@@ -1,4 +1,5 @@
 import { ensureDataDirs, PHASE, resolveConfig } from "../core/config"
+import { ensureServiceConfig } from "../core/service-config"
 import { Logger, resolveLogLevel } from "../core/log"
 import { Database } from "../db/database"
 import { MemoryReviewService } from "../memory/memory-review-service"
@@ -26,6 +27,9 @@ import type { ServiceState } from "../shared/types"
 async function main(): Promise<void> {
   const config = resolveConfig()
   ensureDataDirs(config)
+  if (config.portSource !== "env" && config.port > 0) {
+    ensureServiceConfig(config.serviceConfigPath, config.port)
+  }
   const logger = new Logger({
     level: resolveLogLevel(process.env.AGENT1_LOG_LEVEL),
     filePath: config.logPath,
@@ -113,7 +117,12 @@ async function main(): Promise<void> {
       memoryReview,
     )
     void turns.attachments.prune()
-    remoteService = new RemoteService(db, logger, () => `127.0.0.1:${server?.port ?? 0}`)
+    remoteService = new RemoteService(
+      db,
+      logger,
+      () => `127.0.0.1:${server?.port ?? 0}`,
+      config.serviceConfigPath,
+    )
 
     const app = new App({
       config,
@@ -136,12 +145,17 @@ async function main(): Promise<void> {
       shutdown: (reason) => void shutdown(reason),
     })
 
-    server = Bun.serve({
-      hostname: config.host,
-      port: config.port,
-      idleTimeout: 120,
-      fetch: app.fetch,
-    })
+    try {
+      server = Bun.serve({
+        hostname: config.host,
+        port: config.port,
+        idleTimeout: 120,
+        fetch: app.fetch,
+      })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new Error(`could not bind ${config.host}:${config.port}: ${detail}`)
+    }
 
     const port = server.port
     if (port === undefined) throw new Error("Bun server did not expose a port")

@@ -3,13 +3,19 @@ export const openApiDocument = {
   info: {
     title: "Agent-1 API",
     version: "0.1.0",
-    description: "Local personal assistant daemon. Phase 8A: auth, sessions, tools, checkpoints, web client, remote access, and memory.",
+    description: "Local personal assistant daemon. Phase 8G: auth, sessions, tools, checkpoints, web client, remote access, memory, and stable service identity.",
   },
   servers: [{ url: "http://127.0.0.1:{port}", variables: { port: { default: "0" } } }],
   components: {
     securitySchemes: {
       basicAuth: { type: "http", scheme: "basic" },
-      sessionCookie: { type: "apiKey", in: "cookie", name: "agent1_session" },
+      sessionCookie: {
+        type: "apiKey",
+        in: "cookie",
+        name: "agent1_session",
+        description:
+          "The cookie name includes the local service port, for example agent1_session_28895.",
+      },
     },
   },
   paths: {

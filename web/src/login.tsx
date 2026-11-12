@@ -124,7 +124,7 @@ export function LoginPage() {
         window.location.assign(url.toString())
         return
       }
-      if (value.startsWith("/pair")) {
+      if (value.startsWith("/pair") || value.startsWith("/auth/connect/")) {
         window.location.assign(value)
         return
       }

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
 import type { AppConfig } from "../core/config"
+import { ensureServiceConfig } from "../core/service-config"
 import { AgentOneClient } from "../client/client"
 import { isProcessAlive } from "./lock"
 import { readState, removeState } from "./state"
@@ -59,6 +60,10 @@ export async function startService(config: AppConfig): Promise<StartResult> {
     throw new Error(`Agent-1 is already running (pid ${heldPid})`)
   }
 
+  if (config.portSource !== "env" && config.port > 0) {
+    ensureServiceConfig(config.serviceConfigPath, config.port)
+  }
+
   const daemon = path.join(repoRoot(), "src", "daemon", "main.ts")
   const child = spawn(process.execPath, [daemon], {
     cwd: repoRoot(),
@@ -79,11 +84,18 @@ export async function startService(config: AppConfig): Promise<StartResult> {
     if (state && isProcessAlive(state.pid) && (await health(state.url))) {
       return { state, alreadyRunning: false }
     }
+    if (child.exitCode !== null) break
     await Bun.sleep(150)
   }
 
   const log = tailLog(config.logPath)
-  throw new Error(`Agent-1 did not start within 20 seconds.${log ? `\n\n${log}` : ""}`)
+  if (/EADDRINUSE|address already in use|port .* in use/i.test(log)) {
+    throw new Error(
+      `Agent-1 could not bind to port ${config.port} because it is already in use. Set another port with "agent-1 service set port <port>" and restart.`,
+    )
+  }
+  const reason = child.exitCode !== null ? `Agent-1 exited during startup (code ${child.exitCode}).` : "Agent-1 did not start within 20 seconds."
+  throw new Error(`${reason}${log ? `\n\n${log}` : ""}`)
 }
 
 export interface StopResult {

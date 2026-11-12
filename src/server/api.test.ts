@@ -21,32 +21,55 @@ function basic(password: string): string {
 
 function cookieFrom(response: Response): string {
   const header = response.headers.get("set-cookie") ?? ""
-  const match = /agent1_session=([^;]+)/.exec(header)
+  const match = /agent1_session(?:_\d+)?=([^;]+)/.exec(header)
   if (!match?.[1]) throw new Error(`No session cookie in: ${header}`)
-  return `agent1_session=${match[1]}`
+  return match[0].split(";")[0]!
 }
 
-function withHost(url: string, host: string): Promise<{ status: number; body: string }> {
+async function freePort(): Promise<number> {
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ok") })
+  const port = server.port
+  server.stop(true)
+  if (port === undefined) throw new Error("Could not allocate a test port")
+  return port
+}
+
+function rawGet(
+  url: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; body: string; headers: Record<string, string | undefined> }> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const request = httpRequest(
       {
         hostname: target.hostname,
         port: target.port,
-        path: target.pathname,
+        path: `${target.pathname}${target.search}`,
         method: "GET",
-        headers: { host },
+        headers,
       },
       (response) => {
         let body = ""
         response.setEncoding("utf8")
         response.on("data", (chunk: string) => (body += chunk))
-        response.on("end", () => resolve({ status: response.statusCode ?? 0, body }))
+        response.on("end", () =>
+          resolve({
+            status: response.statusCode ?? 0,
+            body,
+            headers: {
+              "www-authenticate": response.headers["www-authenticate"],
+            },
+          }),
+        )
       },
     )
     request.on("error", reject)
     request.end()
   })
+}
+
+function withHost(url: string, host: string): Promise<{ status: number; body: string }> {
+  return rawGet(url, { host })
 }
 
 async function readSse(
@@ -146,6 +169,27 @@ describe("Phase 1 HTTP API", () => {
     expect(((await spec.json()) as { openapi: string }).openapi).toBe("3.1.0")
   })
 
+  test("browser fetches do not trigger the native Basic auth dialog", async () => {
+    const instance = await daemon()
+    const cli = await rawGet(`${instance.state.url}/v1/info`, {})
+    expect(cli.status).toBe(401)
+    expect(cli.headers["www-authenticate"]).toContain("Basic")
+
+    const navigate = await rawGet(`${instance.state.url}/v1/info`, {
+      "sec-fetch-mode": "navigate",
+    })
+    expect(navigate.status).toBe(401)
+    expect(navigate.headers["www-authenticate"]).toContain("Basic")
+
+    for (const mode of ["same-origin", "cors"]) {
+      const browserFetch = await rawGet(`${instance.state.url}/v1/info`, {
+        "sec-fetch-mode": mode,
+      })
+      expect(browserFetch.status).toBe(401)
+      expect(browserFetch.headers["www-authenticate"]).toBeUndefined()
+    }
+  })
+
   test("configured hostnames are allowed", async () => {
     const instance = await daemon({ env: { AGENT1_ALLOWED_HOSTS: "agent-1.test" } })
     const allowed = await withHost(`${instance.state.url}/v1/health`, "agent-1.test")
@@ -177,6 +221,11 @@ describe("Phase 1 HTTP API", () => {
     const info = await fetch(`${instance.state.url}/v1/info`, { headers: { cookie } })
     expect(info.status).toBe(200)
 
+    const mismatchedOrigin = await fetch(`${instance.state.url}/v1/info`, {
+      headers: { cookie, origin: "http://127.0.0.1:1" },
+    })
+    expect(mismatchedOrigin.status).toBe(403)
+
     const forbiddenOrigin = await fetch(`${instance.state.url}/v1/sessions`, {
       method: "POST",
       headers: { cookie, "content-type": "application/json", origin: "https://evil.example" },
@@ -203,7 +252,7 @@ describe("Phase 1 HTTP API", () => {
     expect((await instance.client.remote()).state).toBe("off")
     const paired = await fetch(pairing.url, { redirect: "manual" })
     expect(paired.status).toBe(303)
-    expect(paired.headers.get("set-cookie")).toContain("agent1_session=")
+    expect(paired.headers.get("set-cookie")).toMatch(/agent1_session(_\d+)?=/)
     const reused = await fetch(pairing.url, { redirect: "manual" })
     expect(reused.status).toBe(400)
 
@@ -236,6 +285,38 @@ describe("Phase 1 HTTP API", () => {
     expect((await newClient.info()).version).toBe("0.1.0")
     await newClient.stop()
   })
+
+  test("paired sessions survive a restart while unused pairing links do not", async () => {
+    const port = await freePort()
+    const first = await startTestDaemon({ env: { AGENT1_PORT: String(port) } })
+    let second: TestDaemon | undefined
+    try {
+      const login = await fetch(`${first.state.url}/v1/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: first.password }),
+      })
+      expect(login.status).toBe(200)
+      const cookie = cookieFrom(login)
+      expect(cookie).toContain(`agent1_session_${port}=`)
+
+      const pairing = await first.client.pair()
+      expect(pairing.url).toContain("/auth/connect/")
+      await first.stop()
+
+      second = await startTestDaemon({ dataDir: first.dir, env: { AGENT1_PORT: String(port) } })
+      expect(second.state.port).toBe(port)
+
+      const afterRestart = await fetch(`${second.state.url}/v1/info`, { headers: { cookie } })
+      expect(afterRestart.status).toBe(200)
+
+      const stalePairing = await fetch(pairing.url, { redirect: "manual" })
+      expect(stalePairing.status).toBe(400)
+    } finally {
+      await second?.cleanup()
+      await first.cleanup()
+    }
+  }, 30_000)
 
   test("SSE replays durable events and honors Last-Event-ID", async () => {
     const instance = await daemon()

@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { resolveConfig, ensureDataDirs } from "../core/config"
+import { updateServiceConfig } from "../core/service-config"
 import { SecretStore } from "../auth/secret-store"
 import { AgentOneClient } from "../client/client"
 import { isProcessAlive } from "./lock"
@@ -20,6 +21,20 @@ async function tempConfig() {
   const config = resolveConfig({ ...process.env, AGENT1_DATA_DIR: dir, AGENT1_PORT: "0" })
   ensureDataDirs(config)
   return { dir, config }
+}
+
+async function freePort(): Promise<number> {
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ok") })
+  const port = server.port
+  server.stop(true)
+  if (port === undefined) throw new Error("Could not allocate a test port")
+  return port
+}
+
+function withoutPortOverride(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const copy = { ...env }
+  delete copy.AGENT1_PORT
+  return copy
 }
 
 async function password(config: ReturnType<typeof resolveConfig>): Promise<string> {
@@ -70,6 +85,50 @@ describe("daemon lifecycle", () => {
       expect(isProcessAlive(started.state.pid)).toBe(false)
       expect((await serviceStatus(config)).status).toBe("stopped")
     } finally {
+      await stopIfRunning(config)
+    }
+  }, 30_000)
+
+  test("reuses the persisted service port across restarts", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "agent-1-lifecycle-"))
+    dirs.push(dir)
+    const env = withoutPortOverride(process.env)
+    const initial = resolveConfig({ ...env, AGENT1_DATA_DIR: dir })
+    const port = await freePort()
+    updateServiceConfig(initial.serviceConfigPath, { port })
+    ensureDataDirs(initial)
+    const config = resolveConfig({ ...env, AGENT1_DATA_DIR: dir })
+    expect(config.port).toBe(port)
+    expect(config.portSource).toBe("config")
+
+    try {
+      const first = await startService(config)
+      expect(first.state.port).toBe(port)
+      await stopService(config, await password(config))
+
+      const second = await startService(config)
+      expect(second.state.port).toBe(port)
+      expect(second.state.url).toBe(first.state.url)
+    } finally {
+      await stopIfRunning(config)
+    }
+  }, 30_000)
+
+  test("fails clearly when the configured port is already in use", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "agent-1-lifecycle-"))
+    dirs.push(dir)
+    const env = withoutPortOverride(process.env)
+    const initial = resolveConfig({ ...env, AGENT1_DATA_DIR: dir })
+    const port = await freePort()
+    updateServiceConfig(initial.serviceConfigPath, { port })
+    ensureDataDirs(initial)
+    const config = resolveConfig({ ...env, AGENT1_DATA_DIR: dir })
+
+    const occupied = Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response("occupied") })
+    try {
+      await expect(startService(config)).rejects.toThrow(/already in use/)
+    } finally {
+      occupied.stop(true)
       await stopIfRunning(config)
     }
   }, 30_000)

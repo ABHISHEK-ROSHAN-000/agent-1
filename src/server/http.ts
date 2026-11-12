@@ -87,9 +87,25 @@ export function parseCookies(header: string | null): Record<string, string> {
   return cookies
 }
 
-export function sessionCookie(token: string, maxAgeSeconds: number, secure: boolean): string {
+export const LEGACY_SESSION_COOKIE = "agent1_session"
+
+export function sessionCookieName(request: Request): string {
+  try {
+    const port = new URL(request.url).port
+    return port ? `${LEGACY_SESSION_COOKIE}_${port}` : LEGACY_SESSION_COOKIE
+  } catch {
+    return LEGACY_SESSION_COOKIE
+  }
+}
+
+export function sessionCookie(
+  token: string,
+  maxAgeSeconds: number,
+  secure: boolean,
+  name = LEGACY_SESSION_COOKIE,
+): string {
   return [
-    `agent1_session=${encodeURIComponent(token)}`,
+    `${name}=${encodeURIComponent(token)}`,
     "Path=/",
     "HttpOnly",
     "SameSite=Lax",
@@ -98,15 +114,25 @@ export function sessionCookie(token: string, maxAgeSeconds: number, secure: bool
   ].join("; ")
 }
 
-export function clearSessionCookie(secure: boolean): string {
+export function clearSessionCookie(secure: boolean, name = LEGACY_SESSION_COOKIE): string {
   return [
-    "agent1_session=",
+    `${name}=`,
     "Path=/",
     "HttpOnly",
     "SameSite=Lax",
     "Max-Age=0",
     ...(secure ? ["Secure"] : []),
   ].join("; ")
+}
+
+export function isSameOrigin(origin: string | null, host: string | null): boolean {
+  if (!origin) return true
+  if (!host) return false
+  try {
+    return new URL(origin).host.toLowerCase() === host.trim().toLowerCase()
+  } catch {
+    return false
+  }
 }
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"])

@@ -1,11 +1,12 @@
 import { mkdirSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { defaultServicePort, readServiceConfig } from "./service-config"
 import { VERSION } from "./version"
 
 export const PRODUCT_NAME = "Agent-1"
 export const AUTH_USERNAME = "agent-1"
-export const PHASE = "Phase 8F - Hardening and final gate"
+export const PHASE = "Phase 8G - Stable service identity and browser pairing"
 
 export interface AppConfig {
   readonly dataDir: string
@@ -14,6 +15,8 @@ export interface AppConfig {
   readonly secretsDir: string
   readonly secretsPath: string
   readonly modelSecretsPath: string
+  readonly configDir: string
+  readonly serviceConfigPath: string
   readonly stateDir: string
   readonly statePath: string
   readonly lockPath: string
@@ -23,6 +26,7 @@ export interface AppConfig {
   readonly webRoot: string
   readonly host: string
   readonly port: number
+  readonly portSource: "env" | "config" | "default"
   readonly allowedHosts: readonly string[]
   readonly publicUrl?: string
   readonly secureCookies: boolean
@@ -42,6 +46,7 @@ export function ensureDataDirs(config: AppConfig): void {
     config.dataDir,
     config.backupDir,
     config.secretsDir,
+    config.configDir,
     config.stateDir,
     config.logsDir,
     config.checkpointsDir,
@@ -52,10 +57,24 @@ export function ensureDataDirs(config: AppConfig): void {
 
 export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const dataDir = path.resolve(env.AGENT1_DATA_DIR ?? defaultDataDir(env))
-  const portRaw = env.AGENT1_PORT ?? "0"
-  const port = Number(portRaw)
+  const configDir = path.join(dataDir, "config")
+  const serviceConfigPath = path.join(configDir, "service.json")
+  const portRaw = env.AGENT1_PORT
+  let port: number
+  let portSource: AppConfig["portSource"]
+  if (portRaw !== undefined) {
+    port = Number(portRaw)
+    portSource = "env"
+  } else {
+    const persisted = readServiceConfig(serviceConfigPath)
+    port = persisted?.port ?? defaultServicePort()
+    portSource = persisted?.port === undefined ? "default" : "config"
+  }
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw new Error(`AGENT1_PORT must be an integer between 0 and 65535 (got ${portRaw})`)
+    throw new Error(`AGENT1_PORT must be an integer between 0 and 65535 (got ${portRaw ?? port})`)
+  }
+  if (portSource !== "env" && port < 1) {
+    throw new Error(`Agent-1 service config port must be between 1 and 65535 (got ${port})`)
   }
 
   const publicUrl = env.AGENT1_PUBLIC_URL?.replace(/\/+$/, "")
@@ -79,6 +98,8 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     secretsDir: path.join(dataDir, "secrets"),
     secretsPath: path.join(dataDir, "secrets", "auth.dpapi.json"),
     modelSecretsPath: path.join(dataDir, "secrets", "model-keys.dpapi.json"),
+    configDir,
+    serviceConfigPath,
     stateDir: path.join(dataDir, "state"),
     statePath: path.join(dataDir, "state", "service.json"),
     lockPath: path.join(dataDir, "state", "service.lock"),
@@ -90,6 +111,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       : path.resolve(import.meta.dir, "..", "..", "web", "dist"),
     host: "127.0.0.1",
     port,
+    portSource,
     allowedHosts,
     ...(publicUrl ? { publicUrl } : {}),
     secureCookies: env.AGENT1_SECURE_COOKIES === "1",
