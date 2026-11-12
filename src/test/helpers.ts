@@ -92,6 +92,7 @@ export async function configureTestProvider(
     readonly apiKey?: string
     readonly contextWindow?: number
     readonly maxOutputTokens?: number
+    readonly inputModalities?: readonly string[]
     readonly reasoningOptions?: readonly import("../shared/types").ReasoningOption[]
   } = {},
 ): Promise<void> {
@@ -108,6 +109,7 @@ export async function configureTestProvider(
         contextWindow: options.contextWindow ?? 8192,
         maxOutputTokens: options.maxOutputTokens ?? 256,
         supportsTools: true,
+        ...(options.inputModalities ? { inputModalities: options.inputModalities } : {}),
         ...(options.reasoningOptions ? { reasoningOptions: options.reasoningOptions } : {}),
       },
     ],

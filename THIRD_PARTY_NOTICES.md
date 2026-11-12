@@ -18,7 +18,19 @@ data, and presentation patterns from `packages/ui`, `packages/session-ui`, and
 authentication, permission behavior, wordmark, and product names. OpenCode
 branding, logos, and telemetry are not used.
 
+Attachment materialization, blob/reference handling, image limits, model media
+projection, and media read behavior in Phase 8E.5 are ported from the same
+OpenCode repository at commit `611cee9d4b667b459f19ca0cbf6e76d8647535fb`
+(`packages/schema`, `packages/core/src/session`, `packages/core/src/image`,
+and `packages/core/src/tool`). The MIT license above applies.
+
 The QR encoder follows Project Nayuki's MIT-licensed QR Code generator.
+
+## Photon
+
+Image normalization uses `@silvia-odwyer/photon-node` `0.3.4`, licensed
+Apache-2.0 (https://github.com/silvia-odwyer/photon). Its license is included in
+the installed package at `node_modules/@silvia-odwyer/photon-node/LICENSE.md`.
 
 ## Clack
 

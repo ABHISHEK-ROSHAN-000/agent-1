@@ -17,6 +17,7 @@ import { SecretStore } from "../auth/secret-store"
 import { AgentOneClient } from "../client/client"
 import { autostartStatus, disableAutostart, enableAutostart } from "../daemon/autostart"
 import { startService, stopService, serviceStatus, type StatusResult } from "../daemon/service"
+import { launchTui } from "../tui/launcher"
 
 const HELP = `${PRODUCT_NAME} ${VERSION}
 
@@ -25,6 +26,7 @@ Usage: ${CLI_NAME} <command> [options]
 Commands:
   service start|stop|status|restart
   service autostart on|off|status
+  tui                            Open the terminal client
   status
   auth login [provider]          Connect a provider with an API key
   auth list [--format default|json]
@@ -35,6 +37,8 @@ Commands:
   remote on [--yes]|off|status
   session create [--title <title>]
   session list
+  session rename <id> <title>
+  session delete <id>
   sessions search <query> [--limit <n>] [--sort relevance|newest|oldest]
   sessions show <id>
   memory list
@@ -52,15 +56,16 @@ Commands:
   rules remove <id>
   approvals list [--status pending|approved|rejected|expired|invalidated]
   approvals show <id>
-  approvals approve <id>
+  approvals approve <id> [--scope once|session|always]
   approvals reject <id> [--reason <text>]
+  approvals config [--mode smart|manual|off] [--timeout <seconds>] [--safe-root <path>] [--smart-model provider/model]
+  approvals grants
+  approvals revoke-grant <id>
   audit [--limit <n>]
-  workspace list
-  workspace add <path> [--label <label>] [--access read|write]
-  workspace remove <id>
-  journal list [--limit <n>]
-  journal show <id>
-  journal undo [batch-id]
+  checkpoints list [--limit <n>]
+  checkpoints show <id>
+  checkpoints diff <id>
+  checkpoints restore <id> [--file <path>] [--unsafe]
   tools list
 
 Options:
@@ -685,7 +690,23 @@ async function sessionCommand(parsed: ParsedArgs): Promise<void> {
     return
   }
 
-  throw new Error("Usage: agent-1 session create|list")
+  if (sub === "rename") {
+    const id = parsed.positionals[2]
+    const title = parsed.positionals.slice(3).join(" ").trim() || flagString(parsed, "title")
+    if (!id || !title) throw new Error("Usage: agent-1 session rename <id> <title>")
+    const result = await client.renameSession(id, title)
+    output(json, result, `Renamed session ${id} to "${String(result.session.title)}".`)
+    return
+  }
+
+  if (sub === "delete") {
+    const id = parsed.positionals[2]
+    if (!id) throw new Error("Usage: agent-1 session delete <id>")
+    output(json, await client.deleteSession(id), `Deleted session ${id}.`)
+    return
+  }
+
+  throw new Error("Usage: agent-1 session create|list|rename|delete")
 }
 
 function parseModelRef(
@@ -917,6 +938,57 @@ async function approvalsCommand(parsed: ParsedArgs): Promise<void> {
     return
   }
 
+  if (sub === "config") {
+    const mode = flagString(parsed, "mode")
+    if (mode !== undefined && mode !== "smart" && mode !== "manual" && mode !== "off") {
+      throw new Error("Mode must be smart, manual, or off")
+    }
+    const timeoutRaw = flagString(parsed, "timeout")
+    const timeoutSeconds = timeoutRaw === undefined ? undefined : Number(timeoutRaw)
+    if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0)) {
+      throw new Error("Timeout must be a positive number of seconds")
+    }
+    const safeRoot = flagString(parsed, "safe-root")
+    const smartModel = flagString(parsed, "smart-model")
+    if (
+      mode === undefined &&
+      timeoutSeconds === undefined &&
+      safeRoot === undefined &&
+      smartModel === undefined
+    ) {
+      const result = await client.approvalConfig()
+      output(json, result, JSON.stringify(result.config, null, 2))
+      return
+    }
+    const result = await client.setApprovalConfig({
+      ...(mode ? { mode } : {}),
+      ...(timeoutSeconds !== undefined ? { timeoutSeconds } : {}),
+      ...(safeRoot !== undefined ? { writeSafeRoot: safeRoot || null } : {}),
+      ...(smartModel !== undefined ? { smartModel: smartModel || null } : {}),
+    })
+    output(json, result, JSON.stringify(result.config, null, 2))
+    return
+  }
+
+  if (sub === "grants") {
+    const result = await client.listApprovalGrants()
+    if (json) {
+      output(true, result, "")
+      return
+    }
+    for (const grant of result.grants) {
+      process.stdout.write(`${grant.id}  ${grant.scope.padEnd(7)}  ${grant.patternKey}\n`)
+    }
+    return
+  }
+
+  if (sub === "revoke-grant") {
+    const grantId = parsed.positionals[2]
+    if (!grantId) throw new Error("Usage: agent-1 approvals revoke-grant <id>")
+    output(json, await client.deleteApprovalGrant(grantId), `Removed approval grant ${grantId}.`)
+    return
+  }
+
   const id = parsed.positionals[2]
   if (!id) throw new Error("Approval id is required")
 
@@ -931,7 +1003,12 @@ async function approvalsCommand(parsed: ParsedArgs): Promise<void> {
   }
 
   if (sub === "approve" || sub === "reject") {
+    const scope = flagString(parsed, "scope")
+    if (scope !== undefined && scope !== "once" && scope !== "session" && scope !== "always") {
+      throw new Error("Scope must be once, session, or always")
+    }
     const result = await client.decideApproval(id, sub === "approve" ? "approve" : "reject", {
+      ...(scope ? { scope } : {}),
       ...(flagString(parsed, "reason") ? { reason: flagString(parsed, "reason")! } : {}),
     })
     output(json, result, `Approval ${id}: ${result.approval.status}.`)
@@ -961,52 +1038,7 @@ async function auditCommand(parsed: ParsedArgs): Promise<void> {
   }
 }
 
-async function workspaceCommand(parsed: ParsedArgs): Promise<void> {
-  const sub = parsed.positionals[1]
-  const json = hasFlag(parsed, "json")
-  const config = configFor(parsed)
-  const password = await passwordFor(config)
-  const status = await serviceStatus(config)
-  if (status.status !== "running" || !status.state) throw new Error("Agent-1 is not running.")
-  const client = new AgentOneClient({ baseUrl: status.state.url, password })
-
-  if (sub === "list" || !sub) {
-    const result = await client.listWorkspaces()
-    if (json) {
-      output(true, result, "")
-      return
-    }
-    for (const workspace of result.workspaces) {
-      process.stdout.write(`${workspace.id}  ${workspace.access.padEnd(5)}  ${workspace.path}  # ${workspace.label}\n`)
-    }
-    return
-  }
-  if (sub === "add") {
-    const pathValue = parsed.positionals[2]
-    if (!pathValue) throw new Error("Usage: agent-1 workspace add <path> [--label <label>] [--access read|write]")
-    const access = flagString(parsed, "access")
-    if (access !== undefined && access !== "read" && access !== "write") {
-      throw new Error("Access must be read or write")
-    }
-    const result = await client.addWorkspace({
-      path: pathValue,
-      ...(flagString(parsed, "label") ? { label: flagString(parsed, "label")! } : {}),
-      ...(access ? { access } : {}),
-    })
-    output(json, result, `Granted ${result.workspace.access} workspace ${result.workspace.id}: ${result.workspace.path}`)
-    return
-  }
-  if (sub === "remove") {
-    const id = parsed.positionals[2]
-    if (!id) throw new Error("Usage: agent-1 workspace remove <id>")
-    const result = await client.removeWorkspace(id)
-    output(json, result, `Removed workspace ${id}.`)
-    return
-  }
-  throw new Error("Usage: agent-1 workspace list|add|remove")
-}
-
-async function journalCommand(parsed: ParsedArgs): Promise<void> {
+async function checkpointCommand(parsed: ParsedArgs): Promise<void> {
   const sub = parsed.positionals[1]
   const json = hasFlag(parsed, "json")
   const config = configFor(parsed)
@@ -1017,39 +1049,48 @@ async function journalCommand(parsed: ParsedArgs): Promise<void> {
 
   if (sub === "list" || !sub) {
     const limit = Number(flagString(parsed, "limit") ?? "100")
-    const result = await client.listJournal(Number.isFinite(limit) ? limit : 100)
+    const result = await client.listCheckpoints(Number.isFinite(limit) ? limit : 100)
     if (json) {
       output(true, result, "")
       return
     }
-    for (const entry of result.entries) {
+    for (const checkpoint of result.checkpoints) {
       process.stdout.write(
-        `${entry.id}  ${entry.batchId}  ${entry.state.padEnd(8)}  ${entry.operation}  ${entry.source ?? entry.target ?? ""}\n`,
+        `${checkpoint.id}  ${checkpoint.commit.slice(0, 8)}  ${checkpoint.rootPath}  ${checkpoint.reason}\n`,
       )
     }
     return
   }
   if (sub === "show") {
     const id = parsed.positionals[2]
-    if (!id) throw new Error("Usage: agent-1 journal show <id>")
-    const result = await client.getJournal(id)
-    output(json, result, JSON.stringify(result.entry, null, 2))
+    if (!id) throw new Error("Usage: agent-1 checkpoints show <id>")
+    const result = await client.getCheckpoint(id)
+    output(json, result, JSON.stringify(result.checkpoint, null, 2))
     return
   }
-  if (sub === "undo") {
-    const batchId = parsed.positionals[2]
-    const result = await client.undoJournal(batchId)
+  if (sub === "diff") {
+    const id = parsed.positionals[2]
+    if (!id) throw new Error("Usage: agent-1 checkpoints diff <id>")
+    const result = await client.diffCheckpoint(id)
+    output(json, result, `${result.diff.stat}\n${result.diff.diff}`.trim())
+    return
+  }
+  if (sub === "restore") {
+    const id = parsed.positionals[2]
+    if (!id) throw new Error("Usage: agent-1 checkpoints restore <id> [--file <path>] [--unsafe]")
+    const filePath = flagString(parsed, "file")
+    const result = await client.restoreCheckpoint(id, {
+      ...(filePath ? { filePath } : {}),
+      ...(hasFlag(parsed, "unsafe") ? { safe: false } : {}),
+    })
     output(
       json,
       result,
-      `Undo ${result.batchId}: ${result.undone} completed, ${result.skipped} skipped${result.errors.length ? `, ${result.errors.length} errors` : ""}.`,
+      `Restored ${result.result.restoredTo}: ${result.result.restoredFiles.length} files, ${result.result.deletedFiles.length} deleted, ${result.result.skippedUserEdits.length} skipped user edits.`,
     )
-    if (result.errors.length && !json) {
-      for (const error of result.errors) process.stderr.write(`  ${error}\n`)
-    }
     return
   }
-  throw new Error("Usage: agent-1 journal list|show|undo")
+  throw new Error("Usage: agent-1 checkpoints list|show|diff|restore")
 }
 
 async function memoryCommand(parsed: ParsedArgs): Promise<void> {
@@ -1243,6 +1284,9 @@ async function main(argv: readonly string[]): Promise<number> {
       await modelsCommand(parsed)
       return 0
     }
+    if (command === "tui") {
+      return await launchTui()
+    }
     if (command === "run" || command === "chat") {
       await chatCommand(parsed)
       return 0
@@ -1259,12 +1303,8 @@ async function main(argv: readonly string[]): Promise<number> {
       await auditCommand(parsed)
       return 0
     }
-    if (command === "workspace") {
-      await workspaceCommand(parsed)
-      return 0
-    }
-    if (command === "journal") {
-      await journalCommand(parsed)
+    if (command === "checkpoints") {
+      await checkpointCommand(parsed)
       return 0
     }
     if (command === "tools") {

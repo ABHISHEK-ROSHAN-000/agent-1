@@ -9,6 +9,20 @@ export class ApiError extends Error {
   }
 }
 
+export type ActiveTurnStatus = "queued" | "running" | "waiting_approval" | "resuming"
+
+export interface ActiveSessionEntry {
+  status: ActiveTurnStatus
+  turnId: string
+}
+
+export interface ActiveTurn {
+  id: string
+  status: ActiveTurnStatus
+  startedAt: string
+  updatedAt: string
+}
+
 export interface Session {
   id: string
   title: string
@@ -28,6 +42,7 @@ export interface Message {
   turnId?: string | null
   role: "user" | "assistant" | "tool" | "system"
   text: string
+  files?: Array<{ uri: string; mime: string; name?: string; bytes?: number; width?: number; height?: number }>
   content?: unknown
   createdAt?: string
 }
@@ -57,20 +72,47 @@ export interface Turn {
   } | null
 }
 
+export type ApprovalScope = "once" | "session" | "always"
+
 export interface Approval {
   id: string
   turnId: string
   sessionId: string
   toolCallId: string
   toolName: string
+  action: string
+  resource: string
+  patternKey: string
   arguments: unknown
   argumentsHash: string
+  displayCommand: string | null
   status: "pending" | "approved" | "rejected" | "expired" | "invalidated"
   createdAt: string
   expiresAt: string
   decidedAt: string | null
   decidedBy: string | null
   reason: string | null
+  scope: ApprovalScope | null
+}
+
+export interface ApprovalGrant {
+  id: string
+  sessionId: string | null
+  scope: "session" | "always"
+  action: string
+  resource: string
+  patternKey: string
+  createdAt: string
+  expiresAt: string | null
+}
+
+export interface ApprovalConfig {
+  mode: "smart" | "manual" | "off"
+  timeoutSeconds: number
+  deny: string[]
+  allowlist: string[]
+  writeSafeRoot: string | null
+  smartModel: string | null
 }
 
 export interface Rule {
@@ -84,31 +126,36 @@ export interface Rule {
   note: string | null
 }
 
-export interface Workspace {
+export interface Checkpoint {
   id: string
-  label: string
-  path: string
-  access: "read" | "write"
+  sessionId: string | null
+  turnId: string | null
+  rootPath: string
+  rootHash: string
+  commit: string
+  reason: string
+  filesChanged: number
+  insertions: number
+  deletions: number
   createdAt: string
-  updatedAt: string
 }
 
-export interface JournalEntry {
-  id: string
-  batchId: string
-  turnId: string | null
-  sessionId: string | null
-  toolName: string
-  operation: string
-  source: string | null
-  target: string | null
-  sourceHash: string | null
-  targetHash: string | null
-  state: string
-  undo: unknown
-  error: string | null
-  createdAt: string
-  updatedAt: string
+export interface CheckpointDiff {
+  checkpointId: string
+  stat: string
+  diff: string
+  files: Array<{ path: string; status: string; additions: number; deletions: number }>
+}
+
+export interface CheckpointRestoreResult {
+  checkpointId: string
+  restoredTo: string
+  restoredFiles: string[]
+  deletedFiles: string[]
+  skippedUserEdits: string[]
+  skippedOversize: string[]
+  failedDeletes: string[]
+  failedRestores: string[]
 }
 
 export interface ProviderCredential {
@@ -196,6 +243,7 @@ export interface RemoteStatus {
 
 export interface ContextInfo {
   session: Session
+  activeTurn: ActiveTurn | null
   model: SelectedModel | null
   messages: number
   turns: number
@@ -347,19 +395,38 @@ export const api = {
   logout: () => request<{ ok: true }>("POST", "/v1/auth/logout", {}),
   rotate: () => request<{ password: string }>("POST", "/v1/auth/rotate", {}),
   sessions: () => request<{ sessions: Session[] }>("GET", "/v1/sessions"),
+  activeSessions: () =>
+    request<{ active: Record<string, ActiveSessionEntry> }>("GET", "/v1/sessions/active"),
+  sessionContext: (sessionId: string) =>
+    request<{ session: Session; activeTurn: ActiveTurn | null }>(
+      "GET",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/context`,
+    ),
   createSession: (title?: string) =>
     request<{ session: Session }>("POST", "/v1/sessions", title ? { title } : {}),
+  renameSession: (sessionId: string, title: string) =>
+    request<{ session: Session }>("PATCH", `/v1/sessions/${encodeURIComponent(sessionId)}`, { title }),
+  deleteSession: (sessionId: string) =>
+    request<{ ok: true }>("DELETE", `/v1/sessions/${encodeURIComponent(sessionId)}`),
   messages: (sessionId: string, limit = 200) =>
     request<{ messages: Message[] }>(
       "GET",
       `/v1/sessions/${encodeURIComponent(sessionId)}/messages?limit=${limit}`,
     ),
-  startMessage: (sessionId: string, content: string, selection?: ModelSelection) =>
+  mediaUrl: (uri: string) =>
+    uri.startsWith("media:") ? `/v1/media/${encodeURIComponent(uri.slice(6))}` : uri,
+  startMessage: (
+    sessionId: string,
+    content: string,
+    selection?: ModelSelection,
+    files?: Array<{ uri: string; name?: string; source?: { type: "inline" } | { type: "uri"; uri: string } }>,
+  ) =>
     request<{ turn: Turn; streamUrl: string }>(
       "POST",
       `/v1/sessions/${encodeURIComponent(sessionId)}/messages`,
       {
         content,
+        ...(files && files.length > 0 ? { files } : {}),
         ...(selection
           ? {
               providerId: selection.providerId,
@@ -385,12 +452,22 @@ export const api = {
     request<ContextInfo>("GET", `/v1/sessions/${encodeURIComponent(sessionId)}/context`),
   approvals: (status?: string) =>
     request<{ approvals: Approval[] }>("GET", `/v1/approvals${status ? `?status=${status}` : ""}`),
-  decideApproval: (id: string, decision: "approve" | "reject", reason?: string) =>
+  decideApproval: (id: string, decision: "approve" | "reject", options?: { reason?: string; scope?: ApprovalScope }) =>
     request<{ approval: Approval }>(
       "POST",
       `/v1/approvals/${encodeURIComponent(id)}/decision`,
-      { decision, ...(reason ? { reason } : {}) },
+      {
+        decision,
+        ...(options?.scope ? { scope: options.scope } : {}),
+        ...(options?.reason ? { reason: options.reason } : {}),
+      },
     ),
+  approvalConfig: () => request<{ config: ApprovalConfig }>("GET", "/v1/approval-config"),
+  setApprovalConfig: (input: Partial<ApprovalConfig>) =>
+    request<{ config: ApprovalConfig }>("PATCH", "/v1/approval-config", input),
+  approvalGrants: () => request<{ grants: ApprovalGrant[] }>("GET", "/v1/approval-grants"),
+  deleteApprovalGrant: (id: string) =>
+    request<{ ok: true }>("DELETE", `/v1/approval-grants/${encodeURIComponent(id)}`),
   rules: () => request<{ rules: Rule[] }>("GET", "/v1/rules"),
   createRule: (input: { action: string; resource: string; effect: string; note?: string }) =>
     request<{ rule: Rule }>("POST", "/v1/rules", input),
@@ -398,32 +475,20 @@ export const api = {
     request<{ rule: Rule }>("PATCH", `/v1/rules/${encodeURIComponent(id)}`, input),
   deleteRule: (id: string) =>
     request<{ ok: true }>("DELETE", `/v1/rules/${encodeURIComponent(id)}`),
-  workspaces: () => request<{ workspaces: Workspace[] }>("GET", "/v1/workspaces"),
-  addWorkspace: (input: { path: string; label?: string; access: "read" | "write" }) =>
-    request<{ workspace: Workspace }>("POST", "/v1/workspaces", input),
-  removeWorkspace: (id: string) =>
-    request<{ ok: true }>("DELETE", `/v1/workspaces/${encodeURIComponent(id)}`),
-  workspaceTree: (id: string, path?: string) =>
-    request<{ path: string; entries: Array<{ name: string; path: string; type: string; size: number }> }>(
+  checkpoints: (limit = 100, sessionId?: string) =>
+    request<{ checkpoints: Checkpoint[] }>(
       "GET",
-      `/v1/workspaces/${encodeURIComponent(id)}/tree${path ? `?path=${encodeURIComponent(path)}` : ""}`,
+      `/v1/checkpoints?limit=${limit}${sessionId ? `&sessionId=${encodeURIComponent(sessionId)}` : ""}`,
     ),
-  workspaceFile: (id: string, path: string) =>
-    request<{ path: string; size: number; content: string; sha256: string }>(
-      "GET",
-      `/v1/workspaces/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
-    ),
-  workspacePaths: (id: string) =>
-    request<{ root: string; paths: string[] }>(
-      "GET",
-      `/v1/workspaces/${encodeURIComponent(id)}/tree?recursive=1`,
-    ),
-  journal: (limit = 100) => request<{ entries: JournalEntry[] }>("GET", `/v1/journal?limit=${limit}`),
-  undoJournal: (batchId?: string) =>
-    request<{ batchId: string; undone: number; skipped: number; errors: string[] }>(
+  checkpoint: (id: string) =>
+    request<{ checkpoint: Checkpoint }>("GET", `/v1/checkpoints/${encodeURIComponent(id)}`),
+  checkpointDiff: (id: string) =>
+    request<{ diff: CheckpointDiff }>("GET", `/v1/checkpoints/${encodeURIComponent(id)}/diff`),
+  restoreCheckpoint: (id: string, input: { filePath?: string; safe?: boolean } = {}) =>
+    request<{ result: CheckpointRestoreResult }>(
       "POST",
-      "/v1/journal/undo",
-      batchId ? { batchId } : {},
+      `/v1/checkpoints/${encodeURIComponent(id)}/restore`,
+      input,
     ),
   providers: () => request<{ providers: ProviderInfo[] }>("GET", "/v1/providers"),
   connectProvider: (id: string, apiKey?: string, label?: string) =>
@@ -612,7 +677,7 @@ export function subscribeEvents(
     source.onerror = () => {
       onState("reconnecting")
       source?.close()
-      if (!stopped) retry = setTimeout(connect, 1500)
+      if (!stopped) retry = setTimeout(connect, 1000)
     }
     source.onmessage = (message) => {
       try {

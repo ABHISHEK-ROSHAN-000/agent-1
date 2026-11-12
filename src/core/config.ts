@@ -5,7 +5,7 @@ import { VERSION } from "./version"
 
 export const PRODUCT_NAME = "Agent-1"
 export const AUTH_USERNAME = "agent-1"
-export const PHASE = "Phase 7 — memory"
+export const PHASE = "Phase 8F - Hardening and final gate"
 
 export interface AppConfig {
   readonly dataDir: string
@@ -18,6 +18,7 @@ export interface AppConfig {
   readonly statePath: string
   readonly lockPath: string
   readonly logsDir: string
+  readonly checkpointsDir: string
   readonly logPath: string
   readonly webRoot: string
   readonly host: string
@@ -37,7 +38,14 @@ export function defaultDataDir(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 export function ensureDataDirs(config: AppConfig): void {
-  for (const dir of [config.dataDir, config.backupDir, config.secretsDir, config.stateDir, config.logsDir]) {
+  for (const dir of [
+    config.dataDir,
+    config.backupDir,
+    config.secretsDir,
+    config.stateDir,
+    config.logsDir,
+    config.checkpointsDir,
+  ]) {
     mkdirSync(dir, { recursive: true })
   }
 }
@@ -76,6 +84,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     lockPath: path.join(dataDir, "state", "service.lock"),
     logsDir: path.join(dataDir, "logs"),
     logPath: path.join(dataDir, "logs", "service.log"),
+    checkpointsDir: path.join(dataDir, "checkpoints"),
     webRoot: env.AGENT1_WEB_ROOT
       ? path.resolve(env.AGENT1_WEB_ROOT)
       : path.resolve(import.meta.dir, "..", "..", "web", "dist"),

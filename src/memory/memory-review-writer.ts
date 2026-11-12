@@ -21,7 +21,7 @@ export interface ReviewApplyResult {
 }
 
 /**
- * Applies a background review's memory operations under the Hermes write policy:
+ * Applies a background review's memory operations under the memory write policy:
  * additions are written directly; destructive edits are staged for approval.
  */
 export class MemoryReviewWriter {

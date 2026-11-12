@@ -8,8 +8,7 @@ import { Spinner } from "./ui"
 const menuItems: Array<{ href: string; icon: IconName; label: string }> = [
   { href: "/approvals", icon: "approvals", label: "Approvals" },
   { href: "/rules", icon: "rules", label: "Rules" },
-  { href: "/workspaces", icon: "folder", label: "Workspaces" },
-  { href: "/journal", icon: "journal", label: "Journal" },
+  { href: "/checkpoints", icon: "journal", label: "Checkpoints" },
   { href: "/memory", icon: "memory", label: "Memory" },
   { href: "/providers", icon: "key", label: "Providers" },
   { href: "/models", icon: "model", label: "Models" },
@@ -46,7 +45,6 @@ function Shell(props: { children?: unknown; eventSeq?: number }) {
   const approvalsQuery = useQuery(() => ({
     queryKey: ["approvals"],
     queryFn: () => api.approvals("pending"),
-    refetchInterval: 5_000,
   }))
 
   const activeSessionId = () => {
@@ -60,8 +58,8 @@ function Shell(props: { children?: unknown; eventSeq?: number }) {
         if (
           event.type.startsWith("turn.") ||
           event.type.startsWith("approval.") ||
-          event.type.startsWith("journal.") ||
-          event.type === "session.created"
+          event.type.startsWith("checkpoint.") ||
+          event.type.startsWith("session.")
         ) {
           void queryClient.invalidateQueries()
         }

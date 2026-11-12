@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Database as BunDatabase } from "bun:sqlite"
-import { mkdtemp, readdir, rm } from "node:fs/promises"
+import { ManagedRuntime } from "effect"
+import { SqliteClient, SqliteMigrator } from "@effect/sql-sqlite-bun"
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { Database } from "./database"
 import { backupIfNeeded, schemaVersion } from "./backup"
+import { initialMigration } from "./migrations"
 import { resetDatabaseFiles } from "./reset"
 
 const tempDirs: string[] = []
@@ -34,7 +37,7 @@ function tableNames(dbPath: string): string[] {
 }
 
 describe("Database", () => {
-  test("initializes the fresh v1 schema and persists sessions, messages, and FTS5", async () => {
+  test("initializes the current schema and persists sessions, messages, and FTS5", async () => {
     const dir = await tempDir()
     const dbPath = path.join(dir, "agent-1.db")
     const backupDir = path.join(dir, "backups")
@@ -72,21 +75,25 @@ describe("Database", () => {
       await db.close()
     }
 
-    expect(schemaVersion(dbPath)).toBe(1)
+    expect(schemaVersion(dbPath)).toBe(5)
 
     const tables = tableNames(dbPath)
     for (const table of [
       "sessions",
       "messages",
       "turns",
+      "checkpoints",
+      "agent_writes",
       "memory_entries",
       "memory_pending",
       "memory_history",
       "memory_review_runs",
+      "session_inbox",
       "schema_migrations",
     ]) {
       expect(tables).toContain(table)
     }
+    expect(tables).not.toContain("journal")
 
     const raw = new BunDatabase(dbPath, { readonly: true })
     try {
@@ -113,6 +120,44 @@ describe("Database", () => {
     }
   })
 
+  test("migrates a fresh v1 baseline to the latest schema with a backup", async () => {
+    const dir = await tempDir()
+    const dbPath = path.join(dir, "agent-1.db")
+    const backupDir = path.join(dir, "backups")
+    const runtime = ManagedRuntime.make(SqliteClient.layer({ filename: dbPath }))
+    try {
+      await runtime.runPromise(
+        SqliteMigrator.run({
+          loader: SqliteMigrator.fromRecord({ "0001_initial": initialMigration }),
+          table: "schema_migrations",
+        }),
+      )
+    } finally {
+      await runtime.dispose()
+    }
+    expect(schemaVersion(dbPath)).toBe(1)
+    const raw = new BunDatabase(dbPath)
+    try {
+      raw.exec(`
+        INSERT INTO sessions (id, title, created_at, updated_at)
+        VALUES ('ses_v1', 'Legacy session', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+      `)
+    } finally {
+      raw.close()
+    }
+
+    const upgraded = await Database.open({ dbPath, backupDir })
+    try {
+      expect(await upgraded.getSession("ses_v1")).not.toBeNull()
+    } finally {
+      await upgraded.close()
+    }
+    expect(schemaVersion(dbPath)).toBe(5)
+    expect(tableNames(dbPath)).toContain("session_inbox")
+    const backups = await readdir(backupDir)
+    expect(backups.some((name) => name.endsWith(".db"))).toBe(true)
+  })
+
   test("backs up a database before a simulated newer migration", async () => {
     const dir = await tempDir()
     const dbPath = path.join(dir, "agent-1.db")
@@ -120,25 +165,29 @@ describe("Database", () => {
     const db = await Database.open({ dbPath, backupDir })
     await db.close()
 
-    const backup = backupIfNeeded(dbPath, backupDir, 2)
+    const backup = backupIfNeeded(dbPath, backupDir, 6)
     expect(backup).toBeDefined()
     const files = await readdir(backupDir)
     expect(files.some((name) => name.endsWith(".db"))).toBe(true)
   })
 
-  test("development reset removes the database and backups, then initializes v1", async () => {
+  test("development reset removes the database and backups, then initializes the current schema", async () => {
     const dir = await tempDir()
     const dbPath = path.join(dir, "agent-1.db")
     const backupDir = path.join(dir, "backups")
+    const checkpointsDir = path.join(dir, "checkpoints")
     const db = await Database.open({ dbPath, backupDir })
     await db.createSession("Reset me")
     await db.close()
+    await mkdir(checkpointsDir, { recursive: true })
+    await writeFile(path.join(checkpointsDir, "sentinel"), "remove me\n")
 
-    expect(backupIfNeeded(dbPath, backupDir, 2)).toBeDefined()
+    expect(backupIfNeeded(dbPath, backupDir, 6)).toBeDefined()
 
-    const removed = resetDatabaseFiles({ dbPath, backupDir })
+    const removed = resetDatabaseFiles({ dbPath, backupDir, checkpointsDir })
     expect(removed).toContain(dbPath)
     expect(removed).toContain(backupDir)
+    expect(removed).toContain(checkpointsDir)
     expect(schemaVersion(dbPath)).toBe(0)
     expect(await readdir(backupDir).catch(() => [])).toEqual([])
 
@@ -148,6 +197,6 @@ describe("Database", () => {
     } finally {
       await fresh.close()
     }
-    expect(schemaVersion(dbPath)).toBe(1)
+    expect(schemaVersion(dbPath)).toBe(5)
   })
 })

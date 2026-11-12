@@ -6,12 +6,16 @@ import { mkdirSync } from "node:fs"
 import path from "node:path"
 import type {
   Approval,
+  ApprovalGrant,
+  ApprovalScope,
   ApprovalStatus,
   AuditEntry,
+  Checkpoint,
   EventRecord,
-  JournalEntry,
-  JournalState,
+  InboxDelivery,
+  InboxItem,
   Message,
+  StoredFile,
   MessageRole,
   PermissionRule,
   RuleEffect,
@@ -20,8 +24,6 @@ import type {
   Turn,
   TurnErrorDetails,
   TurnStatus,
-  Workspace,
-  WorkspaceAccess,
 } from "../shared/types"
 import { newId } from "../core/ids"
 import { nowIso } from "../core/time"
@@ -132,7 +134,21 @@ interface MessageRow {
   readonly role: "user" | "assistant" | "tool" | "system"
   readonly text: string
   readonly content_json: string
+  readonly files_json: string | null
   readonly created_at: string
+}
+
+interface BlobRow {
+  readonly hash: string
+  readonly mime: string
+  readonly bytes: number
+  readonly width: number | null
+  readonly height: number | null
+  readonly data: Uint8Array
+}
+
+interface BlobRefRow {
+  readonly hash: string
 }
 
 interface TurnRow {
@@ -154,7 +170,7 @@ interface TurnRow {
   readonly completed_at: string | null
 }
 
-interface CheckpointRow {
+interface TurnStateCheckpointRow {
   readonly step: number
   readonly state_json: string
   readonly created_at: string
@@ -179,41 +195,44 @@ interface ApprovalRow {
   readonly session_id: string
   readonly tool_call_id: string
   readonly tool_name: string
+  readonly action: string
+  readonly resource: string
+  readonly pattern_key: string
   readonly arguments_json: string
   readonly arguments_hash: string
+  readonly display_command: string | null
   readonly status: ApprovalStatus
   readonly created_at: string
   readonly expires_at: string
   readonly decided_at: string | null
   readonly decided_by: string | null
   readonly reason: string | null
+  readonly scope: ApprovalScope | null
 }
 
-interface WorkspaceRow {
+interface ApprovalGrantRow {
   readonly id: string
-  readonly label: string
-  readonly path: string
-  readonly access: WorkspaceAccess
-  readonly created_at: string
-  readonly updated_at: string
-}
-
-interface JournalRow {
-  readonly id: string
-  readonly batch_id: string
-  readonly turn_id: string | null
   readonly session_id: string | null
-  readonly tool_name: string
-  readonly operation: string
-  readonly source: string | null
-  readonly target: string | null
-  readonly source_hash: string | null
-  readonly target_hash: string | null
-  readonly state: JournalState
-  readonly undo_json: string
-  readonly error: string | null
+  readonly scope: "session" | "always"
+  readonly action: string
+  readonly resource: string
+  readonly pattern_key: string
   readonly created_at: string
-  readonly updated_at: string
+  readonly expires_at: string | null
+}
+
+interface CheckpointRow {
+  readonly id: string
+  readonly session_id: string | null
+  readonly turn_id: string | null
+  readonly root_path: string
+  readonly root_hash: string
+  readonly commit_sha: string
+  readonly reason: string
+  readonly files_changed: number
+  readonly insertions: number
+  readonly deletions: number
+  readonly created_at: string
 }
 
 interface AuditRow {
@@ -304,6 +323,16 @@ interface EventRow {
   readonly created_at: string
 }
 
+interface InboxRow {
+  readonly id: string
+  readonly session_id: string
+  readonly type: string
+  readonly payload_json: string
+  readonly delivery: InboxDelivery
+  readonly enqueued_seq: number
+  readonly created_at: string
+}
+
 interface SettingRow {
   readonly value: string
 }
@@ -330,17 +359,66 @@ export interface NewMessage {
   readonly role: MessageRole
   readonly text: string
   readonly content: unknown
+  readonly files?: readonly StoredFile[]
+}
+
+export interface BlobInput {
+  readonly hash: string
+  readonly mime: string
+  readonly bytes: number
+  readonly width?: number | null
+  readonly height?: number | null
+  readonly data: Uint8Array
+}
+
+export interface StoredBlob extends BlobInput {
+  readonly data: Uint8Array
 }
 
 export interface TurnStepInput {
   readonly step: number
   readonly sessionId: string
+  readonly turnId?: string
   readonly messages?: readonly NewMessage[]
   readonly checkpoint: unknown
   readonly usage?: TokenUsage
   readonly status?: TurnStatus
   readonly error?: string | null
   readonly errorDetails?: TurnErrorDetails | null
+}
+
+export interface InboxAdmissionResult {
+  readonly item: InboxItem
+  readonly pending: boolean
+  readonly event: EventRecord | null
+}
+
+export interface InboxStepResult {
+  readonly messages: Message[]
+  readonly delivered: InboxItem[]
+  readonly events: EventRecord[]
+  readonly status: TurnStatus
+}
+
+export class InboxConflictError extends Error {
+  readonly code = "inbox_conflict"
+
+  constructor(message = "Inbox item conflicts with an existing message") {
+    super(message)
+    this.name = "InboxConflictError"
+  }
+}
+
+export interface InboxMutationResult {
+  readonly item: InboxItem | null
+  readonly event: EventRecord | null
+}
+
+export interface CreatedTurnFromInbox {
+  readonly turn: Turn
+  readonly userMessage: Message
+  readonly item: InboxItem
+  readonly event: EventRecord
 }
 
 export interface IdempotencyRecord {
@@ -480,12 +558,45 @@ function rowToCatalogModel(row: ProviderModelRow): import("../shared/types").Cat
   }
 }
 
+function rowToInbox(row: InboxRow): InboxItem {
+  if (row.type !== "user") throw new Error(`Unsupported inbox item type: ${row.type}`)
+  let payload: { text?: unknown; metadata?: unknown; files?: unknown } = {}
+  try {
+    payload = JSON.parse(row.payload_json) as { text?: unknown; metadata?: unknown; files?: unknown }
+  } catch {
+    payload = {}
+  }
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    type: "user",
+    delivery: row.delivery,
+    payload: {
+      text: typeof payload.text === "string" ? payload.text : "",
+      ...(Array.isArray(payload.files) ? { files: payload.files as StoredFile[] } : {}),
+      ...(payload.metadata && typeof payload.metadata === "object" && !Array.isArray(payload.metadata)
+        ? { metadata: payload.metadata as Record<string, unknown> }
+        : {}),
+    },
+    createdAt: row.created_at,
+  }
+}
+
 function rowToMessage(row: MessageRow): import("../shared/types").Message {
   let content: unknown = {}
   try {
     content = JSON.parse(row.content_json) as unknown
   } catch {
     content = {}
+  }
+  let files: StoredFile[] | undefined
+  if (row.files_json) {
+    try {
+      const parsed = JSON.parse(row.files_json) as unknown
+      if (Array.isArray(parsed)) files = parsed as StoredFile[]
+    } catch {
+      files = undefined
+    }
   }
   return {
     id: row.id,
@@ -495,6 +606,7 @@ function rowToMessage(row: MessageRow): import("../shared/types").Message {
     role: row.role,
     text: row.text,
     content,
+    ...(files && files.length > 0 ? { files } : {}),
     createdAt: row.created_at,
   }
 }
@@ -568,65 +680,68 @@ function rowToApproval(row: ApprovalRow): Approval {
     sessionId: row.session_id,
     toolCallId: row.tool_call_id,
     toolName: row.tool_name,
+    action: row.action,
+    resource: row.resource,
+    patternKey: row.pattern_key,
     arguments: args,
     argumentsHash: row.arguments_hash,
+    displayCommand: row.display_command,
     status: row.status,
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     decidedAt: row.decided_at,
     decidedBy: row.decided_by,
     reason: row.reason,
+    scope: row.scope,
   }
 }
 
-function rowToWorkspace(row: WorkspaceRow): Workspace {
+function rowToApprovalGrant(row: ApprovalGrantRow): ApprovalGrant {
   return {
     id: row.id,
-    label: row.label,
-    path: row.path,
-    access: row.access,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }
-}
-
-function rowToJournal(row: JournalRow): JournalEntry {
-  let undo: unknown = {}
-  try {
-    undo = JSON.parse(row.undo_json) as unknown
-  } catch {
-    undo = {}
-  }
-  return {
-    id: row.id,
-    batchId: row.batch_id,
-    turnId: row.turn_id,
     sessionId: row.session_id,
-    toolName: row.tool_name,
-    operation: row.operation,
-    source: row.source,
-    target: row.target,
-    sourceHash: row.source_hash,
-    targetHash: row.target_hash,
-    state: row.state,
-    undo,
-    error: row.error,
+    scope: row.scope,
+    action: row.action,
+    resource: row.resource,
+    patternKey: row.pattern_key,
     createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    expiresAt: row.expires_at,
   }
 }
 
-export interface NewJournalEntry {
-  readonly batchId: string
-  readonly turnId?: string | null
+function rowToCheckpoint(row: CheckpointRow): Checkpoint {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    turnId: row.turn_id,
+    rootPath: row.root_path,
+    rootHash: row.root_hash,
+    commit: row.commit_sha,
+    reason: row.reason,
+    filesChanged: row.files_changed,
+    insertions: row.insertions,
+    deletions: row.deletions,
+    createdAt: row.created_at,
+  }
+}
+
+export interface NewCheckpoint {
   readonly sessionId?: string | null
-  readonly toolName: string
-  readonly operation: string
-  readonly source?: string | null
-  readonly target?: string | null
-  readonly sourceHash?: string | null
-  readonly targetHash?: string | null
-  readonly undo?: unknown
+  readonly turnId?: string | null
+  readonly rootPath: string
+  readonly rootHash: string
+  readonly commit: string
+  readonly reason: string
+  readonly filesChanged?: number
+  readonly insertions?: number
+  readonly deletions?: number
+}
+
+export interface AgentWriteRecord {
+  readonly rootHash: string
+  readonly path: string
+  readonly sha256: string
+  readonly updatedAt: string
 }
 
 function rowToAudit(row: AuditRow): AuditEntry {
@@ -761,9 +876,22 @@ export interface NewApproval {
   readonly sessionId: string
   readonly toolCallId: string
   readonly toolName: string
+  readonly action: string
+  readonly resource: string
+  readonly patternKey: string
   readonly arguments: unknown
   readonly argumentsHash: string
+  readonly displayCommand?: string | null
   readonly expiresAt: string
+}
+
+export interface NewApprovalGrant {
+  readonly sessionId?: string | null
+  readonly scope: "session" | "always"
+  readonly action: string
+  readonly resource: string
+  readonly patternKey: string
+  readonly expiresAt?: string | null
 }
 
 function rowToEvent(row: EventRow): EventRecord {
@@ -924,6 +1052,716 @@ export class Database {
         const row = rows[0]
         return row ? rowToSession(row) : null
       }),
+    )
+  }
+
+  async renameSession(id: string, title: string): Promise<{ session: Session; event: EventRecord } | null> {
+    const now = nowIso()
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        return yield* sql.withTransaction(
+          Effect.gen(function* () {
+            const changed = yield* sql<{ id: string }>`
+              UPDATE sessions SET title = ${title}, updated_at = ${now}
+              WHERE id = ${id}
+              RETURNING id
+            `
+            if (changed.length === 0) return null
+            const session = yield* sql<SessionRow>`
+              SELECT id, title, created_at, updated_at, provider_id, model_id, reasoning_effort,
+                     summary, summary_through_seq, memory_snapshot_json, memory_snapshot_at
+              FROM sessions WHERE id = ${id}
+            `
+            const inserted = yield* sql<{ seq: number }>`
+              INSERT INTO events (type, session_id, payload, created_at)
+              VALUES ('session.renamed', ${id}, ${JSON.stringify({ sessionId: id, title })}, ${now})
+              RETURNING seq
+            `
+            const seq = inserted[0]?.seq
+            const row = session[0]
+            if (seq === undefined || !row) throw new Error("Failed to rename session")
+            return {
+              session: rowToSession(row),
+              event: {
+                seq,
+                type: "session.renamed",
+                sessionId: id,
+                payload: { sessionId: id, title },
+                createdAt: now,
+              } satisfies EventRecord,
+            }
+          }),
+        )
+      }),
+    )
+  }
+
+  async deleteSession(id: string): Promise<EventRecord | null> {
+    const now = nowIso()
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        return yield* sql.withTransaction(
+          Effect.gen(function* () {
+            const existing = yield* sql<{ id: string }>`
+              SELECT id FROM sessions WHERE id = ${id}
+            `
+            if (existing.length === 0) return null
+
+            yield* sql`
+              DELETE FROM turn_checkpoints
+              WHERE turn_id IN (SELECT id FROM turns WHERE session_id = ${id})
+            `
+            yield* sql`DELETE FROM approval_grants WHERE session_id = ${id}`
+            yield* sql`DELETE FROM approvals WHERE session_id = ${id}`
+            yield* sql`DELETE FROM memory_pending WHERE session_id = ${id}`
+            yield* sql`DELETE FROM memory_review_runs WHERE session_id = ${id}`
+            yield* sql`DELETE FROM session_inbox WHERE session_id = ${id}`
+            const released = yield* sql<BlobRefRow>`
+              DELETE FROM blob_refs WHERE session_id = ${id} RETURNING hash
+            `
+            for (const ref of released) {
+              yield* sql`
+                DELETE FROM blobs
+                WHERE hash = ${ref.hash}
+                  AND NOT EXISTS (SELECT 1 FROM blob_refs WHERE hash = ${ref.hash})
+              `
+            }
+            yield* sql`DELETE FROM messages WHERE session_id = ${id}`
+            yield* sql`DELETE FROM turns WHERE session_id = ${id}`
+            yield* sql`DELETE FROM checkpoints WHERE session_id = ${id}`
+            yield* sql`DELETE FROM events WHERE session_id = ${id}`
+            yield* sql`DELETE FROM sessions WHERE id = ${id}`
+
+            const inserted = yield* sql<{ seq: number }>`
+              INSERT INTO events (type, session_id, payload, created_at)
+              VALUES ('session.deleted', ${id}, ${JSON.stringify({ sessionId: id })}, ${now})
+              RETURNING seq
+            `
+            const seq = inserted[0]?.seq
+            if (seq === undefined) throw new Error("Failed to append session.deleted event")
+            return {
+              seq,
+              type: "session.deleted",
+              sessionId: id,
+              payload: { sessionId: id },
+              createdAt: now,
+            } satisfies EventRecord
+          }),
+        )
+      }),
+    )
+  }
+
+  // ---------------------------------------------------------------------------
+  // Attachments / blobs
+
+  async saveBlobs(blobs: readonly BlobInput[]): Promise<void> {
+    if (blobs.length === 0) return
+    await this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          for (const blob of blobs) {
+            yield* sql`
+              INSERT INTO blobs (hash, mime, bytes, width, height, data)
+              VALUES (${blob.hash}, ${blob.mime}, ${blob.bytes}, ${blob.width ?? null},
+                      ${blob.height ?? null}, ${blob.data})
+              ON CONFLICT(hash) DO NOTHING
+            `
+          }
+        }),
+      ),
+    )
+  }
+
+  async getBlob(hash: string): Promise<StoredBlob | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<BlobRow>`
+          SELECT hash, mime, bytes, width, height, data
+          FROM blobs
+          WHERE hash = ${hash}
+        `
+        const row = rows[0]
+        if (!row) return null
+        return {
+          hash: row.hash,
+          mime: row.mime,
+          bytes: row.bytes,
+          width: row.width,
+          height: row.height,
+          data: row.data instanceof Uint8Array ? row.data : new Uint8Array(row.data),
+        }
+      }),
+    )
+  }
+
+  async getReferencedBlob(hash: string): Promise<StoredBlob | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<BlobRow>`
+          SELECT b.hash, b.mime, b.bytes, b.width, b.height, b.data
+          FROM blobs b
+          WHERE b.hash = ${hash}
+            AND EXISTS (SELECT 1 FROM blob_refs WHERE blob_refs.hash = b.hash)
+        `
+        const row = rows[0]
+        if (!row) return null
+        return {
+          hash: row.hash,
+          mime: row.mime,
+          bytes: row.bytes,
+          width: row.width,
+          height: row.height,
+          data: row.data instanceof Uint8Array ? row.data : new Uint8Array(row.data),
+        }
+      }),
+    )
+  }
+
+  async getBlobs(hashes: readonly string[]): Promise<Map<string, StoredBlob>> {
+    if (hashes.length === 0) return new Map()
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<BlobRow>`
+          SELECT hash, mime, bytes, width, height, data
+          FROM blobs
+          WHERE hash IN ${sql.in(hashes)}
+        `
+        return new Map(
+          rows.map((row) => [
+            row.hash,
+            {
+              hash: row.hash,
+              mime: row.mime,
+              bytes: row.bytes,
+              width: row.width,
+              height: row.height,
+              data: row.data instanceof Uint8Array ? row.data : new Uint8Array(row.data),
+            },
+          ]),
+        )
+      }),
+    )
+  }
+
+  async recordBlobRefs(
+    sessionId: string,
+    messageId: string,
+    seq: number,
+    hashes: readonly string[],
+  ): Promise<void> {
+    if (hashes.length === 0) return
+    const unique = [...new Set(hashes)]
+    await this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          for (const hash of unique) {
+            yield* sql`
+              INSERT INTO blob_refs (session_id, message_id, hash, seq)
+              VALUES (${sessionId}, ${messageId}, ${hash}, ${seq})
+              ON CONFLICT(session_id, message_id, hash) DO UPDATE SET seq = excluded.seq
+            `
+          }
+        }),
+      ),
+    )
+  }
+
+  async releaseBlobRefs(sessionId: string, messageId: string): Promise<void> {
+    await this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          const released = yield* sql<BlobRefRow>`
+            DELETE FROM blob_refs
+            WHERE session_id = ${sessionId} AND message_id = ${messageId}
+            RETURNING hash
+          `
+          for (const row of released) {
+            yield* sql`
+              DELETE FROM blobs
+              WHERE hash = ${row.hash}
+                AND NOT EXISTS (SELECT 1 FROM blob_refs WHERE hash = ${row.hash})
+            `
+          }
+        }),
+      ),
+    )
+  }
+
+  async pruneUnreferencedBlobs(): Promise<number> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ hash: string }>`
+          DELETE FROM blobs
+          WHERE NOT EXISTS (SELECT 1 FROM blob_refs WHERE blob_refs.hash = blobs.hash)
+          RETURNING hash
+        `
+        return rows.length
+      }),
+    )
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session inbox / queue
+
+  async admitInbox(input: {
+    id: string
+    sessionId: string
+    text: string
+    delivery: InboxDelivery
+    files?: readonly StoredFile[]
+    metadata?: Readonly<Record<string, unknown>>
+  }): Promise<InboxAdmissionResult> {
+    const now = nowIso()
+    const payload = {
+      text: input.text,
+      ...(input.files && input.files.length > 0 ? { files: input.files } : {}),
+      ...(input.metadata ? { metadata: input.metadata } : {}),
+    }
+    return this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          const pending = yield* sql<InboxRow>`
+            SELECT id, session_id, type, payload_json, delivery, enqueued_seq, created_at
+            FROM session_inbox
+            WHERE id = ${input.id}
+          `
+          const existing = pending[0]
+          if (existing) {
+            if (existing.session_id !== input.sessionId || existing.type !== "user") {
+              throw new InboxConflictError()
+            }
+            return { item: rowToInbox(existing), pending: true, event: null }
+          }
+
+          const messageRows = yield* sql<MessageRow>`
+            SELECT id, seq, session_id, turn_id, role, text, content_json, files_json, created_at
+            FROM messages
+            WHERE id = ${input.id}
+          `
+          const message = messageRows[0]
+          if (message) {
+            if (message.session_id !== input.sessionId || message.role !== "user") {
+              throw new InboxConflictError()
+            }
+            return {
+              item: {
+                id: input.id,
+                sessionId: input.sessionId,
+                type: "user",
+                delivery: input.delivery,
+                payload: {
+                  text: message.text,
+                  ...(message.files_json
+                    ? { files: JSON.parse(message.files_json) as StoredFile[] }
+                    : {}),
+                },
+                createdAt: message.created_at,
+              },
+              pending: false,
+              event: null,
+            }
+          }
+
+          const seqRows = yield* sql<{ seq: number }>`
+            SELECT COALESCE(MAX(enqueued_seq), 0) + 1 AS seq
+            FROM session_inbox
+            WHERE session_id = ${input.sessionId}
+          `
+          const enqueuedSeq = seqRows[0]?.seq ?? 1
+          yield* sql`
+            INSERT INTO session_inbox
+              (id, session_id, type, payload_json, delivery, enqueued_seq, created_at)
+            VALUES
+              (${input.id}, ${input.sessionId}, 'user', ${JSON.stringify(payload)}, ${input.delivery},
+               ${enqueuedSeq}, ${now})
+          `
+          for (const file of input.files ?? []) {
+            yield* sql`
+              INSERT INTO blob_refs (session_id, message_id, hash, seq)
+              VALUES (${input.sessionId}, ${input.id}, ${file.uri.slice("media:".length)}, ${enqueuedSeq})
+              ON CONFLICT(session_id, message_id, hash) DO UPDATE SET seq = excluded.seq
+            `
+          }
+          const item: InboxItem = {
+            id: input.id,
+            sessionId: input.sessionId,
+            type: "user",
+            delivery: input.delivery,
+            payload,
+            createdAt: now,
+          }
+          const eventRows = yield* sql<{ seq: number }>`
+            INSERT INTO events (type, session_id, payload, created_at)
+            VALUES ('session.inbox.enqueued', ${input.sessionId},
+                    ${JSON.stringify({ inboxId: input.id, sessionId: input.sessionId, item })}, ${now})
+            RETURNING seq
+          `
+          const seq = eventRows[0]?.seq
+          if (seq === undefined) throw new Error("Failed to append inbox event")
+          return {
+            item,
+            pending: true,
+            event: {
+              seq,
+              type: "session.inbox.enqueued",
+              sessionId: input.sessionId,
+              payload: { inboxId: input.id, sessionId: input.sessionId, item },
+              createdAt: now,
+            },
+          }
+        }),
+      ),
+    )
+  }
+
+  async listInbox(sessionId: string): Promise<InboxItem[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<InboxRow>`
+          SELECT id, session_id, type, payload_json, delivery, enqueued_seq, created_at
+          FROM session_inbox
+          WHERE session_id = ${sessionId}
+          ORDER BY enqueued_seq ASC
+        `
+        return rows.map(rowToInbox)
+      }),
+    )
+  }
+
+  async findInbox(sessionId: string, id: string): Promise<InboxItem | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<InboxRow>`
+          SELECT id, session_id, type, payload_json, delivery, enqueued_seq, created_at
+          FROM session_inbox
+          WHERE session_id = ${sessionId} AND id = ${id}
+        `
+        return rows[0] ? rowToInbox(rows[0]) : null
+      }),
+    )
+  }
+
+  async cancelInbox(sessionId: string, id: string): Promise<InboxMutationResult> {
+    const now = nowIso()
+    return this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<InboxRow>`
+            DELETE FROM session_inbox
+            WHERE session_id = ${sessionId} AND id = ${id}
+            RETURNING id, session_id, type, payload_json, delivery, enqueued_seq, created_at
+          `
+          const row = rows[0]
+          if (!row) return { item: null, event: null }
+          const released = yield* sql<BlobRefRow>`
+            DELETE FROM blob_refs
+            WHERE session_id = ${sessionId} AND message_id = ${id}
+            RETURNING hash
+          `
+          for (const ref of released) {
+            yield* sql`
+              DELETE FROM blobs
+              WHERE hash = ${ref.hash}
+                AND NOT EXISTS (SELECT 1 FROM blob_refs WHERE hash = ${ref.hash})
+            `
+          }
+          const eventRows = yield* sql<{ seq: number }>`
+            INSERT INTO events (type, session_id, payload, created_at)
+            VALUES ('session.inbox.cancelled', ${sessionId},
+                    ${JSON.stringify({ inboxId: id, sessionId })}, ${now})
+            RETURNING seq
+          `
+          const seq = eventRows[0]?.seq
+          if (seq === undefined) throw new Error("Failed to append inbox cancellation")
+          return {
+            item: rowToInbox(row),
+            event: {
+              seq,
+              type: "session.inbox.cancelled",
+              sessionId,
+              payload: { inboxId: id, sessionId },
+              createdAt: now,
+            },
+          }
+        }),
+      ),
+    )
+  }
+
+  async setInboxDelivery(
+    sessionId: string,
+    id: string,
+    delivery: InboxDelivery,
+  ): Promise<InboxMutationResult> {
+    const now = nowIso()
+    return this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<InboxRow>`
+            SELECT id, session_id, type, payload_json, delivery, enqueued_seq, created_at
+            FROM session_inbox
+            WHERE session_id = ${sessionId} AND id = ${id}
+          `
+          const row = rows[0]
+          if (!row) return { item: null, event: null }
+          if (row.delivery === delivery) return { item: rowToInbox(row), event: null }
+          yield* sql`
+            UPDATE session_inbox SET delivery = ${delivery}
+            WHERE session_id = ${sessionId} AND id = ${id}
+          `
+          const eventRows = yield* sql<{ seq: number }>`
+            INSERT INTO events (type, session_id, payload, created_at)
+            VALUES ('session.inbox.delivery.changed', ${sessionId},
+                    ${JSON.stringify({ inboxId: id, sessionId, delivery })}, ${now})
+            RETURNING seq
+          `
+          const seq = eventRows[0]?.seq
+          if (seq === undefined) throw new Error("Failed to append inbox delivery change")
+          return {
+            item: { ...rowToInbox(row), delivery },
+            event: {
+              seq,
+              type: "session.inbox.delivery.changed",
+              sessionId,
+              payload: { inboxId: id, sessionId, delivery },
+              createdAt: now,
+            },
+          }
+        }),
+      ),
+    )
+  }
+
+  async createTurnFromInbox(input: {
+    sessionId: string
+    inboxId: string
+    providerId: string
+    modelId: string
+    reasoningEffort: string | null
+  }): Promise<CreatedTurnFromInbox | null> {
+    const turnId = newId("turn")
+    const now = nowIso()
+    return this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<InboxRow>`
+            SELECT id, session_id, type, payload_json, delivery, enqueued_seq, created_at
+            FROM session_inbox
+            WHERE session_id = ${input.sessionId} AND id = ${input.inboxId}
+          `
+          const row = rows[0]
+          if (!row || row.type !== "user") return null
+          const item = rowToInbox(row)
+          const text = item.payload.text
+          const files = item.payload.files
+          const content = { role: "user", content: text }
+          const inserted = yield* sql<{ seq: number }>`
+            INSERT INTO messages (id, session_id, turn_id, role, text, content_json, files_json, created_at)
+            VALUES (${row.id}, ${input.sessionId}, ${turnId}, 'user', ${text},
+                    ${JSON.stringify(content)}, ${files ? JSON.stringify(files) : null}, ${now})
+            RETURNING seq
+          `
+          const seq = inserted[0]?.seq
+          if (seq === undefined) throw new Error("Failed to persist inbox user message")
+          for (const file of files ?? []) {
+            yield* sql`
+              INSERT INTO blob_refs (session_id, message_id, hash, seq)
+              VALUES (${input.sessionId}, ${row.id}, ${file.uri.slice("media:".length)}, ${seq})
+              ON CONFLICT(session_id, message_id, hash) DO UPDATE SET seq = excluded.seq
+            `
+          }
+          yield* sql`
+            INSERT INTO turns
+              (id, session_id, status, provider_id, model_id, reasoning_effort, user_message_id,
+               step_count, input_tokens, output_tokens, cost_usd, error, checkpoint_json,
+               started_at, updated_at, completed_at)
+            VALUES
+              (${turnId}, ${input.sessionId}, 'queued', ${input.providerId}, ${input.modelId},
+               ${input.reasoningEffort}, ${row.id}, 0, 0, 0, 0, NULL, NULL, ${now}, ${now}, NULL)
+          `
+          yield* sql`
+            DELETE FROM session_inbox
+            WHERE session_id = ${input.sessionId} AND id = ${input.inboxId}
+          `
+          const eventRows = yield* sql<{ seq: number }>`
+            INSERT INTO events (type, session_id, payload, created_at)
+            VALUES ('session.inbox.delivered', ${input.sessionId},
+                    ${JSON.stringify({ inboxId: row.id, sessionId: input.sessionId })}, ${now})
+            RETURNING seq
+          `
+          const eventSeq = eventRows[0]?.seq
+          if (eventSeq === undefined) throw new Error("Failed to append inbox delivery")
+          yield* sql`UPDATE sessions SET updated_at = ${now} WHERE id = ${input.sessionId}`
+          const turn: Turn = {
+            id: turnId,
+            sessionId: input.sessionId,
+            status: "queued",
+            providerId: input.providerId,
+            modelId: input.modelId,
+            reasoningEffort: input.reasoningEffort,
+            userMessageId: row.id,
+            stepCount: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            costUsd: 0,
+            error: null,
+            startedAt: now,
+            updatedAt: now,
+            completedAt: null,
+          }
+          return {
+            turn,
+            userMessage: {
+              id: row.id,
+              seq,
+              sessionId: input.sessionId,
+              turnId,
+              role: "user",
+              text,
+              content,
+              ...(files && files.length > 0 ? { files } : {}),
+              createdAt: now,
+            },
+            item,
+            event: {
+              seq: eventSeq,
+              type: "session.inbox.delivered",
+              sessionId: input.sessionId,
+              payload: { inboxId: row.id, sessionId: input.sessionId },
+              createdAt: now,
+            },
+          }
+        }),
+      ),
+    )
+  }
+
+  /**
+   * Saves one turn step and, in the same transaction, promotes selected inbox
+   * rows into user messages. If any inbox row is delivered the turn stays
+   * running even when the caller asked to complete it.
+   */
+  async saveTurnStepWithInbox(
+    input: TurnStepInput & { readonly inboxIds?: readonly string[] },
+  ): Promise<InboxStepResult> {
+    const now = nowIso()
+    const requestedStatus = input.status ?? "running"
+    const usage = input.usage ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 }
+    const messages: Message[] = []
+    const delivered: InboxItem[] = []
+    const events: EventRecord[] = []
+
+    return this.query((sql) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          for (const message of input.messages ?? []) {
+            const id = newId("msg")
+            const inserted = yield* sql<{ seq: number }>`
+              INSERT INTO messages (id, session_id, turn_id, role, text, content_json, files_json, created_at)
+              VALUES (${id}, ${input.sessionId}, ${input.turnId ?? null}, ${message.role}, ${message.text},
+                      ${JSON.stringify(message.content)}, ${message.files ? JSON.stringify(message.files) : null}, ${now})
+              RETURNING seq
+            `
+            const seq = inserted[0]?.seq
+            if (seq === undefined) throw new Error("Failed to persist turn message")
+            for (const file of message.files ?? []) {
+              yield* sql`
+                INSERT INTO blob_refs (session_id, message_id, hash, seq)
+                VALUES (${input.sessionId}, ${id}, ${file.uri.slice("media:".length)}, ${seq})
+                ON CONFLICT(session_id, message_id, hash) DO UPDATE SET seq = excluded.seq
+              `
+            }
+            messages.push({
+              id,
+              seq,
+              sessionId: input.sessionId,
+              turnId: input.turnId ?? null,
+              role: message.role,
+              text: message.text,
+              content: message.content,
+              ...(message.files && message.files.length > 0 ? { files: message.files } : {}),
+              createdAt: now,
+            })
+          }
+
+          for (const inboxId of input.inboxIds ?? []) {
+            const rows = yield* sql<InboxRow>`
+              SELECT id, session_id, type, payload_json, delivery, enqueued_seq, created_at
+              FROM session_inbox
+              WHERE session_id = ${input.sessionId} AND id = ${inboxId}
+            `
+            const row = rows[0]
+            if (!row || row.type !== "user") continue
+            const item = rowToInbox(row)
+            const text = item.payload.text
+            const files = item.payload.files
+            const content = { role: "user", content: text }
+            const inserted = yield* sql<{ seq: number }>`
+              INSERT INTO messages (id, session_id, turn_id, role, text, content_json, files_json, created_at)
+              VALUES (${row.id}, ${input.sessionId}, ${input.turnId ?? null}, 'user', ${text},
+                      ${JSON.stringify(content)}, ${files ? JSON.stringify(files) : null}, ${now})
+              RETURNING seq
+            `
+            const seq = inserted[0]?.seq
+            if (seq === undefined) throw new Error("Failed to persist promoted inbox message")
+            yield* sql`
+              DELETE FROM session_inbox
+              WHERE session_id = ${input.sessionId} AND id = ${row.id}
+            `
+            const eventRows = yield* sql<{ seq: number }>`
+              INSERT INTO events (type, session_id, payload, created_at)
+              VALUES ('session.inbox.delivered', ${input.sessionId},
+                      ${JSON.stringify({ inboxId: row.id, sessionId: input.sessionId })}, ${now})
+              RETURNING seq
+            `
+            const eventSeq = eventRows[0]?.seq
+            if (eventSeq === undefined) throw new Error("Failed to append inbox delivery")
+            delivered.push(item)
+            events.push({
+              seq: eventSeq,
+              type: "session.inbox.delivered",
+              sessionId: input.sessionId,
+              payload: { inboxId: row.id, sessionId: input.sessionId },
+              createdAt: now,
+            })
+            messages.push({
+              id: row.id,
+              seq,
+              sessionId: input.sessionId,
+              turnId: input.turnId ?? null,
+              role: "user",
+              text,
+              content,
+              ...(files && files.length > 0 ? { files } : {}),
+              createdAt: now,
+            })
+          }
+
+          const status = delivered.length > 0 ? "running" : requestedStatus
+          const terminal = status === "completed" || status === "failed" || status === "cancelled"
+          yield* sql`
+            UPDATE turns SET
+              status = ${status},
+              step_count = ${input.step},
+              input_tokens = ${usage.inputTokens},
+              output_tokens = ${usage.outputTokens},
+              cost_usd = ${usage.costUsd},
+              error = ${input.error ?? null},
+              error_details_json = ${input.errorDetails ? JSON.stringify(input.errorDetails) : null},
+              checkpoint_json = ${JSON.stringify(input.checkpoint)},
+              updated_at = ${now},
+              completed_at = ${terminal ? now : null}
+            WHERE id = ${input.turnId ?? ""}
+          `
+          yield* sql`
+            INSERT INTO turn_checkpoints (turn_id, step, state_json, created_at)
+            VALUES (${input.turnId ?? ""}, ${input.step}, ${JSON.stringify(input.checkpoint)}, ${now})
+          `
+          yield* sql`UPDATE sessions SET updated_at = ${now} WHERE id = ${input.sessionId}`
+          return { messages, delivered, events, status }
+        }),
+      ),
     )
   }
 
@@ -1438,7 +2276,7 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<MessageRow>`
-          SELECT id, seq, session_id, turn_id, role, text, content_json, created_at
+          SELECT id, seq, session_id, turn_id, role, text, content_json, files_json, created_at
           FROM messages
           WHERE session_id = ${sessionId}
           ORDER BY seq ASC
@@ -1475,6 +2313,48 @@ export class Database {
           LIMIT 1
         `
         return rows.length > 0
+      }),
+    )
+  }
+
+  async getActiveTurn(sessionId: string): Promise<Turn | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<TurnRow>`
+          SELECT id, session_id, status, provider_id, model_id, user_message_id, step_count,
+                 input_tokens, output_tokens, cost_usd, error, error_details_json, reasoning_effort,
+                 started_at, updated_at, completed_at
+          FROM turns
+          WHERE session_id = ${sessionId}
+            AND status IN ('queued', 'running', 'waiting_approval', 'resuming')
+          ORDER BY started_at DESC
+          LIMIT 1
+        `
+        const row = rows[0]
+        return row ? rowToTurn(row) : null
+      }),
+    )
+  }
+
+  async listActiveTurns(): Promise<Turn[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<TurnRow>`
+          SELECT id, session_id, status, provider_id, model_id, user_message_id, step_count,
+                 input_tokens, output_tokens, cost_usd, error, error_details_json, reasoning_effort,
+                 started_at, updated_at, completed_at
+          FROM turns
+          WHERE status IN ('queued', 'running', 'waiting_approval', 'resuming')
+          ORDER BY started_at DESC
+        `
+        const seen = new Set<string>()
+        return rows
+          .map(rowToTurn)
+          .filter((turn) => {
+            if (seen.has(turn.sessionId)) return false
+            seen.add(turn.sessionId)
+            return true
+          })
       }),
     )
   }
@@ -1545,6 +2425,7 @@ export class Database {
     modelId: string,
     text: string,
     reasoningEffort: string | null = null,
+    files?: readonly StoredFile[],
   ): Promise<{ turn: Turn; userMessage: Message }> {
     const turnId = newId("turn")
     const messageId = newId("msg")
@@ -1555,12 +2436,20 @@ export class Database {
         return yield* sql.withTransaction(
           Effect.gen(function* () {
             const inserted = yield* sql<{ seq: number }>`
-              INSERT INTO messages (id, session_id, turn_id, role, text, content_json, created_at)
-              VALUES (${messageId}, ${sessionId}, ${turnId}, 'user', ${text}, ${JSON.stringify(content)}, ${now})
+              INSERT INTO messages (id, session_id, turn_id, role, text, content_json, files_json, created_at)
+              VALUES (${messageId}, ${sessionId}, ${turnId}, 'user', ${text}, ${JSON.stringify(content)},
+                      ${files ? JSON.stringify(files) : null}, ${now})
               RETURNING seq
             `
             const seq = inserted[0]?.seq
             if (seq === undefined) throw new Error("Failed to persist user message")
+            for (const file of files ?? []) {
+              yield* sql`
+                INSERT INTO blob_refs (session_id, message_id, hash, seq)
+                VALUES (${sessionId}, ${messageId}, ${file.uri.slice("media:".length)}, ${seq})
+                ON CONFLICT(session_id, message_id, hash) DO UPDATE SET seq = excluded.seq
+              `
+            }
             yield* sql`
               INSERT INTO turns
                 (id, session_id, status, provider_id, model_id, reasoning_effort, user_message_id,
@@ -1596,6 +2485,7 @@ export class Database {
               role: "user",
               text,
               content,
+              ...(files && files.length > 0 ? { files } : {}),
               createdAt: now,
             }
             return { turn, userMessage }
@@ -1618,13 +2508,20 @@ export class Database {
           for (const message of input.messages ?? []) {
             const id = newId("msg")
             const inserted = yield* sql<{ seq: number }>`
-              INSERT INTO messages (id, session_id, turn_id, role, text, content_json, created_at)
+              INSERT INTO messages (id, session_id, turn_id, role, text, content_json, files_json, created_at)
               VALUES (${id}, ${input.sessionId}, ${turnId}, ${message.role}, ${message.text},
-                      ${JSON.stringify(message.content)}, ${now})
+                      ${JSON.stringify(message.content)}, ${message.files ? JSON.stringify(message.files) : null}, ${now})
               RETURNING seq
             `
             const seq = inserted[0]?.seq
             if (seq === undefined) throw new Error("Failed to persist turn message")
+            for (const file of message.files ?? []) {
+              yield* sql`
+                INSERT INTO blob_refs (session_id, message_id, hash, seq)
+                VALUES (${input.sessionId}, ${id}, ${file.uri.slice("media:".length)}, ${seq})
+                ON CONFLICT(session_id, message_id, hash) DO UPDATE SET seq = excluded.seq
+              `
+            }
             newMessages.push({
               id,
               seq,
@@ -1633,6 +2530,7 @@ export class Database {
               role: message.role,
               text: message.text,
               content: message.content,
+              ...(message.files && message.files.length > 0 ? { files: message.files } : {}),
               createdAt: now,
             })
           }
@@ -1711,7 +2609,7 @@ export class Database {
   async getLatestCheckpoint(turnId: string): Promise<{ step: number; state: unknown; createdAt: string } | null> {
     return this.query((sql) =>
       Effect.gen(function* () {
-        const rows = yield* sql<CheckpointRow>`
+        const rows = yield* sql<TurnStateCheckpointRow>`
           SELECT step, state_json, created_at
           FROM turn_checkpoints
           WHERE turn_id = ${turnId}
@@ -1858,12 +2756,14 @@ export class Database {
     await this.query((sql) =>
       sql`
         INSERT INTO approvals
-          (id, turn_id, session_id, tool_call_id, tool_name, arguments_json, arguments_hash,
-           status, created_at, expires_at, decided_at, decided_by, reason)
+          (id, turn_id, session_id, tool_call_id, tool_name, action, resource, pattern_key,
+           arguments_json, arguments_hash, display_command, status, created_at, expires_at,
+           decided_at, decided_by, reason, scope)
         VALUES
           (${id}, ${input.turnId}, ${input.sessionId}, ${input.toolCallId}, ${input.toolName},
-           ${JSON.stringify(input.arguments)}, ${input.argumentsHash}, 'pending', ${now},
-           ${input.expiresAt}, NULL, NULL, NULL)
+           ${input.action}, ${input.resource}, ${input.patternKey}, ${JSON.stringify(input.arguments)},
+           ${input.argumentsHash}, ${input.displayCommand ?? null}, 'pending', ${now},
+           ${input.expiresAt}, NULL, NULL, NULL, NULL)
       `.pipe(Effect.asVoid),
     )
     return {
@@ -1872,14 +2772,19 @@ export class Database {
       sessionId: input.sessionId,
       toolCallId: input.toolCallId,
       toolName: input.toolName,
+      action: input.action,
+      resource: input.resource,
+      patternKey: input.patternKey,
       arguments: input.arguments,
       argumentsHash: input.argumentsHash,
+      displayCommand: input.displayCommand ?? null,
       status: "pending",
       createdAt: now,
       expiresAt: input.expiresAt,
       decidedAt: null,
       decidedBy: null,
       reason: null,
+      scope: null,
     }
   }
 
@@ -1887,8 +2792,9 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<ApprovalRow>`
-          SELECT id, turn_id, session_id, tool_call_id, tool_name, arguments_json,
-                 arguments_hash, status, created_at, expires_at, decided_at, decided_by, reason
+          SELECT id, turn_id, session_id, tool_call_id, tool_name, action, resource, pattern_key,
+                 arguments_json, arguments_hash, display_command, status, created_at, expires_at,
+                 decided_at, decided_by, reason, scope
           FROM approvals
           WHERE id = ${id}
         `
@@ -1902,8 +2808,9 @@ export class Database {
     return this.query((sql) =>
       Effect.gen(function* () {
         const rows = yield* sql<ApprovalRow>`
-          SELECT id, turn_id, session_id, tool_call_id, tool_name, arguments_json,
-                 arguments_hash, status, created_at, expires_at, decided_at, decided_by, reason
+          SELECT id, turn_id, session_id, tool_call_id, tool_name, action, resource, pattern_key,
+                 arguments_json, arguments_hash, display_command, status, created_at, expires_at,
+                 decided_at, decided_by, reason, scope
           FROM approvals
           WHERE turn_id = ${turnId} AND tool_call_id = ${toolCallId}
           ORDER BY created_at DESC
@@ -1920,16 +2827,18 @@ export class Database {
       Effect.gen(function* () {
         const rows = status
           ? yield* sql<ApprovalRow>`
-              SELECT id, turn_id, session_id, tool_call_id, tool_name, arguments_json,
-                     arguments_hash, status, created_at, expires_at, decided_at, decided_by, reason
+              SELECT id, turn_id, session_id, tool_call_id, tool_name, action, resource, pattern_key,
+                     arguments_json, arguments_hash, display_command, status, created_at, expires_at,
+                     decided_at, decided_by, reason, scope
               FROM approvals
               WHERE status = ${status}
               ORDER BY created_at DESC
               LIMIT ${limit}
             `
           : yield* sql<ApprovalRow>`
-              SELECT id, turn_id, session_id, tool_call_id, tool_name, arguments_json,
-                     arguments_hash, status, created_at, expires_at, decided_at, decided_by, reason
+              SELECT id, turn_id, session_id, tool_call_id, tool_name, action, resource, pattern_key,
+                     arguments_json, arguments_hash, display_command, status, created_at, expires_at,
+                     decided_at, decided_by, reason, scope
               FROM approvals
               ORDER BY created_at DESC
               LIMIT ${limit}
@@ -1944,16 +2853,73 @@ export class Database {
     status: "approved" | "rejected" | "expired" | "invalidated",
     decidedBy: string,
     reason: string | null,
+    scope: ApprovalScope | null = null,
   ): Promise<Approval | null> {
     const now = nowIso()
-    await this.query((sql) =>
-      sql`
+    const changed = await this.query((sql) =>
+      sql<{ id: string }>`
         UPDATE approvals
-        SET status = ${status}, decided_at = ${now}, decided_by = ${decidedBy}, reason = ${reason}
+        SET status = ${status}, decided_at = ${now}, decided_by = ${decidedBy}, reason = ${reason},
+            scope = ${scope}
         WHERE id = ${id} AND status = 'pending'
-      `.pipe(Effect.asVoid),
+        RETURNING id
+      `,
     )
+    if (changed.length === 0) return null
     return this.getApproval(id)
+  }
+
+  async decideApprovalWithEvent(
+    id: string,
+    status: "approved" | "rejected" | "expired" | "invalidated",
+    decidedBy: string,
+    reason: string | null,
+    scope: ApprovalScope | null,
+    event: { type: string; sessionId: string; payload: unknown },
+  ): Promise<{ approval: Approval; event: EventRecord } | null> {
+    const now = nowIso()
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const result = yield* sql.withTransaction(
+          Effect.gen(function* () {
+            const changed = yield* sql<{ id: string }>`
+              UPDATE approvals
+              SET status = ${status}, decided_at = ${now}, decided_by = ${decidedBy}, reason = ${reason},
+                  scope = ${scope}
+              WHERE id = ${id} AND status = 'pending'
+              RETURNING id
+            `
+            if (changed.length === 0) return null
+            const inserted = yield* sql<{ seq: number }>`
+              INSERT INTO events (type, session_id, payload, created_at)
+              VALUES (${event.type}, ${event.sessionId}, ${JSON.stringify(event.payload)}, ${now})
+              RETURNING seq
+            `
+            const seq = inserted[0]?.seq
+            if (seq === undefined) throw new Error("Failed to append approval event")
+            return {
+              event: {
+                seq,
+                type: event.type,
+                sessionId: event.sessionId,
+                payload: event.payload,
+                createdAt: now,
+              } satisfies EventRecord,
+            }
+          }),
+        )
+        if (!result) return null
+        const rows = yield* sql<ApprovalRow>`
+          SELECT id, turn_id, session_id, tool_call_id, tool_name, action, resource, pattern_key,
+                 arguments_json, arguments_hash, display_command, status, created_at, expires_at,
+                 decided_at, decided_by, reason, scope
+          FROM approvals
+          WHERE id = ${id}
+        `
+        const row = rows[0]
+        return row ? { approval: rowToApproval(row), event: result.event } : null
+      }),
+    )
   }
 
   async expireApprovals(now = nowIso()): Promise<string[]> {
@@ -1967,6 +2933,126 @@ export class Database {
         return rows.map((row) => row.id)
       }),
     )
+  }
+
+  async expireApprovalsWithEvents(now = nowIso()): Promise<EventRecord[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        return yield* sql.withTransaction(
+          Effect.gen(function* () {
+            const candidates = yield* sql<{
+              id: string
+              session_id: string
+              turn_id: string
+              tool_call_id: string
+            }>`
+              SELECT id, session_id, turn_id, tool_call_id
+              FROM approvals
+              WHERE status = 'pending' AND expires_at <= ${now}
+            `
+            const events: EventRecord[] = []
+            for (const candidate of candidates) {
+              const changed = yield* sql<{ id: string }>`
+                UPDATE approvals SET status = 'expired', decided_at = ${now}
+                WHERE id = ${candidate.id} AND status = 'pending'
+                RETURNING id
+              `
+              if (changed.length === 0) continue
+              const payload = {
+                approvalId: candidate.id,
+                turnId: candidate.turn_id,
+                sessionId: candidate.session_id,
+                toolCallId: candidate.tool_call_id,
+                expiredAt: now,
+              }
+              const inserted = yield* sql<{ seq: number }>`
+                INSERT INTO events (type, session_id, payload, created_at)
+                VALUES ('approval.expired', ${candidate.session_id}, ${JSON.stringify(payload)}, ${now})
+                RETURNING seq
+              `
+              const seq = inserted[0]?.seq
+              if (seq === undefined) throw new Error("Failed to append approval expiry event")
+              events.push({
+                seq,
+                type: "approval.expired",
+                sessionId: candidate.session_id,
+                payload,
+                createdAt: now,
+              })
+            }
+            return events
+          }),
+        )
+      }),
+    )
+  }
+
+  async createApprovalGrant(input: NewApprovalGrant): Promise<ApprovalGrant> {
+    const id = newId("agr")
+    const now = nowIso()
+    await this.query((sql) =>
+      sql`
+        INSERT INTO approval_grants
+          (id, session_id, scope, action, resource, pattern_key, created_at, expires_at)
+        VALUES
+          (${id}, ${input.sessionId ?? null}, ${input.scope}, ${input.action}, ${input.resource},
+           ${input.patternKey}, ${now}, ${input.expiresAt ?? null})
+      `.pipe(Effect.asVoid),
+    )
+    return {
+      id,
+      sessionId: input.sessionId ?? null,
+      scope: input.scope,
+      action: input.action,
+      resource: input.resource,
+      patternKey: input.patternKey,
+      createdAt: now,
+      expiresAt: input.expiresAt ?? null,
+    }
+  }
+
+  async findApprovalGrant(
+    sessionId: string | null,
+    action: string,
+    patternKey: string,
+  ): Promise<ApprovalGrant | null> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const now = nowIso()
+        const rows = yield* sql<ApprovalGrantRow>`
+          SELECT id, session_id, scope, action, resource, pattern_key, created_at, expires_at
+          FROM approval_grants
+          WHERE action = ${action} AND pattern_key = ${patternKey}
+            AND (expires_at IS NULL OR expires_at > ${now})
+            AND (scope = 'always' OR session_id = ${sessionId})
+          ORDER BY CASE WHEN session_id = ${sessionId} THEN 0 ELSE 1 END, created_at DESC
+          LIMIT 1
+        `
+        const row = rows[0]
+        return row ? rowToApprovalGrant(row) : null
+      }),
+    )
+  }
+
+  async listApprovalGrants(limit = 200): Promise<ApprovalGrant[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<ApprovalGrantRow>`
+          SELECT id, session_id, scope, action, resource, pattern_key, created_at, expires_at
+          FROM approval_grants
+          ORDER BY created_at DESC
+          LIMIT ${limit}
+        `
+        return rows.map(rowToApprovalGrant)
+      }),
+    )
+  }
+
+  async deleteApprovalGrant(id: string): Promise<boolean> {
+    const rows = await this.query((sql) =>
+      sql<{ id: string }>`DELETE FROM approval_grants WHERE id = ${id} RETURNING id`,
+    )
+    return rows.length > 0
   }
 
   // ---------------------------------------------------------------------------
@@ -2010,187 +3096,136 @@ export class Database {
   }
 
   // ---------------------------------------------------------------------------
-  // Workspaces
+  // Checkpoints
 
-  async createWorkspace(input: {
-    label: string
-    path: string
-    access: WorkspaceAccess
-  }): Promise<Workspace> {
-    const id = newId("ws")
+  async createCheckpoint(input: NewCheckpoint): Promise<Checkpoint> {
+    const id = newId("chk")
     const now = nowIso()
     await this.query((sql) =>
       sql`
-        INSERT INTO workspaces (id, label, path, access, created_at, updated_at)
-        VALUES (${id}, ${input.label}, ${input.path}, ${input.access}, ${now}, ${now})
-      `.pipe(Effect.asVoid),
-    )
-    return {
-      id,
-      label: input.label,
-      path: input.path,
-      access: input.access,
-      createdAt: now,
-      updatedAt: now,
-    }
-  }
-
-  async listWorkspaces(): Promise<Workspace[]> {
-    return this.query((sql) =>
-      Effect.gen(function* () {
-        const rows = yield* sql<WorkspaceRow>`
-          SELECT id, label, path, access, created_at, updated_at
-          FROM workspaces
-          ORDER BY label ASC, id ASC
-        `
-        return rows.map(rowToWorkspace)
-      }),
-    )
-  }
-
-  async getWorkspace(id: string): Promise<Workspace | null> {
-    return this.query((sql) =>
-      Effect.gen(function* () {
-        const rows = yield* sql<WorkspaceRow>`
-          SELECT id, label, path, access, created_at, updated_at
-          FROM workspaces
-          WHERE id = ${id}
-        `
-        const row = rows[0]
-        return row ? rowToWorkspace(row) : null
-      }),
-    )
-  }
-
-  async deleteWorkspace(id: string): Promise<void> {
-    await this.query((sql) => sql`DELETE FROM workspaces WHERE id = ${id}`.pipe(Effect.asVoid))
-  }
-
-  // ---------------------------------------------------------------------------
-  // Journal
-
-  async createJournalEntry(input: NewJournalEntry): Promise<JournalEntry> {
-    const id = newId("jrn")
-    const now = nowIso()
-    await this.query((sql) =>
-      sql`
-        INSERT INTO journal
-          (id, batch_id, turn_id, session_id, tool_name, operation, source, target,
-           source_hash, target_hash, state, undo_json, error, created_at, updated_at)
+        INSERT INTO checkpoints
+          (id, session_id, turn_id, root_path, root_hash, commit_sha,
+           reason, files_changed, insertions, deletions, created_at)
         VALUES
-          (${id}, ${input.batchId}, ${input.turnId ?? null}, ${input.sessionId ?? null},
-           ${input.toolName}, ${input.operation}, ${input.source ?? null}, ${input.target ?? null},
-           ${input.sourceHash ?? null}, ${input.targetHash ?? null}, 'planned',
-           ${JSON.stringify(input.undo ?? {})}, NULL, ${now}, ${now})
+          (${id}, ${input.sessionId ?? null}, ${input.turnId ?? null},
+           ${input.rootPath}, ${input.rootHash}, ${input.commit}, ${input.reason},
+           ${input.filesChanged ?? 0}, ${input.insertions ?? 0}, ${input.deletions ?? 0}, ${now})
       `.pipe(Effect.asVoid),
     )
     return {
       id,
-      batchId: input.batchId,
-      turnId: input.turnId ?? null,
       sessionId: input.sessionId ?? null,
-      toolName: input.toolName,
-      operation: input.operation,
-      source: input.source ?? null,
-      target: input.target ?? null,
-      sourceHash: input.sourceHash ?? null,
-      targetHash: input.targetHash ?? null,
-      state: "planned",
-      undo: input.undo ?? {},
-      error: null,
+      turnId: input.turnId ?? null,
+      rootPath: input.rootPath,
+      rootHash: input.rootHash,
+      commit: input.commit,
+      reason: input.reason,
+      filesChanged: input.filesChanged ?? 0,
+      insertions: input.insertions ?? 0,
+      deletions: input.deletions ?? 0,
       createdAt: now,
-      updatedAt: now,
     }
   }
 
-  async updateJournalEntry(
-    id: string,
-    state: JournalState,
-    options: { targetHash?: string | null; error?: string | null } = {},
-  ): Promise<JournalEntry | null> {
-    await this.query((sql) =>
-      sql`
-        UPDATE journal SET state = ${state}, target_hash = ${options.targetHash ?? null},
-          error = ${options.error ?? null}, updated_at = ${nowIso()}
-        WHERE id = ${id}
-      `.pipe(Effect.asVoid),
-    )
-    return this.getJournalEntry(id)
-  }
-
-  async getJournalEntry(id: string): Promise<JournalEntry | null> {
+  async getCheckpoint(id: string): Promise<Checkpoint | null> {
     return this.query((sql) =>
       Effect.gen(function* () {
-        const rows = yield* sql<JournalRow>`
-          SELECT id, batch_id, turn_id, session_id, tool_name, operation, source, target,
-                 source_hash, target_hash, state, undo_json, error, created_at, updated_at
-          FROM journal
+        const rows = yield* sql<CheckpointRow>`
+          SELECT id, session_id, turn_id, root_path, root_hash,
+                 commit_sha, reason, files_changed, insertions, deletions, created_at
+          FROM checkpoints
           WHERE id = ${id}
         `
         const row = rows[0]
-        return row ? rowToJournal(row) : null
+        return row ? rowToCheckpoint(row) : null
       }),
     )
   }
 
-  async listJournal(limit = 100): Promise<JournalEntry[]> {
+  async listCheckpoints(limit = 100, sessionId?: string): Promise<Checkpoint[]> {
     return this.query((sql) =>
       Effect.gen(function* () {
-        const rows = yield* sql<JournalRow>`
-          SELECT id, batch_id, turn_id, session_id, tool_name, operation, source, target,
-                 source_hash, target_hash, state, undo_json, error, created_at, updated_at
-          FROM journal
-          ORDER BY rowid DESC
+        const rows = sessionId
+          ? yield* sql<CheckpointRow>`
+              SELECT id, session_id, turn_id, root_path, root_hash,
+                     commit_sha, reason, files_changed, insertions, deletions, created_at
+              FROM checkpoints
+              WHERE session_id = ${sessionId}
+              ORDER BY created_at DESC, rowid DESC
+              LIMIT ${limit}
+            `
+          : yield* sql<CheckpointRow>`
+              SELECT id, session_id, turn_id, root_path, root_hash,
+                     commit_sha, reason, files_changed, insertions, deletions, created_at
+              FROM checkpoints
+              ORDER BY created_at DESC, rowid DESC
+              LIMIT ${limit}
+            `
+        return rows.map(rowToCheckpoint)
+      }),
+    )
+  }
+
+  async listCheckpointsForRoot(rootHash: string, limit = 20): Promise<Checkpoint[]> {
+    return this.query((sql) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<CheckpointRow>`
+          SELECT id, session_id, turn_id, root_path, root_hash,
+                 commit_sha, reason, files_changed, insertions, deletions, created_at
+          FROM checkpoints
+          WHERE root_hash = ${rootHash}
+          ORDER BY created_at DESC, rowid DESC
           LIMIT ${limit}
         `
-        return rows.map(rowToJournal)
+        return rows.map(rowToCheckpoint)
       }),
     )
   }
 
-  async listJournalBatch(batchId: string): Promise<JournalEntry[]> {
+  async deleteCheckpoints(ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return
+    await this.query((sql) =>
+      Effect.gen(function* () {
+        for (const id of ids) yield* sql`DELETE FROM checkpoints WHERE id = ${id}`
+      }),
+    )
+  }
+
+  async recordAgentWrite(rootHash: string, filePath: string, sha256: string): Promise<void> {
+    await this.query((sql) =>
+      sql`
+        INSERT INTO agent_writes (root_hash, path, sha256, updated_at)
+        VALUES (${rootHash}, ${filePath}, ${sha256}, ${nowIso()})
+        ON CONFLICT(root_hash, path) DO UPDATE SET
+          sha256 = excluded.sha256, updated_at = excluded.updated_at
+      `.pipe(Effect.asVoid),
+    )
+  }
+
+  async getAgentWrite(rootHash: string, filePath: string): Promise<AgentWriteRecord | null> {
     return this.query((sql) =>
       Effect.gen(function* () {
-        const rows = yield* sql<JournalRow>`
-          SELECT id, batch_id, turn_id, session_id, tool_name, operation, source, target,
-                 source_hash, target_hash, state, undo_json, error, created_at, updated_at
-          FROM journal
-          WHERE batch_id = ${batchId}
-          ORDER BY rowid ASC
+        const rows = yield* sql<{
+          root_hash: string
+          path: string
+          sha256: string
+          updated_at: string
+        }>`
+          SELECT root_hash, path, sha256, updated_at
+          FROM agent_writes
+          WHERE root_hash = ${rootHash} AND path = ${filePath}
         `
-        return rows.map(rowToJournal)
+        const row = rows[0]
+        return row
+          ? {
+              rootHash: row.root_hash,
+              path: row.path,
+              sha256: row.sha256,
+              updatedAt: row.updated_at,
+            }
+          : null
       }),
     )
-  }
-
-  async listUnsettledJournal(): Promise<JournalEntry[]> {
-    return this.query((sql) =>
-      Effect.gen(function* () {
-        const rows = yield* sql<JournalRow>`
-          SELECT id, batch_id, turn_id, session_id, tool_name, operation, source, target,
-                 source_hash, target_hash, state, undo_json, error, created_at, updated_at
-          FROM journal
-          WHERE state IN ('planned', 'applying', 'unknown')
-          ORDER BY rowid ASC
-        `
-        return rows.map(rowToJournal)
-      }),
-    )
-  }
-
-  async appendJournalAudit(entry: {
-    action: string
-    resource: string
-    decision: string
-    details?: unknown
-  }): Promise<void> {
-    await this.appendAudit({
-      actor: "agent",
-      action: entry.action,
-      resource: entry.resource,
-      decision: entry.decision,
-      details: entry.details,
-    })
   }
 
   // ---------------------------------------------------------------------------

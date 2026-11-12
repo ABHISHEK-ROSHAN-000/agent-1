@@ -1,31 +1,30 @@
-import { readdirSync, statSync } from "node:fs"
-import path from "node:path"
 import { z } from "zod"
 import type { AppConfig } from "../core/config"
 import { PHASE, PRODUCT_NAME } from "../core/config"
 import { newRequestId } from "../core/ids"
 import type { Logger } from "../core/log"
 import { nowPlusSeconds } from "../core/time"
-import type { Database } from "../db/database"
+import { InboxConflictError, type Database } from "../db/database"
 import type { EventService } from "../events/service"
 import type { ApprovalStatus, AuthContext } from "../shared/types"
+import { promptFileInputSchema, sessionRenameRequestSchema, settingsPatchSchema } from "../shared/contracts"
 import { AuthService, SESSION_TTL_SECONDS } from "../auth/auth-service"
 import type { ModelService } from "../models/model-service"
 import type { ProviderService } from "../models/provider-service"
 import { ProviderError } from "../models/provider-service"
-import type { TurnService } from "../agent/turn-service"
+import { EmptyPromptError, SessionDeletingError, TurnBusyError, type TurnService } from "../agent/turn-service"
 import type { TurnBus } from "../agent/turn-bus"
 import type { PermissionService } from "../permissions/permission-service"
 import { PermissionError } from "../permissions/permission-service"
 import type { ToolService } from "../tools/tool-service"
-import type { WorkspaceService } from "../tools/workspace-service"
-import { WorkspaceError } from "../tools/workspace-service"
-import type { JournalService } from "../tools/journal-service"
-import { JournalError } from "../tools/journal-service"
+import { PathPolicyError } from "../tools/path-policy"
+import type { CheckpointManager } from "../checkpoints/manager"
+import { CheckpointError } from "../checkpoints/manager"
 import type { SessionSearchService } from "../memory/session-search-service"
 import type { MemoryService } from "../memory/memory-service"
 import { MemoryError } from "../memory/types"
 import type { RemoteService } from "../remote/remote-service"
+import type { SettingsService } from "../settings/settings-service"
 import { createTurnStream } from "./turn-stream"
 import { serveWeb } from "./static"
 import {
@@ -54,13 +53,19 @@ const createSessionSchema = z.object({
 
 const createMessageSchema = z
   .object({
-    content: z.string().min(1).max(100_000),
+    content: z.string().max(100_000).optional(),
+    id: z.string().min(1).max(100).optional(),
+    delivery: z.enum(["steer", "queue"]).optional(),
+    files: z.array(promptFileInputSchema).max(32).optional(),
     providerId: z.string().min(1).max(100).optional(),
     modelId: z.string().min(1).max(300).optional(),
     reasoningEffort: z.string().min(1).max(50).nullable().optional(),
   })
   .refine((value) => Boolean(value.providerId) === Boolean(value.modelId), {
     message: "providerId and modelId must be provided together",
+  })
+  .refine((value) => Boolean(value.content?.trim()) || Boolean(value.files?.length), {
+    message: "A prompt or attachment is required",
   })
 
 const modelSelectionSchema = z.object({
@@ -131,17 +136,24 @@ const ruleSchema = z.object({
 
 const approvalDecisionSchema = z.object({
   decision: z.enum(["approve", "reject"]),
+  scope: z.enum(["once", "session", "always"]).optional(),
   reason: z.string().max(2_000).optional(),
   arguments: z.unknown().optional(),
 })
 
-const workspaceSchema = z.object({
-  path: z.string().min(1).max(4_000),
-  label: z.string().min(1).max(100).optional(),
-  access: z.enum(["read", "write"]).optional(),
+const approvalConfigSchema = z.object({
+  mode: z.enum(["smart", "manual", "off"]).optional(),
+  timeoutSeconds: z.number().int().positive().max(86_400).optional(),
+  deny: z.array(z.string().min(1).max(4_000)).max(500).optional(),
+  allowlist: z.array(z.string().min(1).max(4_000)).max(500).optional(),
+  writeSafeRoot: z.string().max(4_000).nullable().optional(),
+  smartModel: z.string().max(500).nullable().optional(),
 })
 
-const journalUndoSchema = z.object({ batchId: z.string().min(1).optional() })
+const checkpointRestoreSchema = z.object({
+  filePath: z.string().min(1).max(4_000).optional(),
+  safe: z.boolean().optional(),
+})
 
 const memoryOperationSchema = z.object({
   action: z.enum(["add", "patch", "remove"]),
@@ -165,38 +177,6 @@ const memoryUndoSchema = z.object({
 
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 
-function workspaceFilePaths(root: string, limit = 5_000, maxDepth = 12): string[] {
-  const files: string[] = []
-  const walk = (directory: string, depth: number) => {
-    if (files.length >= limit || depth > maxDepth) return
-    let entries
-    try {
-      entries = readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))
-    } catch {
-      return
-    }
-    for (const entry of entries) {
-      if (files.length >= limit) return
-      if (entry.name === ".git" || entry.name === "node_modules") continue
-      const full = path.join(directory, entry.name)
-      if (entry.isSymbolicLink()) continue
-      if (entry.isDirectory()) {
-        walk(full, depth + 1)
-        continue
-      }
-      if (!entry.isFile()) continue
-      try {
-        if (!statSync(full).isFile()) continue
-      } catch {
-        continue
-      }
-      files.push(path.relative(root, full).split(path.sep).join("/"))
-    }
-  }
-  walk(root, 0)
-  return files
-}
-
 export interface AppDependencies {
   readonly config: AppConfig
   readonly db: Database
@@ -207,8 +187,8 @@ export interface AppDependencies {
   readonly turns: TurnService
   readonly turnBus: TurnBus
   readonly permissions: PermissionService
-  readonly workspace: WorkspaceService
-  readonly journal: JournalService
+  readonly checkpoints: CheckpointManager
+  readonly settings: SettingsService
   readonly tools: ToolService
   readonly memory: MemoryService
   readonly sessionSearch: SessionSearchService
@@ -235,17 +215,29 @@ export function loggedPath(pathname: string): string {
 
 function issueHttpError(error: unknown): HttpError {
   if (error instanceof HttpError) return error
+  if (error instanceof TurnBusyError) {
+    return new HttpError(409, "session_busy", error.message)
+  }
+  if (error instanceof SessionDeletingError) {
+    return new HttpError(409, "session_deleting", error.message)
+  }
+  if (error instanceof InboxConflictError) {
+    return new HttpError(409, "inbox_conflict", error.message)
+  }
+  if (error instanceof EmptyPromptError) {
+    return new HttpError(400, "invalid_prompt", error.message)
+  }
   if (error instanceof ProviderError) {
     return new HttpError(400, "provider_error", error.message)
   }
   if (error instanceof PermissionError) {
     return new HttpError(error.status, error.code, error.message)
   }
-  if (error instanceof WorkspaceError) {
-    return new HttpError(400, "workspace_error", error.message)
+  if (error instanceof PathPolicyError) {
+    return new HttpError(400, "path_policy_error", error.message)
   }
-  if (error instanceof JournalError) {
-    return new HttpError(409, "journal_error", error.message)
+  if (error instanceof CheckpointError) {
+    return new HttpError(409, "checkpoint_error", error.message)
   }
   if (error instanceof MemoryError) {
     return new HttpError(
@@ -272,8 +264,8 @@ export class App {
   private readonly turns: TurnService
   private readonly turnBus: TurnBus
   private readonly permissions: PermissionService
-  private readonly workspace: WorkspaceService
-  private readonly journal: JournalService
+  private readonly checkpoints: CheckpointManager
+  private readonly settings: SettingsService
   private readonly tools: ToolService
   private readonly memory: MemoryService
   private readonly sessionSearch: SessionSearchService
@@ -292,8 +284,8 @@ export class App {
     this.turns = dependencies.turns
     this.turnBus = dependencies.turnBus
     this.permissions = dependencies.permissions
-    this.workspace = dependencies.workspace
-    this.journal = dependencies.journal
+    this.checkpoints = dependencies.checkpoints
+    this.settings = dependencies.settings
     this.tools = dependencies.tools
     this.memory = dependencies.memory
     this.sessionSearch = dependencies.sessionSearch
@@ -384,9 +376,14 @@ export class App {
           "streaming",
           "permissions",
           "approvals",
+          "approval_policy",
+          "approval_grants",
+          "active_sessions",
+          "session_mutation",
+          "settings",
+          "sse_contract",
           "audit",
-          "workspaces",
-          "journal",
+          "checkpoints",
           "tools",
           "memory",
           "session_search",
@@ -561,48 +558,13 @@ export class App {
       )
     }
 
-    if (path === "/v1/workspaces" && method === "GET") {
+    if (path === "/v1/sessions/active" && method === "GET") {
       await this.requireAuth(request)
-      return jsonResponse({ workspaces: await this.workspace.list() })
-    }
-
-    if (path === "/v1/workspaces" && method === "POST") {
-      await this.requireAuth(request)
-      const parsed = workspaceSchema.safeParse(await readJson(request))
-      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
-      return jsonResponse({ workspace: await this.workspace.add(parsed.data) }, 201)
-    }
-
-    const workspaceMatch = /^\/v1\/workspaces\/([^/]+)$/.exec(path)
-    if (workspaceMatch && method === "DELETE") {
-      await this.requireAuth(request)
-      const removed = await this.workspace.remove(decodeURIComponent(workspaceMatch[1] ?? ""))
-      if (!removed) throw new HttpError(404, "workspace_not_found", "Workspace not found")
-      return jsonResponse({ ok: true })
-    }
-
-    const workspaceFileMatch = /^\/v1\/workspaces\/([^/]+)\/(tree|file)$/.exec(path)
-    if (workspaceFileMatch && method === "GET") {
-      await this.requireAuth(request)
-      const id = decodeURIComponent(workspaceFileMatch[1] ?? "")
-      const kind = workspaceFileMatch[2]
-      const workspace = await this.db.getWorkspace(id)
-      if (!workspace) throw new HttpError(404, "workspace_not_found", "Workspace not found")
-      const requested = url.searchParams.get("path") ?? workspace.path
-      const resolved = await this.workspace.requireInsideGrant(requested, workspace.path)
-      if (kind === "tree" && url.searchParams.get("recursive") === "1") {
-        return jsonResponse({
-          root: workspace.path,
-          paths: workspaceFilePaths(workspace.path),
-        })
-      }
-      if (kind === "tree") {
-        return jsonResponse(await this.tools.execute("fs_list", { path: resolved }, {}))
-      }
-      if (!url.searchParams.get("path")) {
-        throw new HttpError(400, "path_required", "A file path is required")
-      }
-      return jsonResponse(await this.tools.execute("fs_read", { path: resolved }, {}))
+      const activeTurns = await this.db.listActiveTurns()
+      const active = Object.fromEntries(
+        activeTurns.map((turn) => [turn.sessionId, { status: turn.status, turnId: turn.id }]),
+      )
+      return jsonResponse({ active })
     }
 
     const contextMatch = /^\/v1\/sessions\/([^/]+)\/context$/.exec(path)
@@ -611,15 +573,26 @@ export class App {
       const id = decodeURIComponent(contextMatch[1] ?? "")
       const session = await this.db.getSession(id)
       if (!session) throw new HttpError(404, "session_not_found", "Session not found")
-      const [turns, messages, model] = await Promise.all([
+      const [turns, messages, model, activeTurn, inbox] = await Promise.all([
         this.db.listTurns(id, 100),
         this.db.getSessionMessages(id, 500),
         session.providerId && session.modelId
           ? this.providers.selected({ providerId: session.providerId, modelId: session.modelId }).catch(() => null)
           : Promise.resolve(null),
+        this.db.getActiveTurn(id),
+        this.turns.listInbox(id),
       ])
       return jsonResponse({
         session,
+        activeTurn: activeTurn
+          ? {
+              id: activeTurn.id,
+              status: activeTurn.status,
+              startedAt: activeTurn.startedAt,
+              updatedAt: activeTurn.updatedAt,
+            }
+          : null,
+        inbox,
         model,
         messages: messages.length,
         turns: turns.length,
@@ -633,28 +606,36 @@ export class App {
       })
     }
 
-    if (path === "/v1/journal" && method === "GET") {
+    if (path === "/v1/checkpoints" && method === "GET") {
       await this.requireAuth(request)
       const limitRaw = url.searchParams.get("limit")
       const limit = limitRaw ? Math.min(500, Math.max(1, Number(limitRaw) || 100)) : 100
-      return jsonResponse({ entries: await this.journal.list(limit) })
+      const sessionId = url.searchParams.get("sessionId") ?? undefined
+      return jsonResponse({ checkpoints: await this.checkpoints.list(limit, sessionId) })
     }
 
-    if (path === "/v1/journal/undo" && method === "POST") {
+    const checkpointMatch = /^\/v1\/checkpoints\/([^/]+)(?:\/(diff|restore))?$/.exec(path)
+    if (checkpointMatch) {
       await this.requireAuth(request)
-      const parsed = journalUndoSchema.safeParse(await readJson(request))
-      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
-      const batchId = parsed.data.batchId ?? (await this.journal.latestBatchId())
-      if (!batchId) throw new HttpError(404, "journal_empty", "No journal batch to undo")
-      return jsonResponse(await this.journal.undoBatch(batchId))
-    }
-
-    const journalMatch = /^\/v1\/journal\/([^/]+)$/.exec(path)
-    if (journalMatch && method === "GET") {
-      await this.requireAuth(request)
-      const entry = await this.journal.get(decodeURIComponent(journalMatch[1] ?? ""))
-      if (!entry) throw new HttpError(404, "journal_not_found", "Journal entry not found")
-      return jsonResponse({ entry })
+      const id = decodeURIComponent(checkpointMatch[1] ?? "")
+      const action = checkpointMatch[2]
+      if (!action && method === "GET") {
+        const checkpoint = await this.checkpoints.get(id)
+        if (!checkpoint) throw new HttpError(404, "checkpoint_not_found", "Checkpoint not found")
+        return jsonResponse({ checkpoint })
+      }
+      if (action === "diff" && method === "GET") {
+        return jsonResponse({ diff: await this.checkpoints.diff(id) })
+      }
+      if (action === "restore" && method === "POST") {
+        const parsed = checkpointRestoreSchema.safeParse(await readJson(request))
+        if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+        const checkpoint = await this.checkpoints.get(id)
+        if (!checkpoint) throw new HttpError(404, "checkpoint_not_found", "Checkpoint not found")
+        const result = await this.checkpoints.restore(id, parsed.data)
+        return jsonResponse({ result })
+      }
+      throw new HttpError(405, "method_not_allowed", "Method not allowed")
     }
 
     if (path === "/v1/rules" && method === "GET") {
@@ -686,6 +667,45 @@ export class App {
         return jsonResponse({ ok: true })
       }
       throw new HttpError(405, "method_not_allowed", "Method not allowed")
+    }
+
+    if (path === "/v1/approval-config" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse({ config: await this.permissions.config() })
+    }
+
+    if (path === "/v1/approval-config" && method === "PATCH") {
+      await this.requireAuth(request)
+      const parsed = approvalConfigSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      return jsonResponse({ config: await this.permissions.setConfig(parsed.data) })
+    }
+
+    if (path === "/v1/settings" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse({ settings: await this.settings.get() })
+    }
+
+    if (path === "/v1/settings" && method === "PATCH") {
+      await this.requireAuth(request)
+      const parsed = settingsPatchSchema.safeParse(await readJson(request))
+      if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+      return jsonResponse({ settings: await this.settings.patch(parsed.data) })
+    }
+
+    if (path === "/v1/approval-grants" && method === "GET") {
+      await this.requireAuth(request)
+      return jsonResponse({ grants: await this.permissions.listApprovalGrants() })
+    }
+
+    const approvalGrantMatch = /^\/v1\/approval-grants\/([^/]+)$/.exec(path)
+    if (approvalGrantMatch && method === "DELETE") {
+      await this.requireAuth(request)
+      const removed = await this.permissions.deleteApprovalGrant(
+        decodeURIComponent(approvalGrantMatch[1] ?? ""),
+      )
+      if (!removed) throw new HttpError(404, "approval_grant_not_found", "Approval grant not found")
+      return jsonResponse({ ok: true })
     }
 
     if (path === "/v1/approvals" && method === "GET") {
@@ -728,6 +748,7 @@ export class App {
         try {
           approval = await this.permissions.decideApproval(id, parsed.data.decision, {
             decidedBy: "user",
+            ...(parsed.data.scope ? { scope: parsed.data.scope } : {}),
             ...(parsed.data.reason ? { reason: parsed.data.reason } : {}),
             ...(parsed.data.arguments !== undefined ? { arguments: parsed.data.arguments } : {}),
           })
@@ -803,6 +824,22 @@ export class App {
       throw new HttpError(405, "method_not_allowed", "Method not allowed")
     }
 
+    const mediaMatch = /^\/v1\/media\/([0-9a-f]{64})$/.exec(path)
+    if (mediaMatch && method === "GET") {
+      await this.requireAuth(request)
+      const blob = await this.db.getReferencedBlob(mediaMatch[1]!)
+      if (!blob) throw new HttpError(404, "media_not_found", "Media not found")
+      return new Response(blob.data as unknown as BodyInit, {
+        status: 200,
+        headers: {
+          "content-type": blob.mime,
+          "content-length": String(blob.data.byteLength),
+          "cache-control": "private, max-age=86400",
+          "x-content-type-options": "nosniff",
+        },
+      })
+    }
+
     if (path === "/v1/models" && method === "GET") {
       await this.requireAuth(request)
       const providerId = url.searchParams.get("provider") ?? undefined
@@ -863,28 +900,84 @@ export class App {
         return jsonResponse({ messages: await this.turns.listMessages(sessionId, limit) })
       }
       if (method === "POST") {
+        const contentLength = Number(request.headers.get("content-length") ?? "0")
+        if (Number.isFinite(contentLength) && contentLength > 64 * 1024 * 1024) {
+          throw new HttpError(413, "payload_too_large", "Message payload exceeds the 64 MB request limit")
+        }
         const parsed = createMessageSchema.safeParse(await readJson(request))
         if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
-        const result = await this.turns.startTurn(
+        const result = await this.turns.prompt(
           sessionId,
-          parsed.data.content,
-          parsed.data.providerId && parsed.data.modelId
-            ? {
-                providerId: parsed.data.providerId,
-                modelId: parsed.data.modelId,
-                reasoningEffort: parsed.data.reasoningEffort,
-              }
-            : undefined,
+          parsed.data.content ?? "",
+          {
+            delivery: parsed.data.delivery ?? "steer",
+            ...(parsed.data.id ? { id: parsed.data.id } : {}),
+            ...(parsed.data.files ? { files: parsed.data.files } : {}),
+            ...(parsed.data.providerId && parsed.data.modelId
+              ? {
+                  selection: {
+                    providerId: parsed.data.providerId,
+                    modelId: parsed.data.modelId,
+                    reasoningEffort: parsed.data.reasoningEffort,
+                  },
+                }
+              : {}),
+          },
         )
         return jsonResponse(
           {
+            inbox: result.inbox,
             turn: result.turn,
-            streamUrl: `/v1/turns/${encodeURIComponent(result.turn.id)}/stream`,
+            activeTurn: result.turn,
+            streamUrl: result.turn
+              ? `/v1/turns/${encodeURIComponent(result.turn.id)}/stream`
+              : null,
           },
           202,
         )
       }
       throw new HttpError(405, "method_not_allowed", "Method not allowed")
+    }
+
+    const inboxMatch = /^\/v1\/sessions\/([^/]+)\/inbox(?:\/([^/]+))?$/.exec(path)
+    if (inboxMatch) {
+      await this.requireAuth(request)
+      const sessionId = decodeURIComponent(inboxMatch[1] ?? "")
+      const inboxId = inboxMatch[2] ? decodeURIComponent(inboxMatch[2]) : undefined
+      const session = await this.db.getSession(sessionId)
+      if (!session) throw new HttpError(404, "session_not_found", "Session not found")
+      if (!inboxId && method === "GET") {
+        return jsonResponse({ inbox: await this.turns.listInbox(sessionId) })
+      }
+      if (!inboxId) throw new HttpError(405, "method_not_allowed", "Method not allowed")
+      if (method === "DELETE") {
+        await this.turns.cancelInbox(sessionId, inboxId)
+        return jsonResponse({ ok: true })
+      }
+      if (method === "PATCH") {
+        const parsed = z
+          .object({ delivery: z.enum(["steer", "queue"]) })
+          .safeParse(await readJson(request))
+        if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+        const result = await this.turns.setInboxDelivery(sessionId, inboxId, parsed.data.delivery)
+        if (!result.inbox) throw new HttpError(409, "inbox_conflict", "Inbox item is no longer pending")
+        return jsonResponse({
+          inbox: result.inbox,
+          turn: result.turn,
+        })
+      }
+      throw new HttpError(405, "method_not_allowed", "Method not allowed")
+    }
+
+    const interruptMatch = /^\/v1\/sessions\/([^/]+)\/interrupt$/.exec(path)
+    if (interruptMatch && method === "POST") {
+      await this.requireAuth(request)
+      const sessionId = decodeURIComponent(interruptMatch[1] ?? "")
+      const session = await this.db.getSession(sessionId)
+      if (!session) throw new HttpError(404, "session_not_found", "Session not found")
+      const resume = url.searchParams.get("resume") !== "false"
+      const result = await this.turns.interruptSession(sessionId, { resume })
+      return jsonResponse(result)
     }
 
     const turnMatch = /^\/v1\/turns\/([^/]+)(?:\/(stream|cancel))?$/.exec(path)
@@ -919,6 +1012,32 @@ export class App {
     if (path === "/v1/sessions" && method === "POST") {
       await this.requireAuth(request)
       return this.createSession(request, requestId)
+    }
+
+    const sessionMatch = /^\/v1\/sessions\/([^/]+)$/.exec(path)
+    if (sessionMatch && (method === "PATCH" || method === "DELETE")) {
+      await this.requireAuth(request)
+      const id = decodeURIComponent(sessionMatch[1] ?? "")
+      const session = await this.db.getSession(id)
+      if (!session) throw new HttpError(404, "session_not_found", "Session not found")
+      if (method === "PATCH") {
+        const parsed = sessionRenameRequestSchema.safeParse(await readJson(request))
+        if (!parsed.success) throw new HttpError(400, "invalid_body", validationMessage(parsed))
+        const renamed = await this.db.renameSession(id, parsed.data.title)
+        if (!renamed) throw new HttpError(404, "session_not_found", "Session not found")
+        this.events.publish(renamed.event)
+        return jsonResponse({ session: renamed.session })
+      }
+      this.turns.beginSessionDelete(id)
+      try {
+        await this.turns.cancelSession(id)
+        const deleted = await this.db.deleteSession(id)
+        if (!deleted) throw new HttpError(404, "session_not_found", "Session not found")
+        this.events.publish(deleted)
+        return jsonResponse({ ok: true })
+      } finally {
+        this.turns.endSessionDelete(id)
+      }
     }
 
     if (path.startsWith("/v1/sessions/") && method === "GET") {

@@ -118,7 +118,7 @@ const RULES: readonly ThreatRule[] = [
     id: "runtime_config_tamper",
     scope: "strict",
     matches: (text) =>
-      /\b(?:write|edit|modify|change|append|update|add)\b[^\n]{0,220}(?:\.hermes\/(?:config\.yaml|SOUL\.md)|\.hermes\/\.env)/i.test(
+      /\b(?:write|edit|modify|change|append|update|add)\b[^\n]{0,220}(?:\.agent1\/(?:config\.yaml|SOUL\.md)|\.agent1\/\.env)/i.test(
         text,
       ),
   },
@@ -146,7 +146,7 @@ const RULES: readonly ThreatRule[] = [
   {
     id: "runtime_tamper",
     scope: "context",
-    matches: (text) => /\bunset\b[^\n]{0,80}(?:CLAUDE|CODEX|HERMES|AGENT|OPENAI|ANTHROPIC)/i.test(text),
+    matches: (text) => /\bunset\b[^\n]{0,80}(?:CLAUDE|CODEX|AGENT1|AGENT|OPENAI|ANTHROPIC)/i.test(text),
   },
   {
     id: "forensic_evasion",

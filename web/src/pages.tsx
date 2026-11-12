@@ -7,9 +7,10 @@ import {
   api,
   streamTurn,
   type Approval,
+  type ApprovalScope,
   type CatalogModel,
+  type Checkpoint,
   type ContextInfo,
-  type JournalEntry,
   type MemoryHistoryRecord,
   type MemoryPendingRecord,
   type MemoryStoreView,
@@ -17,13 +18,11 @@ import {
   type ProviderInfo,
   type Session,
   type SessionSearchResult,
-  type Workspace,
   modelKey,
   parseModelKey,
 } from "./api"
 import { Icon } from "./icons"
-import { PierreDiffView, PierreFileView, PierreTree } from "./pierre"
-import { ApprovalCard, Banner, Composer, Empty, Markdown, PageHeader, formatDate, shortHash, statusColor } from "./ui"
+import { ApprovalCard, Banner, Composer, Empty, Markdown, PageHeader, formatDate, shortHash, statusColor, type ComposerFile } from "./ui"
 import { applyTheme, getThemePreference, type ThemePreference } from "./theme"
 
 function errorMessage(error: unknown): string {
@@ -36,8 +35,7 @@ const settingsNav = [
   { href: "/models", label: "Models", icon: "model" as const },
   { href: "/approvals", label: "Approvals", icon: "approvals" as const },
   { href: "/rules", label: "Rules", icon: "rules" as const },
-  { href: "/workspaces", label: "Workspaces", icon: "folder" as const },
-  { href: "/journal", label: "Journal", icon: "journal" as const },
+  { href: "/checkpoints", label: "Checkpoints", icon: "journal" as const },
   { href: "/memory", label: "Memory", icon: "memory" as const },
 ]
 
@@ -267,6 +265,25 @@ function MessageView(props: { message: Message }) {
           <Markdown content={props.message.text} />
         </div>
       </Show>
+      <Show when={(props.message.files?.length ?? 0) > 0}>
+        <div class="message-attachments">
+          <For each={props.message.files ?? []}>
+            {(file) => (
+              <Show
+                when={file.mime.startsWith("image/")}
+                fallback={<span class="composer-attachment">{file.name ?? file.mime}</span>}
+              >
+                <img
+                  class="message-attachment-image"
+                  src={api.mediaUrl(file.uri)}
+                  alt={file.name ?? "attachment"}
+                  loading="lazy"
+                />
+              </Show>
+            )}
+          </For>
+        </div>
+      </Show>
     </div>
   )
 }
@@ -344,8 +361,9 @@ function ContextPanel(props: { context: ContextInfo | undefined }) {
             Runtime
           </div>
           <div class="system-prompt">
-            One mode: reads and searches are free; writes, shell commands, connector calls, and MCP
-            tools require approval. Every filesystem change is journaled and undoable.
+            One mode: reads and searches are free; file writes are checkpoint-first; shell commands,
+            connector calls, and MCP tools follow the approval policy. Every filesystem change is
+            checkpointed and rollbackable.
           </div>
         </div>
       )}
@@ -353,171 +371,48 @@ function ContextPanel(props: { context: ContextInfo | undefined }) {
   )
 }
 
-function FilesPanel() {
-  const workspaces = useQuery(() => ({ queryKey: ["workspaces"], queryFn: api.workspaces }))
-  const [workspaceId, setWorkspaceId] = createSignal<string>()
-  const [selectedFile, setSelectedFile] = createSignal<string>()
-
-  createEffect(() => {
-    const list = workspaces.data?.workspaces ?? []
-    if (!workspaceId() && list[0]) setWorkspaceId(list[0].id)
-  })
-
-  const tree = useQuery(() => ({
-    queryKey: ["workspace-paths", workspaceId()],
-    queryFn: () => api.workspacePaths(workspaceId()!),
-    enabled: Boolean(workspaceId()),
+function CheckpointCard(props: { checkpoint: Checkpoint; onRestore: (checkpoint: Checkpoint) => void }) {
+  const [open, setOpen] = createSignal(false)
+  const diff = useQuery(() => ({
+    queryKey: ["checkpoint-diff", props.checkpoint.id],
+    queryFn: () => api.checkpointDiff(props.checkpoint.id),
+    enabled: open(),
   }))
-  const selectedWorkspace = () => workspaces.data?.workspaces.find((workspace) => workspace.id === workspaceId())
-  const absolutePath = (relative: string) => {
-    const root = selectedWorkspace()?.path?.replace(/[\\/]+$/, "")
-    return root ? `${root}/${relative}` : relative
-  }
-  const file = useQuery(() => ({
-    queryKey: ["file", workspaceId(), selectedFile()],
-    queryFn: () => api.workspaceFile(workspaceId()!, absolutePath(selectedFile()!)),
-    enabled: Boolean(workspaceId() && selectedFile()),
-  }))
-
   return (
-    <div class="files-panel">
-      <Show when={(workspaces.data?.workspaces.length ?? 0) > 0} fallback={<Empty>No workspace grants. Add one in Workspaces.</Empty>}>
-        <select
-          class="form-select"
-          value={workspaceId() ?? ""}
-          onChange={(event) => {
-            setWorkspaceId(event.currentTarget.value)
-            setSelectedFile(undefined)
-          }}
-        >
-          <For each={workspaces.data?.workspaces}>
-            {(workspace) => <option value={workspace.id}>{workspace.label} · {workspace.access}</option>}
-          </For>
-        </select>
-        <div class="files-root">{selectedWorkspace()?.path}</div>
-        <div class="files-tree-wrap">
-          <Show
-            when={tree.data}
-            fallback={<div class="empty">Loading files…</div>}
-          >
-            <PierreTree paths={tree.data?.paths ?? []} onSelect={setSelectedFile} />
-          </Show>
-        </div>
-        <Show when={file.data}>
-          {(content) => (
-            <div class="files-preview">
-              <div class="files-preview-name">
-                <Icon name="file" size={12} />
-                <span class="truncate">{selectedFile()}</span>
-                <span class="tiny faint">{content().size.toLocaleString()} bytes</span>
-              </div>
-              <PierreFileView name={selectedFile() ?? "file"} contents={content().content.slice(0, 100_000)} />
-            </div>
+    <div class="list-card">
+      <div class="row-between">
+        <span class="mono small">{props.checkpoint.commit.slice(0, 8)}</span>
+        <span class="tag">{props.checkpoint.filesChanged} files</span>
+      </div>
+      <div class="small" style={{ "margin-top": "5px" }}>{props.checkpoint.reason}</div>
+      <div class="small muted" style={{ "margin-top": "4px" }}>
+        {props.checkpoint.rootPath} · {formatDate(props.checkpoint.createdAt)}
+      </div>
+      <div class="row" style={{ "margin-top": "8px", gap: "8px" }}>
+        <button class="button button-ghost button-small" type="button" onClick={() => setOpen((value) => !value)}>
+          <Icon name="file" size={12} /> {open() ? "Hide diff" : "Review changes"}
+        </button>
+        <button class="button button-ghost button-small" type="button" onClick={() => props.onRestore(props.checkpoint)}>
+          <Icon name="refresh" size={12} /> Restore
+        </button>
+      </div>
+      <Show when={open()}>
+        <Show when={diff.data} fallback={<div class="small muted">{diff.isError ? errorMessage(diff.error) : "Loading diff…"}</div>}>
+          {(value) => (
+            <pre class="checkpoint-diff">{value().diff.diff || value().diff.stat || "No changes."}</pre>
           )}
         </Show>
-        <Show when={file.error}>
-          <Banner kind="error">{errorMessage(file.error)}</Banner>
-        </Show>
       </Show>
     </div>
   )
 }
 
-function matchingWorkspace(path: string | null, workspaces: Workspace[]): Workspace | undefined {
-  if (!path) return
-  const normalized = path.toLowerCase().replace(/\\/g, "/")
-  return workspaces.find((workspace) => {
-    const root = workspace.path.toLowerCase().replace(/\\/g, "/").replace(/\/+$/, "")
-    return normalized === root || normalized.startsWith(`${root}/`)
-  })
-}
-
-function JournalChange(props: { entry: JournalEntry; workspaces: Workspace[] }) {
-  const workspace = matchingWorkspace(props.entry.target ?? props.entry.source, props.workspaces)
-  const target = props.entry.target ?? props.entry.source
-  const file = useQuery(() => ({
-    queryKey: ["journal-file", props.entry.id, target],
-    queryFn: () => api.workspaceFile(workspace!.id, target!),
-    enabled: Boolean(workspace && target && props.entry.state === "done"),
-  }))
-  const previous = () => {
-    const undo = props.entry.undo as { previous?: string | null } | undefined
-    return typeof undo?.previous === "string" ? undo.previous : ""
-  }
-  const relative = () => {
-    if (!workspace || !target) return target ?? ""
-    return target.replace(workspace.path, "").replace(/^[\\/]/, "").replace(/\\/g, "/")
-  }
-
-  return (
-    <div class="journal-file">
-      <div class="journal-file-head">
-        <Icon name={props.entry.operation === "move" ? "back" : "file"} size={11} />
-        <span class="truncate">{relative()}</span>
-        <span class="tag">{props.entry.operation}</span>
-      </div>
-      <Show when={props.entry.operation === "move" && props.entry.source && props.entry.target}>
-        <div class="journal-move">
-          <span>{props.entry.source}</span>
-          <span class="new">→ {props.entry.target}</span>
-        </div>
-      </Show>
-      <Show when={file.data}>
-        {(content) => (
-          <Show
-            when={props.entry.operation === "write"}
-            fallback={<PierreFileView name={relative()} contents={content().content.slice(0, 100_000)} />}
-          >
-            <PierreDiffView
-              name={relative()}
-              before={previous()}
-              after={content().content}
-            />
-          </Show>
-        )}
-      </Show>
-    </div>
-  )
-}
-
-function JournalList(props: { entries: JournalEntry[]; onUndo: (batchId: string) => void }) {
-  const workspaces = useQuery(() => ({ queryKey: ["workspaces"], queryFn: api.workspaces }))
-  const batches = createMemo(() => {
-    const map = new Map<string, JournalEntry[]>()
-    for (const entry of props.entries) {
-      const list = map.get(entry.batchId) ?? []
-      list.push(entry)
-      map.set(entry.batchId, list)
-    }
-    return Array.from(map.entries())
-  })
+function CheckpointList(props: { checkpoints: Checkpoint[]; onRestore: (checkpoint: Checkpoint) => void }) {
   return (
     <div class="list">
-      <Show when={batches().length > 0} fallback={<Empty>No journal entries for this session.</Empty>}>
-        <For each={batches()}>
-          {([batchId, entries]) => (
-            <div class="list-card">
-              <div class="row-between">
-                <span class="mono small">{batchId.slice(0, 20)}</span>
-                <span class="tag">{entries.length} ops</span>
-              </div>
-              <div class="small muted" style={{ "margin-top": "5px" }}>
-                {entries.filter((entry) => entry.state === "done").length} done ·{" "}
-                {entries[0]?.operation ?? "operation"}
-              </div>
-              <Show when={entries.length <= 8}>
-                <details class="journal-details">
-                  <summary>Review changes</summary>
-                  <For each={entries.filter((entry) => entry.target || entry.source)}>
-                    {(entry) => <JournalChange entry={entry} workspaces={workspaces.data?.workspaces ?? []} />}
-                  </For>
-                </details>
-              </Show>
-              <button class="button button-ghost button-small" type="button" onClick={() => props.onUndo(batchId)}>
-                <Icon name="refresh" size={12} /> Undo batch
-              </button>
-            </div>
-          )}
+      <Show when={props.checkpoints.length > 0} fallback={<Empty>No filesystem checkpoints yet.</Empty>}>
+        <For each={props.checkpoints}>
+          {(checkpoint) => <CheckpointCard checkpoint={checkpoint} onRestore={props.onRestore} />}
         </For>
       </Show>
     </div>
@@ -528,10 +423,10 @@ function SessionPanel(props: {
   session: Session | undefined
   context: ContextInfo | undefined
   approvals: Approval[]
-  journal: JournalEntry[]
-  onDecide: (approval: Approval, decision: "approve" | "reject") => void
-  tab: "review" | "context" | "files"
-  onTab: (tab: "review" | "context" | "files") => void
+  checkpoints: Checkpoint[]
+  onDecide: (approval: Approval, decision: "approve" | "reject", scope?: ApprovalScope) => void
+  tab: "review" | "context"
+  onTab: (tab: "review" | "context") => void
   onClose?: () => void
 }) {
   const queryClient = useQueryClient()
@@ -543,9 +438,6 @@ function SessionPanel(props: {
         </button>
         <button class={`side-tab ${props.tab === "context" ? "active" : ""}`} type="button" onClick={() => props.onTab("context")}>
           Context
-        </button>
-        <button class={`side-tab ${props.tab === "files" ? "active" : ""}`} type="button" onClick={() => props.onTab("files")}>
-          Files
         </button>
         <div class="composer-spacer" />
         <span class="tag">{props.session?.id.slice(0, 10)}</span>
@@ -566,7 +458,7 @@ function SessionPanel(props: {
                 {(approval) => (
                   <ApprovalCard
                     approval={approval}
-                    onDecide={(decision) => props.onDecide(approval, decision)}
+                    onDecide={(decision, scope) => props.onDecide(approval, decision, scope)}
                   />
                 )}
               </For>
@@ -574,14 +466,17 @@ function SessionPanel(props: {
           </Show>
           <div class="divider" />
           <div class="small bold muted" style={{ "margin-bottom": "9px" }}>
-            Journal
+            Checkpoints
           </div>
-          <JournalList
-            entries={props.journal}
-            onUndo={async (batchId) => {
+          <CheckpointList
+            checkpoints={props.checkpoints}
+            onRestore={async (checkpoint) => {
+              if (!window.confirm(`Restore ${checkpoint.commit.slice(0, 8)}? User edits are preserved.`)) return
               try {
-                const result = await api.undoJournal(batchId)
-                toast.success(`Undo: ${result.undone} completed`)
+                const result = await api.restoreCheckpoint(checkpoint.id, { safe: true })
+                toast.success(
+                  `Restored ${result.result.restoredTo}: ${result.result.restoredFiles.length} files, ${result.result.deletedFiles.length} deleted`,
+                )
                 await queryClient.invalidateQueries()
               } catch (error) {
                 toast.error(errorMessage(error))
@@ -591,9 +486,6 @@ function SessionPanel(props: {
         </Show>
         <Show when={props.tab === "context"}>
           <ContextPanel context={props.context} />
-        </Show>
-        <Show when={props.tab === "files"}>
-          <FilesPanel />
         </Show>
       </div>
     </aside>
@@ -684,9 +576,10 @@ function ContextUsage(props: { context: ContextInfo | undefined; onOpen: () => v
 export function SessionPage() {
   const params = useParams<{ id: string }>()
   const location = useLocation()
+  const navigate = useNavigate()
   const id = () => params.id ?? ""
   const queryClient = useQueryClient()
-  const [sideTab, setSideTab] = createSignal<"review" | "context" | "files">("context")
+  const [sideTab, setSideTab] = createSignal<"review" | "context">("context")
   const [sideOpen, setSideOpen] = createSignal(false)
   const [busy, setBusy] = createSignal(false)
   const [liveText, setLiveText] = createSignal("")
@@ -722,11 +615,10 @@ export function SessionPage() {
   const approvals = useQuery(() => ({
     queryKey: ["approvals"],
     queryFn: () => api.approvals(),
-    refetchInterval: 2_000,
   }))
-  const journal = useQuery(() => ({
-    queryKey: ["journal", id()],
-    queryFn: () => api.journal(200),
+  const checkpoints = useQuery(() => ({
+    queryKey: ["checkpoints", id()],
+    queryFn: () => api.checkpoints(200, id()),
     enabled: Boolean(id()),
   }))
   const models = useQuery(() => ({ queryKey: ["models"], queryFn: () => api.models() }))
@@ -735,7 +627,7 @@ export function SessionPage() {
   const session = () => sessions.data?.sessions.find((item) => item.id === id())
   const sessionApprovals = () => (approvals.data?.approvals ?? []).filter((approval) => approval.sessionId === id())
   const pendingApprovals = () => sessionApprovals().filter((approval) => approval.status === "pending")
-  const sessionJournal = () => (journal.data?.entries ?? []).filter((entry) => entry.sessionId === id())
+  const sessionCheckpoints = () => checkpoints.data?.checkpoints ?? []
   const chatRows = createMemo(() => buildChatRows(messages.data?.messages ?? []))
   const [openToolGroups, setOpenToolGroups] = createSignal<Set<string>>(new Set())
 
@@ -868,7 +760,7 @@ export function SessionPage() {
       queryClient.invalidateQueries({ queryKey: ["messages", id()] }),
       queryClient.invalidateQueries({ queryKey: ["approvals"] }),
       queryClient.invalidateQueries({ queryKey: ["context", id()] }),
-      queryClient.invalidateQueries({ queryKey: ["journal", id()] }),
+      queryClient.invalidateQueries({ queryKey: ["checkpoints", id()] }),
     ])
   }
 
@@ -901,7 +793,7 @@ export function SessionPage() {
     }
   }
 
-  const send = async (text: string) => {
+  const send = async (text: string, files: ComposerFile[]) => {
     if (busy()) return
     setBusy(true)
     setTurnError(undefined)
@@ -912,6 +804,7 @@ export function SessionPage() {
         id(),
         text,
         selection ? { ...selection, reasoningEffort: selectedEffort() } : undefined,
+        files,
       )
       await attachStream(started.turn.id)
     } catch (error) {
@@ -922,11 +815,18 @@ export function SessionPage() {
   }
 
   let handledTurn: string | undefined
+  let hydratedActiveTurn: string | undefined
   createEffect(() => {
     const turnId = new URLSearchParams(location.search).get("turn")
     if (!turnId || handledTurn === turnId) return
     handledTurn = turnId
     void attachStream(turnId)
+  })
+  createEffect(() => {
+    const activeTurn = context.data?.activeTurn
+    if (!activeTurn || busy() || hydratedActiveTurn === activeTurn.id) return
+    hydratedActiveTurn = activeTurn.id
+    void attachStream(activeTurn.id)
   })
 
   const stop = async () => {
@@ -943,11 +843,36 @@ export function SessionPage() {
     await refresh()
   }
 
-  const decide = async (approval: Approval, decision: "approve" | "reject") => {
+  const decide = async (approval: Approval, decision: "approve" | "reject", scope?: ApprovalScope) => {
     try {
-      await api.decideApproval(approval.id, decision)
+      await api.decideApproval(approval.id, decision, scope ? { scope } : undefined)
       toast.success(decision === "approve" ? "Approved" : "Rejected")
       await refresh()
+    } catch (error) {
+      toast.error(errorMessage(error))
+    }
+  }
+
+  const renameSession = async () => {
+    const current = session()?.title ?? ""
+    const title = window.prompt("Session title", current)?.trim()
+    if (!title || title === current) return
+    try {
+      await api.renameSession(id(), title)
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] })
+      await queryClient.invalidateQueries({ queryKey: ["context", id()] })
+      toast.success("Session renamed")
+    } catch (error) {
+      toast.error(errorMessage(error))
+    }
+  }
+
+  const deleteSession = async () => {
+    if (!window.confirm("Delete this session and its messages, approvals, and checkpoint metadata?")) return
+    try {
+      await api.deleteSession(id())
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] })
+      navigate("/")
     } catch (error) {
       toast.error(errorMessage(error))
     }
@@ -969,6 +894,12 @@ export function SessionPage() {
               <Show when={pendingApprovals().length > 0}>
                 <span class="tag amber">{pendingApprovals().length} approval</span>
               </Show>
+              <button class="button button-ghost button-small" type="button" onClick={() => void renameSession()}>
+                Rename
+              </button>
+              <button class="icon-button" type="button" title="Delete session" onClick={() => void deleteSession()}>
+                <Icon name="trash" size={13} />
+              </button>
               <ContextUsage
                 context={context.data}
                 onOpen={() => {
@@ -977,7 +908,7 @@ export function SessionPage() {
                 }}
               />
               <button
-                class="icon-button"
+                class="icon-button session-panel-toggle"
                 type="button"
                 onClick={() => {
                   if (sideOpen()) {
@@ -1030,7 +961,7 @@ export function SessionPage() {
               <Show when={pendingApprovals().length > 0 && (!sideOpen() || sideTab() !== "review")}>
                 <div class="list">
                   <For each={pendingApprovals()}>
-                    {(approval) => <ApprovalCard approval={approval} onDecide={(decision) => void decide(approval, decision)} />}
+                    {(approval) => <ApprovalCard approval={approval} onDecide={(decision, scope) => void decide(approval, decision, scope)} />}
                   </For>
                 </div>
               </Show>
@@ -1086,8 +1017,8 @@ export function SessionPage() {
             session={session()}
             context={context.data}
             approvals={pendingApprovals()}
-            journal={sessionJournal()}
-            onDecide={(approval, decision) => void decide(approval, decision)}
+            checkpoints={sessionCheckpoints()}
+            onDecide={(approval, decision, scope) => void decide(approval, decision, scope)}
             tab={sideTab()}
             onTab={setSideTab}
             onClose={() => setSideOpen(false)}
@@ -1103,14 +1034,25 @@ export function SessionPage() {
 export function ApprovalsPage() {
   const queryClient = useQueryClient()
   const approvals = useQuery(() => ({ queryKey: ["approvals"], queryFn: () => api.approvals() }))
+  const grants = useQuery(() => ({ queryKey: ["approval-grants"], queryFn: api.approvalGrants }))
   const [filter, setFilter] = createSignal("pending")
   const filtered = () => (approvals.data?.approvals ?? []).filter((approval) => filter() === "all" || approval.status === filter())
 
-  const decide = async (approval: Approval, decision: "approve" | "reject") => {
+  const decide = async (approval: Approval, decision: "approve" | "reject", scope?: ApprovalScope) => {
     try {
-      await api.decideApproval(approval.id, decision)
+      await api.decideApproval(approval.id, decision, scope ? { scope } : undefined)
       toast.success(decision === "approve" ? "Approved" : "Rejected")
       await queryClient.invalidateQueries({ queryKey: ["approvals"] })
+    } catch (error) {
+      toast.error(errorMessage(error))
+    }
+  }
+
+  const revoke = async (id: string) => {
+    try {
+      await api.deleteApprovalGrant(id)
+      await queryClient.invalidateQueries({ queryKey: ["approval-grants"] })
+      toast.success("Approval grant revoked")
     } catch (error) {
       toast.error(errorMessage(error))
     }
@@ -1144,9 +1086,35 @@ export function ApprovalsPage() {
                   <div class="grow">
                     <ApprovalCard
                       approval={approval}
-                      onDecide={(decision) => void decide(approval, decision)}
+                      onDecide={(decision, scope) => void decide(approval, decision, scope)}
                     />
                   </div>
+                </div>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
+      <h2 style={{ "margin-top": "24px", "font-size": "13px" }}>Saved grants</h2>
+      <Show
+        when={(grants.data?.grants.length ?? 0) > 0}
+        fallback={<Empty>No session or permanent approval grants.</Empty>}
+      >
+        <div class="list">
+          <For each={grants.data?.grants ?? []}>
+            {(grant) => (
+              <div class="list-card">
+                <div class="row-between">
+                  <div class="row">
+                    <span class="tag">{grant.scope}</span>
+                    <span class="mono small">{grant.patternKey}</span>
+                  </div>
+                  <button class="icon-button" type="button" onClick={() => void revoke(grant.id)} title="Revoke grant">
+                    <Icon name="trash" size={13} />
+                  </button>
+                </div>
+                <div class="tiny faint" style={{ "margin-top": "5px" }}>
+                  {grant.action} {" · "} {grant.resource}
                 </div>
               </div>
             )}
@@ -1248,34 +1216,17 @@ export function RulesPage() {
   )
 }
 
-export function WorkspacesPage() {
+export function CheckpointsPage() {
   const queryClient = useQueryClient()
-  const workspaces = useQuery(() => ({ queryKey: ["workspaces"], queryFn: api.workspaces }))
-  const [pathValue, setPathValue] = createSignal("")
-  const [label, setLabel] = createSignal("")
-  const [access, setAccess] = createSignal<"read" | "write">("read")
-  const [busy, setBusy] = createSignal(false)
-
-  const add = async () => {
-    if (!pathValue().trim()) return
-    setBusy(true)
+  const checkpoints = useQuery(() => ({ queryKey: ["checkpoints-all"], queryFn: () => api.checkpoints(200) }))
+  const restore = async (checkpoint: Checkpoint) => {
+    if (!window.confirm(`Restore ${checkpoint.commit.slice(0, 8)}? User edits are preserved.`)) return
     try {
-      await api.addWorkspace({ path: pathValue(), label: label() || undefined, access: access() })
-      setPathValue("")
-      setLabel("")
-      await queryClient.invalidateQueries({ queryKey: ["workspaces"] })
-      toast.success("Workspace granted")
-    } catch (error) {
-      toast.error(errorMessage(error))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const remove = async (workspace: Workspace) => {
-    try {
-      await api.removeWorkspace(workspace.id)
-      await queryClient.invalidateQueries({ queryKey: ["workspaces"] })
+      const result = await api.restoreCheckpoint(checkpoint.id, { safe: true })
+      toast.success(
+        `Restored ${result.result.restoredTo}: ${result.result.restoredFiles.length} files, ${result.result.deletedFiles.length} deleted`,
+      )
+      await queryClient.invalidateQueries({ queryKey: ["checkpoints-all"] })
     } catch (error) {
       toast.error(errorMessage(error))
     }
@@ -1283,72 +1234,12 @@ export function WorkspacesPage() {
 
   return (
     <PageBody>
-      <PageHeader title="Workspaces" subtitle="Folders the agent may inspect or change. Writes still require approval." />
-      <div class="form-grid" style={{ "margin-bottom": "24px" }}>
-        <div class="form-row">
-          <div>
-            <label class="form-label">Folder path</label>
-            <input class="form-input" value={pathValue()} onInput={(event) => setPathValue(event.currentTarget.value)} placeholder="C:\\Users\\me\\Documents" />
-          </div>
-          <div>
-            <label class="form-label">Label</label>
-            <input class="form-input" value={label()} onInput={(event) => setLabel(event.currentTarget.value)} placeholder="Documents" />
-          </div>
-        </div>
-        <div class="row">
-          <select class="form-select" value={access()} onChange={(event) => setAccess(event.currentTarget.value as "read" | "write")}>
-            <option value="read">Read</option>
-            <option value="write">Read + write</option>
-          </select>
-          <button class="button button-primary" type="button" onClick={() => void add()} disabled={busy() || !pathValue().trim()}>
-            Grant folder
-          </button>
-        </div>
-      </div>
-      <div class="list">
-        <For each={workspaces.data?.workspaces ?? []}>
-          {(workspace) => (
-            <div class="list-card">
-              <div class="row-between">
-                <div>
-                  <div class="row">
-                    <strong>{workspace.label}</strong>
-                    <span class="tag">{workspace.access}</span>
-                  </div>
-                  <div class="mono tiny muted" style={{ "margin-top": "4px" }}>{workspace.path}</div>
-                </div>
-                <button class="icon-button" type="button" onClick={() => void remove(workspace)} title="Remove workspace">
-                  <Icon name="trash" size={13} />
-                </button>
-              </div>
-            </div>
-          )}
-        </For>
-      </div>
+      <PageHeader title="Checkpoints" subtitle="Shadow-Git snapshots of file writes. Restore preserves user edits." />
+      <CheckpointList checkpoints={checkpoints.data?.checkpoints ?? []} onRestore={(checkpoint) => void restore(checkpoint)} />
     </PageBody>
   )
 }
 
-export function JournalPage() {
-  const queryClient = useQueryClient()
-  const journal = useQuery(() => ({ queryKey: ["journal-all"], queryFn: () => api.journal(200) }))
-  const undo = async (batchId: string) => {
-    try {
-      const result = await api.undoJournal(batchId)
-      toast.success(`Undo: ${result.undone} completed, ${result.skipped} skipped`)
-      await queryClient.invalidateQueries({ queryKey: ["journal-all"] })
-    } catch (error) {
-      toast.error(errorMessage(error))
-    }
-  }
-
-  return (
-    <PageBody>
-      <PageHeader title="Journal" subtitle="Every filesystem action is recorded with hashes and undo data." />
-      <JournalList entries={journal.data?.entries ?? []} onUndo={(batchId) => void undo(batchId)} />
-    </PageBody>
-  )
-}
 
 function MemoryUsageBar(props: { store: MemoryStoreView }) {
   return (
@@ -1623,7 +1514,7 @@ export function MemoryPage() {
               <div class="row-between">
                 <div>
                   <div class="list-card-title">History and undo</div>
-                  <div class="small muted">Every applied memory change is journaled.</div>
+                  <div class="small muted">Every applied memory change is recorded and undoable.</div>
                 </div>
                 <a class="button button-secondary button-small" href="/v1/memory/export">
                   Export Markdown
@@ -1994,7 +1885,14 @@ export function SettingsPage() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const info = useQuery(() => ({ queryKey: ["info"], queryFn: api.info }))
+  const approvalConfig = useQuery(() => ({ queryKey: ["approval-config"], queryFn: api.approvalConfig }))
   const [theme, setTheme] = createSignal<ThemePreference>(getThemePreference())
+  const [approvalMode, setApprovalMode] = createSignal<"smart" | "manual" | "off">("smart")
+  const [approvalTimeout, setApprovalTimeout] = createSignal("300")
+  const [approvalSafeRoot, setApprovalSafeRoot] = createSignal("")
+  const [approvalSmartModel, setApprovalSmartModel] = createSignal("")
+  const [approvalDeny, setApprovalDeny] = createSignal("")
+  const [approvalAllowlist, setApprovalAllowlist] = createSignal("")
   const [rotated, setRotated] = createSignal<string>()
   const [busy, setBusy] = createSignal(false)
   const [installPrompt, setInstallPrompt] = createSignal<Event & { prompt?: () => Promise<void> }>()
@@ -2011,6 +1909,38 @@ export function SettingsPage() {
   const changeTheme = (value: ThemePreference) => {
     setTheme(value)
     applyTheme(value)
+  }
+
+  createEffect(() => {
+    const config = approvalConfig.data?.config
+    if (!config) return
+    setApprovalMode(config.mode)
+    setApprovalTimeout(String(config.timeoutSeconds))
+    setApprovalSafeRoot(config.writeSafeRoot ?? "")
+    setApprovalSmartModel(config.smartModel ?? "")
+    setApprovalDeny(config.deny.join("\n"))
+    setApprovalAllowlist(config.allowlist.join("\n"))
+  })
+
+  const saveApproval = async () => {
+    setBusy(true)
+    try {
+      const timeout = Number(approvalTimeout())
+      await api.setApprovalConfig({
+        mode: approvalMode(),
+        ...(Number.isFinite(timeout) && timeout > 0 ? { timeoutSeconds: Math.floor(timeout) } : {}),
+        writeSafeRoot: approvalSafeRoot().trim() || null,
+        smartModel: approvalSmartModel().trim() || null,
+        deny: approvalDeny().split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+        allowlist: approvalAllowlist().split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+      })
+      await queryClient.invalidateQueries({ queryKey: ["approval-config"] })
+      toast.success("Approval policy saved")
+    } catch (error) {
+      toast.error(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const rotate = async () => {
@@ -2073,6 +2003,67 @@ export function SettingsPage() {
               New password: <span class="mono">{rotated()}</span> — save it now.
             </div>
           </Show>
+        </div>
+        <div class="list-card">
+          <div class="bold">Approval policy</div>
+          <div class="small muted" style={{ "margin-top": "4px" }}>
+            File writes are checkpoint-first. Shell commands use the hardline blocklist, deny rules,
+            allowlist, and the selected approval mode. Timeouts fail closed.
+          </div>
+          <div class="form-row" style={{ "margin-top": "10px" }}>
+            <div>
+              <label class="form-label">Mode</label>
+              <select
+                class="form-select"
+                value={approvalMode()}
+                onChange={(event) => setApprovalMode(event.currentTarget.value as "smart" | "manual" | "off")}
+              >
+                <option value="smart">Smart</option>
+                <option value="manual">Manual</option>
+                <option value="off">Off</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label">Approval timeout (seconds)</label>
+              <input
+                class="form-input"
+                value={approvalTimeout()}
+                onInput={(event) => setApprovalTimeout(event.currentTarget.value)}
+              />
+            </div>
+          </div>
+          <label class="form-label" style={{ "margin-top": "10px" }}>Smart-mode auxiliary model</label>
+          <input
+            class="form-input"
+            value={approvalSmartModel()}
+            onInput={(event) => setApprovalSmartModel(event.currentTarget.value)}
+            placeholder="provider/model (empty uses the default model; judge failures ask the user)"
+          />
+          <label class="form-label" style={{ "margin-top": "10px" }}>Optional write-safe root</label>
+          <input
+            class="form-input"
+            value={approvalSafeRoot()}
+            onInput={(event) => setApprovalSafeRoot(event.currentTarget.value)}
+            placeholder="Leave empty to use the Agent-1 path policy everywhere"
+          />
+          <label class="form-label" style={{ "margin-top": "10px" }}>Deny patterns (one per line)</label>
+          <textarea
+            class="form-input"
+            rows={3}
+            value={approvalDeny()}
+            onInput={(event) => setApprovalDeny(event.currentTarget.value)}
+            placeholder="rm *"
+          />
+          <label class="form-label" style={{ "margin-top": "10px" }}>Allowlist patterns (one per line)</label>
+          <textarea
+            class="form-input"
+            rows={3}
+            value={approvalAllowlist()}
+            onInput={(event) => setApprovalAllowlist(event.currentTarget.value)}
+          />
+          <button class="button button-primary button-small" type="button" style={{ "margin-top": "10px" }} onClick={() => void saveApproval()} disabled={busy()}>
+            Save approval policy
+          </button>
         </div>
         <div class="list-card">
           <div class="bold">Install</div>

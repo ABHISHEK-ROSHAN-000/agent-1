@@ -21,7 +21,9 @@
     "test:e2e": "bun run web:build && bun test e2e",
     "test:all": "bun run check && bun run test:e2e",
     "db:reset": "bun run scripts/reset-db.ts",
-    "check": "bun run typecheck && bun run web:typecheck && bun test src"
+    "tui": "bun --preload @opentui/solid/preload src/tui/main.tsx",
+    "tui:typecheck": "tsc --noEmit -p tsconfig.tui.json",
+    "check": "bun run typecheck && bun run web:typecheck && bun run tui:typecheck && bun test src"
   },
   "engines": {
     "bun": ">=1.4.0"
@@ -30,6 +32,7 @@
     "@types/bun": "1.4.4",
     "@types/pngjs": "6.0.5",
     "@types/qrcode": "1.5.6",
+    "node-pty": "1.1.0",
     "pixelmatch": "7.1.0",
     "playwright-core": "1.65.0",
     "pngjs": "7.0.0",
@@ -42,9 +45,14 @@
     "@clack/prompts": "1.0.0-alpha.1",
     "@effect/sql": "0.52.1",
     "@effect/sql-sqlite-bun": "4.1.2",
+    "@opentui/core": "0.8.4",
+    "@opentui/keymap": "0.8.4",
+    "@opentui/solid": "0.8.4",
     "@opentunnel/client": "0.6.2",
+    "@silvia-odwyer/photon-node": "0.3.4",
     "ai": "7.0.166",
     "effect": "4.1.2",
+    "solid-js": "1.9.17",
     "zod": "4.6.7"
   }
 }

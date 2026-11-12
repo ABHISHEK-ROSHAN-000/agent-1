@@ -147,9 +147,13 @@ export function startFakeOpenAI(): FakeOpenAI {
         .map((message) => contentText(message.content))
         .join("\n")
       const hasToolResult = last?.role === "tool" || last?.role === "tool_result"
+      const lastUserText = contentText(
+        messages.filter((message) => message.role === "user").at(-1)?.content,
+      )
       const toolNames = body.tools?.map((entry) => entry.function?.name ?? "") ?? []
       const wantsEcho = /test_echo|echo/i.test(userText) && toolNames.includes("test_echo")
-      const wantsConfirm = /confirm/i.test(userText) && toolNames.includes("test_confirm")
+      const wantsConfirm = /confirm/i.test(lastUserText) && toolNames.includes("test_confirm")
+      const readImage = /read image\s+(.+)$/i.exec(lastUserText)
       const wantsLoop = /loop/i.test(userText) && toolNames.includes("test_echo")
       const memoryMatch = /remember(?:\s+that)?\s+(.+)/i.exec(userText)
       const reviewMode = /background memory reviewer/i.test(systemText)
@@ -167,6 +171,8 @@ export function startFakeOpenAI(): FakeOpenAI {
       let tool: { name: string; args: Record<string, unknown> } | undefined
       if (applyMatch && toolNames.includes("fs_apply_moves") && !hasToolResult) {
         tool = { name: "fs_apply_moves", args: JSON.parse(applyMatch[1]!) as Record<string, unknown> }
+      } else if (readImage && toolNames.includes("fs_read") && !hasToolResult) {
+        tool = { name: "fs_read", args: { path: readImage[1]!.trim() } }
       } else if (wantsLoop) tool = { name: "test_echo", args: { message: "loop" } }
       else if (reviewMode && memoryToolAvailable(toolNames) && !hasToolResult) {
         if (reviewRemove) {

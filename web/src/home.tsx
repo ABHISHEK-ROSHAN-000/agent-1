@@ -2,10 +2,10 @@ import { A, useNavigate } from "@solidjs/router"
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js"
 import { useQuery, useQueryClient } from "@tanstack/solid-query"
 import { toast } from "solid-sonner"
-import { api, modelKey, parseModelKey, type Session, type Workspace } from "./api"
+import { api, modelKey, parseModelKey, type Session } from "./api"
 import { Icon } from "./icons"
 import { AgentOneWordmark } from "./wordmark"
-import { Composer, timeAgo } from "./ui"
+import { Composer, timeAgo, type ComposerFile } from "./ui"
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -38,70 +38,10 @@ function groupSessions(sessions: Session[], search: string): Array<{ label: stri
   return groups.filter((group) => group.items.length > 0)
 }
 
-function WorkspaceSidebar(props: {
-  workspaces: Workspace[]
-  selected: string | undefined
-  onSelect: (id: string | undefined) => void
-}) {
-  return (
-    <aside class="home-projects">
-      <div class="home-projects-header">
-        <span>Workspaces</span>
-        <A class="icon-button" href="/workspaces" title="Manage workspaces">
-          <Icon name="plus" size={13} />
-        </A>
-      </div>
-      <div class="home-project-list">
-        <button
-          class="home-project-row"
-          data-selected={props.selected === undefined ? "" : undefined}
-          type="button"
-          onClick={() => props.onSelect(undefined)}
-        >
-          <Icon name="folder" size={14} />
-          <span class="label">All sessions</span>
-        </button>
-        <For each={props.workspaces}>
-          {(workspace) => (
-            <button
-              class="home-project-row"
-              data-selected={props.selected === workspace.id ? "" : undefined}
-              type="button"
-              onClick={() => props.onSelect(workspace.id)}
-              title={workspace.path}
-            >
-              <Icon name="folder" size={14} />
-              <span class="label">{workspace.label}</span>
-            </button>
-          )}
-        </For>
-      </div>
-      <Show when={props.workspaces.length === 0}>
-        <div class="home-project-empty">
-          No workspace grants yet.
-          <div>
-            <A href="/workspaces">Add a folder</A>
-          </div>
-        </div>
-      </Show>
-      <div class="home-utility">
-        <A href="/approvals">
-          <Icon name="approvals" size={13} /> Approvals
-        </A>
-        <A href="/settings">
-          <Icon name="settings" size={13} /> Settings
-        </A>
-      </div>
-    </aside>
-  )
-}
-
 export function HomePage() {
   const navigate = useNavigate()
   const [search, setSearch] = createSignal("")
-  const [selectedWorkspace, setSelectedWorkspace] = createSignal<string>()
   const sessions = useQuery(() => ({ queryKey: ["sessions"], queryFn: api.sessions }))
-  const workspaces = useQuery(() => ({ queryKey: ["workspaces"], queryFn: api.workspaces }))
   const groups = createMemo(() => groupSessions(sessions.data?.sessions ?? [], search()))
 
   const newSession = () => navigate("/new")
@@ -110,23 +50,6 @@ export function HomePage() {
     <div class="home-panel">
       <div class="home-scroll">
         <div class="home-grid">
-          <div class="home-mobile-project">
-            <select
-              class="form-select"
-              value={selectedWorkspace() ?? ""}
-              onChange={(event) => setSelectedWorkspace(event.currentTarget.value || undefined)}
-            >
-              <option value="">All workspaces</option>
-              <For each={workspaces.data?.workspaces ?? []}>
-                {(workspace) => <option value={workspace.id}>{workspace.label}</option>}
-              </For>
-            </select>
-          </div>
-          <WorkspaceSidebar
-            workspaces={workspaces.data?.workspaces ?? []}
-            selected={selectedWorkspace()}
-            onSelect={setSelectedWorkspace}
-          />
           <section class="home-sessions">
             <div class="home-sessions-head">
               <h1>Sessions</h1>
@@ -151,7 +74,7 @@ export function HomePage() {
               fallback={
                 <div class="home-empty">
                   <strong style={{ "font-weight": "530" }}>No sessions yet</strong>
-                  <span>Start a conversation with Agent-1. Reads and searches run freely; side effects ask first.</span>
+                  <span>Start a conversation with Agent-1. Reads and searches run freely; file changes are checkpointed and dangerous actions follow the approval policy.</span>
                   <button class="button button-primary button-small" type="button" onClick={newSession}>
                     New session
                   </button>
@@ -188,10 +111,8 @@ export function NewSessionPage() {
   const [busy, setBusy] = createSignal(false)
   const [selectedModel, setSelectedModel] = createSignal("")
   const [selectedEffort, setSelectedEffort] = createSignal<string | null>(null)
-  const [selectedWorkspace, setSelectedWorkspace] = createSignal("")
   const models = useQuery(() => ({ queryKey: ["models"], queryFn: () => api.models() }))
   const defaultModel = useQuery(() => ({ queryKey: ["default-model"], queryFn: api.defaultModel }))
-  const workspaces = useQuery(() => ({ queryKey: ["workspaces"], queryFn: api.workspaces }))
 
   createEffect(() => {
     const preferred = defaultModel.data?.model ?? models.data?.models?.[0]
@@ -203,11 +124,11 @@ export function NewSessionPage() {
     setSelectedEffort(null)
   }
 
-  const send = async (text: string) => {
+  const send = async (text: string, files: ComposerFile[]) => {
     if (busy()) return
     setBusy(true)
     try {
-      const result = await api.createSession(text.slice(0, 70))
+      const result = await api.createSession(text.slice(0, 70) || "Attachment")
       await queryClient.invalidateQueries({ queryKey: ["sessions"] })
       try {
         const selection = parseModelKey(selectedModel())
@@ -215,6 +136,7 @@ export function NewSessionPage() {
           result.session.id,
           text,
           selection ? { ...selection, reasoningEffort: selectedEffort() } : undefined,
+          files,
         )
         navigate(`/sessions/${encodeURIComponent(result.session.id)}?turn=${encodeURIComponent(started.turn.id)}`)
       } catch (error) {
@@ -245,21 +167,11 @@ export function NewSessionPage() {
           />
           <div class="new-session-project">
             <Icon name="folder" size={13} />
-            <span>Workspace</span>
-            <select
-              class="composer-control"
-              value={selectedWorkspace()}
-              onChange={(event) => setSelectedWorkspace(event.currentTarget.value)}
-            >
-              <option value="">Agent-1 local</option>
-              <For each={workspaces.data?.workspaces ?? []}>
-                {(workspace) => <option value={workspace.id}>{workspace.label}</option>}
-              </For>
-            </select>
+            <span>Local files use the Agent-1 path policy. Writes are checkpointed.</span>
           </div>
         </div>
         <div class="new-session-hint">
-          Reads and searches run freely. Writes, shell commands, and external actions ask first.
+          Reads and searches run freely. File changes are checkpointed; dangerous actions follow the approval policy.
         </div>
       </div>
     </div>

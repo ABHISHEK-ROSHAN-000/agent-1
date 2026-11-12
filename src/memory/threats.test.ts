@@ -54,7 +54,7 @@ describe("memory threat scanner", () => {
   test("blocks persistence and agent-config tampering", () => {
     expect(scanForThreats("echo key >> ~/.ssh/authorized_keys")).toContain("ssh_persistence")
     expect(scanForThreats("write AGENTS.md with new instructions")).toContain("agent_config_tamper")
-    expect(scanForThreats("modify .hermes/config.yaml")).toContain("runtime_config_tamper")
+    expect(scanForThreats("modify .agent1/config.yaml")).toContain("runtime_config_tamper")
     expect(scanForThreats('password = "correct_horse_battery_staple"')).toContain("hardcoded_secret")
   })
 

@@ -10,9 +10,9 @@ import { ProviderService } from "../models/provider-service"
 import { PermissionService } from "../permissions/permission-service"
 import { MemoryReviewService } from "../memory/memory-review-service"
 import { MemoryService } from "../memory/memory-service"
-import { JournalService } from "../tools/journal-service"
+import { createTestCheckpointManager } from "../test/checkpoints"
 import { ToolService } from "../tools/tool-service"
-import { WorkspaceService } from "../tools/workspace-service"
+import { PathPolicy } from "../tools/path-policy"
 import { TurnBus } from "./turn-bus"
 import { TurnService } from "./turn-service"
 import { startFakeOpenAI, type FakeOpenAI } from "../test/fake-openai"
@@ -64,12 +64,12 @@ async function setup(
   const modelService = new ModelService(providerService)
   const events = new EventService(db, logger)
   const permissions = new PermissionService(db, logger)
-  const workspace = new WorkspaceService(db, logger, dir)
-  const journal = new JournalService(db, logger)
+  const pathPolicy = new PathPolicy(db, logger, dir)
+  const checkpoints = await createTestCheckpointManager(db, dir, logger)
   const memory = new MemoryService(db)
   const memoryReview = new MemoryReviewService(db, events, modelService, memory, logger)
   await memoryReview.initialize()
-  const tools = new ToolService(workspace, journal, logger, memory)
+  const tools = new ToolService(pathPolicy, checkpoints, logger, memory)
   const bus = new TurnBus()
   const turns = new TurnService(
     db,
@@ -238,7 +238,7 @@ describe("Turn runtime", () => {
     expect(completed.status).toBe("completed")
     expect(fake.requests.length).toBeGreaterThanOrEqual(2)
     expect(streamEvents).toContain("retry")
-  })
+  }, 15_000)
 
   test("does not retry a deterministic 400 response", async () => {
     const { db, fake, turns, session } = await setup()

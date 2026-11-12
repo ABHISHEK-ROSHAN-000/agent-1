@@ -39,15 +39,17 @@ The file-tool acceptance test:
 5. Undo.
 6. Verify all 500 files are restored and no duplicate moves exist.
 
-This is the model for journal correctness.
+This is the model for checkpoint crash/resume correctness.
 
 ## 7. SSE replay
 
-A durable event log with a monotonic `seq` and `Last-Event-ID` replay worked. It is worth keeping. Events are a UI feed and replay log; approvals and journal state remain in their own tables.
+A durable event log with a monotonic `seq` and `Last-Event-ID` replay worked. It is worth keeping. Events are a UI feed and replay log; approvals and checkpoint metadata remain in their own tables.
 
-## 8. Journal shape
+## 8. Filesystem checkpoint shape
 
-`planned → applying → done | failed | unknown`, with source hashes, before/after data, and undo data. Reconcile against disk on restart. This is the core safety mechanism.
+Phase 8A replaces the operation journal with shadow-Git checkpoints: one tree snapshot per checkpoint root per turn, an agent-write SHA-256 ledger, safe restore, pre-rollback snapshots, and pruning. The checkpoint commit is the file-state source for recovery; the audit event is not. Phase 8B removes workspace grants in favor of Agent-1 path policy, marker-based checkpoint roots, checkpoint-first writes, and smart/manual/off shell approvals. Phase 8C adds active-turn hydration, transactional approval events, typed SSE/recovery contracts, session rename/delete, unified settings, and numbered migrations. Phase 8D adds the OpenTUI client with preload launcher, prompt-centric Home, session tabs, permission takeover, checkpoint review, and ConPTY coverage. Phase 8E adds the pending-only inbox, durable steer/queue admission, step-boundary promotion, exact inbox events, and TUI queue controls. Phase 8E.5 adds content-addressed blobs, image/PDF prompt media, model modality filtering, media-aware fs_read, TUI/web attachments, and a referenced media route. Phase 8F adds checkpoint/restore fault hardening, real store pruning, command/path attack coverage, attachment abuse coverage, reconnect soak, and ConPTY Unicode/paste coverage.
+
+The checkpoint commit is the source of file state; the agent-write ledger preserves user edits during safe restore.
 
 ## 9. Auth model
 

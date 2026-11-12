@@ -79,6 +79,40 @@ export interface SelectedModel extends ModelSelection {
 
 export type MessageRole = "user" | "assistant" | "tool" | "system"
 
+export type FileSource =
+  | { readonly type: "inline" }
+  | { readonly type: "uri"; readonly uri: string }
+
+export interface PromptMention {
+  readonly start: number
+  readonly end: number
+  readonly text: string
+}
+
+export interface PromptFileInput {
+  readonly uri: string
+  readonly source?: FileSource
+  readonly name?: string
+  readonly description?: string
+  readonly mention?: PromptMention
+}
+
+export interface StoredFile {
+  readonly uri: `media:${string}`
+  readonly mime: string
+  readonly source: FileSource
+  readonly name?: string
+  readonly description?: string
+  readonly mention?: PromptMention
+  readonly bytes?: number
+  readonly width?: number
+  readonly height?: number
+}
+
+export interface HydratedFile extends StoredFile {
+  readonly data: string
+}
+
 export interface Message {
   readonly id: string
   readonly seq: number
@@ -87,8 +121,29 @@ export interface Message {
   readonly role: MessageRole
   readonly text: string
   readonly content: unknown
+  readonly files?: readonly StoredFile[]
   readonly createdAt: string
 }
+
+export type InboxDelivery = "steer" | "queue"
+
+export interface InboxUserPayload {
+  readonly text: string
+  readonly files?: readonly StoredFile[]
+  readonly metadata?: Readonly<Record<string, unknown>>
+}
+
+export interface InboxUserItem {
+  readonly id: string
+  readonly sessionId: string
+  readonly type: "user"
+  readonly delivery: InboxDelivery
+  readonly payload: InboxUserPayload
+  readonly createdAt: string
+}
+
+/** Pending session input. Only user prompts are admitted in Phase 8E. */
+export type InboxItem = InboxUserItem
 
 export type TurnStatus =
   | "queued"
@@ -150,6 +205,8 @@ export interface PermissionRule {
 }
 
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired" | "invalidated"
+export type ApprovalMode = "smart" | "manual" | "off"
+export type ApprovalScope = "once" | "session" | "always"
 
 export interface Approval {
   readonly id: string
@@ -157,45 +214,76 @@ export interface Approval {
   readonly sessionId: string
   readonly toolCallId: string
   readonly toolName: string
+  readonly action: string
+  readonly resource: string
+  readonly patternKey: string
   readonly arguments: unknown
   readonly argumentsHash: string
+  readonly displayCommand: string | null
   readonly status: ApprovalStatus
   readonly createdAt: string
   readonly expiresAt: string
   readonly decidedAt: string | null
   readonly decidedBy: string | null
   readonly reason: string | null
+  readonly scope: ApprovalScope | null
 }
 
-export type WorkspaceAccess = "read" | "write"
-
-export interface Workspace {
+export interface ApprovalGrant {
   readonly id: string
-  readonly label: string
-  readonly path: string
-  readonly access: WorkspaceAccess
-  readonly createdAt: string
-  readonly updatedAt: string
-}
-
-export type JournalState = "planned" | "applying" | "done" | "failed" | "unknown" | "undone"
-
-export interface JournalEntry {
-  readonly id: string
-  readonly batchId: string
-  readonly turnId: string | null
   readonly sessionId: string | null
-  readonly toolName: string
-  readonly operation: string
-  readonly source: string | null
-  readonly target: string | null
-  readonly sourceHash: string | null
-  readonly targetHash: string | null
-  readonly state: JournalState
-  readonly undo: unknown
-  readonly error: string | null
+  readonly scope: "session" | "always"
+  readonly action: string
+  readonly resource: string
+  readonly patternKey: string
   readonly createdAt: string
-  readonly updatedAt: string
+  readonly expiresAt: string | null
+}
+
+export interface ApprovalConfig {
+  readonly mode: ApprovalMode
+  readonly timeoutSeconds: number
+  readonly deny: readonly string[]
+  readonly allowlist: readonly string[]
+  readonly writeSafeRoot: string | null
+  readonly smartModel: string | null
+}
+
+export interface Checkpoint {
+  readonly id: string
+  readonly sessionId: string | null
+  readonly turnId: string | null
+  readonly rootPath: string
+  readonly rootHash: string
+  readonly commit: string
+  readonly reason: string
+  readonly filesChanged: number
+  readonly insertions: number
+  readonly deletions: number
+  readonly createdAt: string
+}
+
+export interface CheckpointDiff {
+  readonly checkpointId: string
+  readonly stat: string
+  readonly diff: string
+  readonly files: readonly {
+    readonly path: string
+    readonly status: string
+    readonly additions: number
+    readonly deletions: number
+  }[]
+}
+
+export interface CheckpointRestoreResult {
+  readonly checkpointId: string
+  readonly restoredTo: string
+  readonly restoredFiles: readonly string[]
+  readonly deletedFiles: readonly string[]
+  readonly skippedUserEdits: readonly string[]
+  readonly skippedOversize: readonly string[]
+  readonly failedDeletes: readonly string[]
+  readonly failedRestores: readonly string[]
 }
 
 export interface AuditEntry {

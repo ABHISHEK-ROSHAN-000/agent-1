@@ -220,6 +220,65 @@ describe("Phase 3 approvals", () => {
     expect(completed.messages.some((message) => message.role === "tool")).toBe(true)
   }, 45_000)
 
+  test("exposes approval policy and permanent grants", async () => {
+    const { daemon, sessionId } = await setup()
+    const initial = await fetch(`${daemon.state.url}/v1/approval-config`, {
+      headers: { authorization: basic(daemon.password) },
+    })
+    expect(initial.status).toBe(200)
+    expect(((await initial.json()) as { config: { mode: string } }).config.mode).toBe("smart")
+
+    const updated = await fetch(`${daemon.state.url}/v1/approval-config`, {
+      method: "PATCH",
+      headers: {
+        authorization: basic(daemon.password),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        mode: "manual",
+        timeoutSeconds: 60,
+        writeSafeRoot: null,
+        deny: ["rm *"],
+        allowlist: ["echo *"],
+      }),
+    })
+    expect(updated.status).toBe(200)
+    const config = ((await updated.json()) as {
+      config: { mode: string; timeoutSeconds: number; deny: string[]; allowlist: string[] }
+    }).config
+    expect(config.mode).toBe("manual")
+    expect(config.timeoutSeconds).toBe(60)
+    expect(config.deny).toEqual(["rm *"])
+    expect(config.allowlist).toEqual(["echo *"])
+
+    const started = await startMessage(daemon, sessionId, "please confirm")
+    await waitStatus(daemon, started.turn.id, "waiting_approval")
+    const approvalsResponse = await fetch(`${daemon.state.url}/v1/approvals?status=pending`, {
+      headers: { authorization: basic(daemon.password) },
+    })
+    const approval = ((await approvalsResponse.json()) as { approvals: Array<{ id: string }> }).approvals[0]!
+    const approved = await fetch(`${daemon.state.url}/v1/approvals/${approval.id}/decision`, {
+      method: "POST",
+      headers: {
+        authorization: basic(daemon.password),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ decision: "approve", scope: "always" }),
+    })
+    expect(approved.status).toBe(200)
+    const grants = await fetch(`${daemon.state.url}/v1/approval-grants`, {
+      headers: { authorization: basic(daemon.password) },
+    })
+    expect(grants.status).toBe(200)
+    const grant = ((await grants.json()) as { grants: Array<{ id: string; scope: string }> }).grants[0]!
+    expect(grant.scope).toBe("always")
+    const removed = await fetch(`${daemon.state.url}/v1/approval-grants/${grant.id}`, {
+      method: "DELETE",
+      headers: { authorization: basic(daemon.password) },
+    })
+    expect(removed.status).toBe(200)
+  }, 30_000)
+
   test("rules can be listed, edited, and removed", async () => {
     const { daemon } = await setup()
     const list = await fetch(`${daemon.state.url}/v1/rules`, {

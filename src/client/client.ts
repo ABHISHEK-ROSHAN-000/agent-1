@@ -1,16 +1,29 @@
 import type {
+  ActiveSessionEntry,
+  ActiveTurn,
+  SettingsContract,
+  SettingsPatch,
+} from "../shared/contracts"
+import type {
   Approval,
+  ApprovalConfig,
+  ApprovalGrant,
   ApprovalStatus,
+  ApprovalScope,
   AuditEntry,
   CatalogModel,
-  JournalEntry,
+  Checkpoint,
+  CheckpointDiff,
+  CheckpointRestoreResult,
+  InboxDelivery,
+  InboxItem,
   ModelSelection,
+  PromptFileInput,
   PermissionRule,
   ProviderInfo,
   RemoteStatus,
   SelectedModel,
   Turn,
-  Workspace,
 } from "../shared/types"
 
 export interface ClientOptions {
@@ -327,6 +340,26 @@ export class AgentOneClient {
     return this.request("GET", `/v1/sessions/${encodeURIComponent(id)}`)
   }
 
+  activeSessions(): Promise<{ active: Record<string, ActiveSessionEntry> }> {
+    return this.request("GET", "/v1/sessions/active")
+  }
+
+  sessionContext(id: string): Promise<{
+    session: Record<string, unknown>
+    activeTurn: ActiveTurn | null
+    inbox?: InboxItem[]
+  }> {
+    return this.request("GET", `/v1/sessions/${encodeURIComponent(id)}/context`)
+  }
+
+  renameSession(id: string, title: string): Promise<{ session: Record<string, unknown> }> {
+    return this.request("PATCH", `/v1/sessions/${encodeURIComponent(id)}`, { title })
+  }
+
+  deleteSession(id: string): Promise<{ ok: true }> {
+    return this.request("DELETE", `/v1/sessions/${encodeURIComponent(id)}`)
+  }
+
   listMessages(
     sessionId: string,
     limit = 100,
@@ -337,23 +370,88 @@ export class AgentOneClient {
     )
   }
 
-  startMessage(
+  admitMessage(
     sessionId: string,
     content: string,
-    selection?: ModelSelection,
-  ): Promise<{ turn: Turn; streamUrl: string }> {
+    options: {
+      readonly delivery?: InboxDelivery
+      readonly selection?: ModelSelection
+      readonly id?: string
+      readonly files?: readonly PromptFileInput[]
+    } = {},
+  ): Promise<{
+    inbox: InboxItem
+    turn: Turn | null
+    streamUrl: string | null
+    activeTurn?: Turn | null
+  }> {
     return this.request("POST", `/v1/sessions/${encodeURIComponent(sessionId)}/messages`, {
       content,
-      ...(selection
+      ...(options.delivery ? { delivery: options.delivery } : {}),
+      ...(options.id ? { id: options.id } : {}),
+      ...(options.files && options.files.length > 0 ? { files: options.files } : {}),
+      ...(options.selection
         ? {
-            providerId: selection.providerId,
-            modelId: selection.modelId,
-            ...(selection.reasoningEffort !== undefined
-              ? { reasoningEffort: selection.reasoningEffort }
+            providerId: options.selection.providerId,
+            modelId: options.selection.modelId,
+            ...(options.selection.reasoningEffort !== undefined
+              ? { reasoningEffort: options.selection.reasoningEffort }
               : {}),
           }
         : {}),
     })
+  }
+
+  async startMessage(
+    sessionId: string,
+    content: string,
+    selection?: ModelSelection,
+  ): Promise<{ turn: Turn; streamUrl: string; inbox: InboxItem }> {
+    const admitted = await this.admitMessage(sessionId, content, {
+      delivery: "steer",
+      selection,
+    })
+    if (!admitted.turn) throw new ClientError(202, "inbox_admitted", "Prompt was queued")
+    return {
+      turn: admitted.turn,
+      streamUrl: admitted.streamUrl ?? `/v1/turns/${encodeURIComponent(admitted.turn.id)}/stream`,
+      inbox: admitted.inbox,
+    }
+  }
+
+  listInbox(sessionId: string): Promise<{ inbox: InboxItem[] }> {
+    return this.request("GET", `/v1/sessions/${encodeURIComponent(sessionId)}/inbox`)
+  }
+
+  cancelInbox(sessionId: string, inboxId: string): Promise<{ ok: true }> {
+    return this.request(
+      "DELETE",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/inbox/${encodeURIComponent(inboxId)}`,
+    )
+  }
+
+  setInboxDelivery(
+    sessionId: string,
+    inboxId: string,
+    delivery: InboxDelivery,
+  ): Promise<{ inbox: InboxItem | null; turn: Turn | null }> {
+    return this.request(
+      "PATCH",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/inbox/${encodeURIComponent(inboxId)}`,
+      { delivery },
+    )
+  }
+
+  interruptSession(
+    sessionId: string,
+    options: { readonly resume?: boolean } = {},
+  ): Promise<{ interrupted: boolean; turn: Turn | null }> {
+    const resume = options.resume === false ? "false" : "true"
+    return this.request(
+      "POST",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/interrupt?resume=${resume}`,
+      {},
+    )
   }
 
   setSessionModel(sessionId: string, selection: ModelSelection): Promise<{ model: SelectedModel }> {
@@ -499,13 +597,38 @@ export class AgentOneClient {
   decideApproval(
     id: string,
     decision: "approve" | "reject",
-    options?: { reason?: string; arguments?: unknown },
+    options?: { reason?: string; arguments?: unknown; scope?: ApprovalScope },
   ): Promise<{ approval: Approval }> {
     return this.request("POST", `/v1/approvals/${encodeURIComponent(id)}/decision`, {
       decision,
+      ...(options?.scope ? { scope: options.scope } : {}),
       ...(options?.reason ? { reason: options.reason } : {}),
       ...(options && options.arguments !== undefined ? { arguments: options.arguments } : {}),
     })
+  }
+
+  approvalConfig(): Promise<{ config: ApprovalConfig }> {
+    return this.request("GET", "/v1/approval-config")
+  }
+
+  setApprovalConfig(input: Partial<ApprovalConfig>): Promise<{ config: ApprovalConfig }> {
+    return this.request("PATCH", "/v1/approval-config", input)
+  }
+
+  listApprovalGrants(): Promise<{ grants: ApprovalGrant[] }> {
+    return this.request("GET", "/v1/approval-grants")
+  }
+
+  deleteApprovalGrant(id: string): Promise<{ ok: true }> {
+    return this.request("DELETE", `/v1/approval-grants/${encodeURIComponent(id)}`)
+  }
+
+  settings(): Promise<{ settings: SettingsContract }> {
+    return this.request("GET", "/v1/settings")
+  }
+
+  updateSettings(input: SettingsPatch): Promise<{ settings: SettingsContract }> {
+    return this.request("PATCH", "/v1/settings", input)
   }
 
   listAudit(limit = 100): Promise<{ entries: AuditEntry[] }> {
@@ -585,37 +708,25 @@ export class AgentOneClient {
     return this.request("GET", `/v1/sessions/search?${params.toString()}`)
   }
 
-  listWorkspaces(): Promise<{ workspaces: Workspace[] }> {
-    return this.request("GET", "/v1/workspaces")
+  listCheckpoints(limit = 100, sessionId?: string): Promise<{ checkpoints: Checkpoint[] }> {
+    const query = new URLSearchParams({ limit: String(limit) })
+    if (sessionId) query.set("sessionId", sessionId)
+    return this.request("GET", `/v1/checkpoints?${query.toString()}`)
   }
 
-  addWorkspace(input: {
-    path: string
-    label?: string
-    access?: "read" | "write"
-  }): Promise<{ workspace: Workspace }> {
-    return this.request("POST", "/v1/workspaces", input)
+  getCheckpoint(id: string): Promise<{ checkpoint: Checkpoint }> {
+    return this.request("GET", `/v1/checkpoints/${encodeURIComponent(id)}`)
   }
 
-  removeWorkspace(id: string): Promise<{ ok: true }> {
-    return this.request("DELETE", `/v1/workspaces/${encodeURIComponent(id)}`)
+  diffCheckpoint(id: string): Promise<{ diff: CheckpointDiff }> {
+    return this.request("GET", `/v1/checkpoints/${encodeURIComponent(id)}/diff`)
   }
 
-  listJournal(limit = 100): Promise<{ entries: JournalEntry[] }> {
-    return this.request("GET", `/v1/journal?limit=${limit}`)
-  }
-
-  getJournal(id: string): Promise<{ entry: JournalEntry }> {
-    return this.request("GET", `/v1/journal/${encodeURIComponent(id)}`)
-  }
-
-  undoJournal(batchId?: string): Promise<{
-    batchId: string
-    undone: number
-    skipped: number
-    errors: string[]
-  }> {
-    return this.request("POST", "/v1/journal/undo", batchId ? { batchId } : {})
+  restoreCheckpoint(
+    id: string,
+    input: { filePath?: string; safe?: boolean } = {},
+  ): Promise<{ result: CheckpointRestoreResult }> {
+    return this.request("POST", `/v1/checkpoints/${encodeURIComponent(id)}/restore`, input)
   }
 
   stop(): Promise<{ ok: true }> {

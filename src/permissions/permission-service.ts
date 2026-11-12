@@ -2,8 +2,11 @@ import { sha256 } from "../core/ids"
 import { nowIso } from "../core/time"
 import type { Logger } from "../core/log"
 import type { Database, NewPermissionRule } from "../db/database"
+import type { EventService } from "../events/service"
 import type {
   Approval,
+  ApprovalMode,
+  ApprovalScope,
   ApprovalStatus,
   AuditEntry,
   PermissionRule,
@@ -11,6 +14,15 @@ import type {
   ToolRisk,
 } from "../shared/types"
 import { toolRisk } from "../agent/tools"
+import {
+  commandPatternKey,
+  dangerousCommand,
+  hardlineCommand,
+  matchesAllowlist,
+  parseStringList,
+} from "../approvals/command-safety"
+import type { SmartJudgeFunction, SmartVerdict } from "../approvals/smart-judge"
+import { redactCommand, redactForDisplay } from "../approvals/redaction"
 
 export const APPROVAL_TTL_SETTING = "approval.default_ttl_seconds"
 
@@ -30,14 +42,22 @@ export interface PermissionDecision {
   readonly ruleId: string | null
   readonly risk: ToolRisk
   readonly reason: string
+  readonly action: string
+  readonly resource: string
+  readonly patternKey: string
+  readonly displayCommand?: string | null
+  readonly smart?: SmartVerdict
 }
 
 export interface PermissionContext {
   readonly action?: string
   readonly risk?: ToolRisk
   readonly resource?: string
-  readonly inGrant?: boolean
   readonly sensitive?: boolean
+  readonly protectedInstruction?: boolean
+  readonly sessionId?: string
+  readonly command?: string
+  readonly cwd?: string
 }
 
 export interface ApprovalRequest {
@@ -45,9 +65,21 @@ export interface ApprovalRequest {
   readonly sessionId: string
   readonly toolCallId: string
   readonly toolName: string
+  readonly action: string
+  readonly resource: string
+  readonly patternKey: string
+  readonly displayCommand?: string | null
   readonly arguments: unknown
   readonly ruleId?: string | null
-  readonly resource?: string
+}
+
+export interface ApprovalConfig {
+  readonly mode: ApprovalMode
+  readonly timeoutSeconds: number
+  readonly deny: readonly string[]
+  readonly allowlist: readonly string[]
+  readonly writeSafeRoot: string | null
+  readonly smartModel: string | null
 }
 
 export function canonicalJson(value: unknown): string {
@@ -77,10 +109,17 @@ function active(rule: PermissionRule, now = Date.now()): boolean {
 }
 
 export class PermissionService {
+  private smartJudge?: SmartJudgeFunction
+
   constructor(
     private readonly db: Database,
     private readonly logger: Logger,
+    private readonly events?: EventService,
   ) {}
+
+  setSmartJudge(judge: SmartJudgeFunction): void {
+    this.smartJudge = judge
+  }
 
   async listRules(): Promise<PermissionRule[]> {
     return this.db.listPermissionRules()
@@ -132,6 +171,46 @@ export class PermissionService {
     return true
   }
 
+  async config(): Promise<ApprovalConfig> {
+    const modeRaw = await this.db.getSetting("approval.mode")
+    const mode: ApprovalMode =
+      modeRaw === "manual" || modeRaw === "off" || modeRaw === "smart" ? modeRaw : "smart"
+    const timeoutRaw = Number(await this.db.getSetting("approval.timeout_seconds"))
+    const timeoutSeconds =
+      Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? Math.floor(timeoutRaw) : 300
+    const deny = parseStringList(await this.db.getSetting("approval.deny"))
+    const allowlist = parseStringList(await this.db.getSetting("approval.allowlist"))
+    const writeSafeRoot = (await this.db.getSetting("approval.write_safe_root"))?.trim() || null
+    const smartModel = (await this.db.getSetting("approval.smart_model"))?.trim() || null
+    return { mode, timeoutSeconds, deny, allowlist, writeSafeRoot, smartModel }
+  }
+
+  async setConfig(input: Partial<ApprovalConfig>): Promise<ApprovalConfig> {
+    if (input.mode !== undefined) {
+      if (input.mode !== "smart" && input.mode !== "manual" && input.mode !== "off") {
+        throw new PermissionError(400, "invalid_approval_mode", "Approval mode must be smart, manual, or off")
+      }
+      await this.db.setSetting("approval.mode", input.mode)
+    }
+    if (input.timeoutSeconds !== undefined) {
+      if (!Number.isFinite(input.timeoutSeconds) || input.timeoutSeconds <= 0) {
+        throw new PermissionError(400, "invalid_approval_timeout", "Approval timeout must be positive")
+      }
+      await this.db.setSetting("approval.timeout_seconds", String(Math.floor(input.timeoutSeconds)))
+    }
+    if (input.deny !== undefined) await this.db.setSetting("approval.deny", JSON.stringify(input.deny))
+    if (input.allowlist !== undefined) {
+      await this.db.setSetting("approval.allowlist", JSON.stringify(input.allowlist))
+    }
+    if (input.writeSafeRoot !== undefined) {
+      await this.db.setSetting("approval.write_safe_root", input.writeSafeRoot ?? "")
+    }
+    if (input.smartModel !== undefined) {
+      await this.db.setSetting("approval.smart_model", input.smartModel ?? "")
+    }
+    return this.config()
+  }
+
   async evaluate(
     toolName: string,
     toolArguments: unknown,
@@ -140,52 +219,106 @@ export class PermissionService {
     const action = context.action ?? (toolName.includes(".") ? toolName : `tool.${toolName}`)
     const resource = context.resource ?? "*"
     const risk = context.risk ?? toolRisk(toolName)
-    if (context.sensitive) {
-      return { effect: "deny", ruleId: null, risk, reason: "Protected path" }
-    }
-    if (risk === "unknown") {
-      return { effect: "deny", ruleId: null, risk, reason: "Unknown tool default" }
-    }
+    const config = await this.config()
+    const record = toolArguments && typeof toolArguments === "object" ? (toolArguments as Record<string, unknown>) : {}
+    const command = context.command ?? (typeof record.command === "string" ? record.command : undefined)
+    const cwd = context.cwd ?? (typeof record.cwd === "string" ? record.cwd : undefined)
+    const patternKey = command ? commandPatternKey(command, cwd) : resource
+    const displayCommand = command ? redactCommand(command) : null
+    const result = (effect: RuleEffect, reason: string, ruleId: string | null = null, smart?: SmartVerdict): PermissionDecision => ({
+      effect,
+      ruleId,
+      risk,
+      reason,
+      action,
+      resource,
+      patternKey,
+      displayCommand,
+      ...(smart ? { smart } : {}),
+    })
+
+    if (context.sensitive) return result("deny", "Protected path")
+    if (risk === "unknown") return result("deny", "Unknown tool default")
+
+    const fileWrite = action === "fs.write" || action === "fs.mkdir" || action === "fs.apply_moves"
+
     const rules = (await this.db.listPermissionRules()).filter((rule) => active(rule))
     const matching = rules.filter(
       (rule) => globMatches(rule.action, action) && globMatches(rule.resource, resource),
     )
-    const deny = matching.find((rule) => rule.effect === "deny")
-    const allow = matching.find((rule) => rule.effect === "allow")
-    const ask = matching.find((rule) => rule.effect === "ask")
-    if (deny) {
-      return { effect: "deny", ruleId: deny.id, risk, reason: deny.note ?? "Denied by rule" }
+    const denyRule = matching.find((rule) => rule.effect === "deny")
+    const allowRule = matching.find((rule) => rule.effect === "allow")
+    const askRule = matching.find((rule) => rule.effect === "ask")
+    if (denyRule) return result("deny", denyRule.note ?? "Denied by rule", denyRule.id)
+    if (risk === "shell" || action === "shell.exec") {
+      if (command) {
+        const hardline = hardlineCommand(command)
+        if (hardline) return result("deny", `Hardline block: ${hardline}`)
+        const denied = matchesAllowlist(command, config.deny)
+        if (denied) return result("deny", `Denied by approvals.deny: ${denied}`)
+      }
     }
-    if (allow) {
-      return { effect: "allow", ruleId: allow.id, risk, reason: allow.note ?? "Allowed by rule" }
+    const grant = await this.db.findApprovalGrant(context.sessionId ?? null, action, patternKey)
+    if (grant) return result("allow", "Allowed by saved approval")
+    if (fileWrite && context.protectedInstruction) {
+      return result("ask", "Protected agent-instruction file")
     }
-    if (ask) {
-      return { effect: "ask", ruleId: ask.id, risk, reason: ask.note ?? "Approval required" }
+    if (allowRule) return result("allow", allowRule.note ?? "Allowed by rule", allowRule.id)
+
+    // Reads run freely; path policy still blocks protected data.
+    if (risk === "read" && action.startsWith("fs.")) {
+      return result("allow", "Filesystem read allowed by Agent-1 path policy")
     }
-    if (risk === "read" && context.inGrant) {
-      return { effect: "allow", ruleId: null, risk, reason: "Read inside granted workspace" }
+
+    // File writes are checkpoint-first, not per-write approval prompts.
+    if (fileWrite) return result("allow", "File write allowed by Agent-1 path policy")
+
+    if (risk === "shell" || action === "shell.exec") {
+      if (!command) return result("ask", "Shell command requires approval")
+      const hardline = hardlineCommand(command)
+      if (hardline) return result("deny", `Hardline block: ${hardline}`)
+      const denied = matchesAllowlist(command, config.deny)
+      if (denied) return result("deny", `Denied by approvals.deny: ${denied}`)
+      const grant = await this.db.findApprovalGrant(context.sessionId ?? null, action, patternKey)
+      if (grant) return result("allow", "Allowed by saved approval")
+      const allowed = matchesAllowlist(command, config.allowlist)
+      if (allowed) return result("allow", `Allowed by allowlist: ${allowed}`)
+      if (config.mode === "off") return result("allow", "Approval mode off")
+      const dangerous = dangerousCommand(command)
+      if (!dangerous) return result("allow", "No dangerous command pattern matched")
+      if (config.mode === "manual" || !this.smartJudge) {
+        return result("ask", dangerous, askRule?.id ?? null)
+      }
+      const verdict = await this.smartJudge({ command, cwd, description: dangerous })
+      if (verdict === "approve") return result("allow", `Smart approval: ${dangerous}`, null, verdict)
+      if (verdict === "deny") return result("deny", `Smart denial: ${dangerous}`, null, verdict)
+      return result("ask", `Smart approval escalated: ${dangerous}`, askRule?.id ?? null, verdict)
     }
-    if (risk === "external") {
-      return { effect: "allow", ruleId: null, risk, reason: "External read default" }
-    }
-    void toolArguments
-    return { effect: "ask", ruleId: null, risk, reason: "Risk-class default" }
+
+    if (askRule) return result("ask", askRule.note ?? "Approval required", askRule.id)
+    if (risk === "external") return result("allow", "External read default")
+    return result("ask", "Risk-class default")
   }
 
   async requestApproval(input: ApprovalRequest): Promise<Approval> {
     const existing = await this.db.findApproval(input.turnId, input.toolCallId)
     if (existing) return existing
+    const config = await this.config()
     const ttlRaw = await this.db.getSetting(APPROVAL_TTL_SETTING)
-    const ttl = Number(ttlRaw ?? process.env.AGENT1_APPROVAL_TTL_SECONDS ?? "900")
-    const seconds = Number.isFinite(ttl) && ttl > 0 ? ttl : 900
+    const ttl = Number(ttlRaw ?? config.timeoutSeconds)
+    const seconds = Number.isFinite(ttl) && ttl > 0 ? ttl : config.timeoutSeconds
     const expiresAt = new Date(Date.now() + seconds * 1000).toISOString()
     const approval = await this.db.createApproval({
       turnId: input.turnId,
       sessionId: input.sessionId,
       toolCallId: input.toolCallId,
       toolName: input.toolName,
-      arguments: input.arguments,
+      action: input.action,
+      resource: input.resource,
+      patternKey: input.patternKey,
+      arguments: redactForDisplay(input.arguments),
       argumentsHash: argumentsHash(input.arguments),
+      displayCommand: input.displayCommand ? redactCommand(input.displayCommand) : null,
       expiresAt,
     })
     await this.audit({
@@ -213,6 +346,7 @@ export class PermissionService {
       readonly decidedBy?: string
       readonly reason?: string
       readonly arguments?: unknown
+      readonly scope?: ApprovalScope
     } = {},
   ): Promise<Approval> {
     const approval = await this.db.getApproval(id)
@@ -221,7 +355,25 @@ export class PermissionService {
       throw new PermissionError(409, "approval_not_pending", `Approval is already ${approval.status}`)
     }
     if (Date.parse(approval.expiresAt) <= Date.now()) {
-      await this.db.decideApproval(id, "expired", "system", "Approval expired")
+      const expired = await this.db.decideApprovalWithEvent(
+        id,
+        "expired",
+        "system",
+        "Approval expired",
+        null,
+        {
+          type: "approval.expired",
+          sessionId: approval.sessionId,
+          payload: {
+            approvalId: id,
+            turnId: approval.turnId,
+            sessionId: approval.sessionId,
+            toolCallId: approval.toolCallId,
+            expiredAt: nowIso(),
+          },
+        },
+      )
+      if (expired) this.events?.publish(expired.event)
       await this.audit({
         actor: "system",
         action: "approval.expired",
@@ -251,13 +403,41 @@ export class PermissionService {
       )
     }
     const nextStatus: ApprovalStatus = decision === "approve" ? "approved" : "rejected"
-    const updated = await this.db.decideApproval(
+    const scope = decision === "approve" ? options.scope ?? "once" : null
+    const decidedBy = options.decidedBy ?? "user"
+    const decided = await this.db.decideApprovalWithEvent(
       id,
       nextStatus,
-      options.decidedBy ?? "user",
+      decidedBy,
       options.reason ?? null,
+      scope,
+      {
+        type: "approval.decided",
+        sessionId: approval.sessionId,
+        payload: {
+          approvalId: id,
+          turnId: approval.turnId,
+          sessionId: approval.sessionId,
+          toolCallId: approval.toolCallId,
+          decision: nextStatus,
+          scope,
+          decidedBy,
+        },
+      },
     )
-    if (!updated) throw new PermissionError(409, "approval_not_pending", "Approval was already decided")
+    if (!decided) throw new PermissionError(409, "approval_not_pending", "Approval was already decided")
+    const updated = decided.approval
+    this.events?.publish(decided.event)
+    if (scope === "session" || scope === "always") {
+      await this.db.createApprovalGrant({
+        sessionId: scope === "session" ? approval.sessionId : null,
+        scope,
+        action: approval.action,
+        resource: approval.resource,
+        patternKey: approval.patternKey,
+        expiresAt: null,
+      })
+    }
     await this.audit({
       actor: options.decidedBy ?? "user",
       action: decision === "approve" ? "approval.approved" : "approval.rejected",
@@ -265,9 +445,9 @@ export class PermissionService {
       decision: nextStatus,
       approvalId: id,
       turnId: approval.turnId,
-      details: options.reason ? { reason: options.reason } : {},
+      details: { ...(options.reason ? { reason: options.reason } : {}), scope },
     })
-    this.logger.info("approval.decided", { approvalId: id, status: nextStatus })
+    this.logger.info("approval.decided", { approvalId: id, status: nextStatus, scope })
     return updated
   }
 
@@ -284,8 +464,14 @@ export class PermissionService {
   }
 
   async expireApprovals(): Promise<string[]> {
-    const ids = await this.db.expireApprovals()
-    for (const id of ids) {
+    const events = await this.db.expireApprovalsWithEvents()
+    const ids: string[] = []
+    for (const event of events) {
+      this.events?.publish(event)
+      const payload = event.payload as { approvalId?: unknown }
+      const id = typeof payload.approvalId === "string" ? payload.approvalId : null
+      if (!id) continue
+      ids.push(id)
       const approval = await this.db.getApproval(id)
       if (!approval) continue
       await this.audit({
@@ -298,6 +484,14 @@ export class PermissionService {
       })
     }
     return ids
+  }
+
+  async listApprovalGrants(limit = 200) {
+    return this.db.listApprovalGrants(limit)
+  }
+
+  async deleteApprovalGrant(id: string): Promise<boolean> {
+    return this.db.deleteApprovalGrant(id)
   }
 
   async listAudit(limit = 100): Promise<AuditEntry[]> {

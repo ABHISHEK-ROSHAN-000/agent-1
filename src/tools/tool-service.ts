@@ -19,19 +19,43 @@ import type { Logger } from "../core/log"
 import { sha256 } from "../core/ids"
 import type { MemoryService } from "../memory/memory-service"
 import { memoryToolInputSchema } from "../memory/memory-tool-schema"
+import { detectMime, isMediaMime } from "../attachments/mime"
+import { MAX_ATTACHMENT_BYTES } from "../attachments/image"
 import type { SessionSearchService } from "../memory/session-search-service"
 import { MemoryError } from "../memory/types"
 import type { ToolRisk } from "../shared/types"
-import type { JournalService } from "./journal-service"
-import { JournalError, sha256File } from "./journal-service"
-import type { WorkspaceService } from "./workspace-service"
-import { WorkspaceError } from "./workspace-service"
+import type { CheckpointManager } from "../checkpoints/manager"
+import type { PathPolicy } from "./path-policy"
+import { PathPolicyError } from "./path-policy"
+
+function sha256File(filePath: string): string {
+  return createHash("sha256").update(readFileSync(filePath)).digest("hex")
+}
 
 export interface ToolContext {
   readonly turnId?: string
   readonly sessionId?: string
   readonly toolCallId?: string
 }
+
+export type ToolResultContent =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "file"; readonly uri: string; readonly mime: string; readonly name?: string }
+
+export class ToolContentResult {
+  constructor(
+    readonly content: readonly ToolResultContent[],
+    readonly output: unknown,
+  ) {}
+}
+
+const READ_MEDIA_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+])
 
 export interface ToolInfo {
   readonly name: string
@@ -139,8 +163,8 @@ export class ToolService {
   private readonly entries: Map<string, ToolEntry>
 
   constructor(
-    private readonly workspace: WorkspaceService,
-    private readonly journal: JournalService,
+    private readonly pathPolicy: PathPolicy,
+    private readonly checkpoints: CheckpointManager,
     private readonly logger: Logger,
     private readonly memory?: MemoryService,
     private readonly sessionSearch?: SessionSearchService,
@@ -182,7 +206,7 @@ export class ToolService {
     this.register({
       name: "fs_list",
       action: "fs.list",
-      description: "List a directory inside a workspace. Read-only.",
+      description: "List a directory. Read-only.",
       risk: "read",
       readOnly: true,
       inputSchema: z.object({ path: z.string().min(1), limit: z.number().int().min(1).max(1_000).optional() }),
@@ -228,46 +252,42 @@ export class ToolService {
       inputSchema: z.object({ root: z.string().min(1), moves: z.array(moveInput).min(1).max(5_000) }),
       execute: async (input) => this.fsPrepareMoves(input),
     })
-    this.register({
-      name: "fs_write",
-      action: "fs.write",
-      description: "Write a UTF-8 file inside a write-granted workspace.",
-      risk: "write",
-      readOnly: false,
-      inputSchema: z.object({
-        path: z.string().min(1),
-        content: z.string().max(1_000_000),
-        expectedSha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
-      }),
-      execute: async (input, context) => this.fsWrite(input, context),
-    })
-    this.register({
-      name: "fs_mkdir",
-      action: "fs.mkdir",
-      description: "Create a directory inside a write-granted workspace.",
-      risk: "write",
-      readOnly: false,
-      inputSchema: z.object({ path: z.string().min(1) }),
-      execute: async (input, context) => this.fsMkdir(input, context),
-    })
-    this.register({
-      name: "fs_apply_moves",
-      action: "fs.apply_moves",
-      description: "Apply an approved batch of file moves with a journal and crash resume.",
-      risk: "write",
-      readOnly: false,
-      inputSchema: z.object({ root: z.string().min(1), moves: z.array(moveInput).min(1).max(5_000) }),
-      execute: async (input, context) => this.fsApplyMoves(input, context),
-    })
-    this.register({
-      name: "fs_undo",
-      action: "fs.undo",
-      description: "Undo a journaled file batch.",
-      risk: "write",
-      readOnly: false,
-      inputSchema: z.object({ batchId: z.string().min(1).optional() }),
-      execute: async (input) => this.fsUndo(input),
-    })
+    if (this.checkpoints.available) {
+      this.register({
+        name: "fs_write",
+        action: "fs.write",
+        description: "Write a UTF-8 file. The write is checkpointed first.",
+        risk: "write",
+        readOnly: false,
+        approvalRequired: false,
+        inputSchema: z.object({
+          path: z.string().min(1),
+          content: z.string().max(1_000_000),
+          expectedSha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+        }),
+        execute: async (input, context) => this.fsWrite(input, context),
+      })
+      this.register({
+        name: "fs_mkdir",
+        action: "fs.mkdir",
+        description: "Create a directory. The write is checkpointed first.",
+        risk: "write",
+        readOnly: false,
+        approvalRequired: false,
+        inputSchema: z.object({ path: z.string().min(1) }),
+        execute: async (input, context) => this.fsMkdir(input, context),
+      })
+      this.register({
+        name: "fs_apply_moves",
+        action: "fs.apply_moves",
+        description: "Apply a batch of file moves with checkpoint rollback and idempotent crash resume.",
+        risk: "write",
+        readOnly: false,
+        approvalRequired: false,
+        inputSchema: z.object({ root: z.string().min(1), moves: z.array(moveInput).min(1).max(5_000) }),
+        execute: async (input, context) => this.fsApplyMoves(input, context),
+      })
+    }
     this.register({
       name: "fs_delete",
       action: "fs.delete",
@@ -282,7 +302,7 @@ export class ToolService {
     this.register({
       name: "shell_exec",
       action: "shell.exec",
-      description: "Run a shell command after exact-command approval.",
+      description: "Run a shell command under the Agent-1 approval policy.",
       risk: "shell",
       readOnly: false,
       inputSchema: z.object({
@@ -290,7 +310,7 @@ export class ToolService {
         cwd: z.string().min(1).optional(),
         timeoutMs: z.number().int().min(1_000).max(120_000).optional(),
       }),
-      execute: async (input) => this.shellExec(input),
+      execute: async (input, context) => this.shellExec(input, context),
     })
     this.register({
       name: "web_fetch",
@@ -421,9 +441,9 @@ export class ToolService {
   async permissionContext(
     name: string,
     input: unknown,
-  ): Promise<{ resource: string; inGrant: boolean; sensitive: boolean }> {
+  ): Promise<{ resource: string; sensitive: boolean; protectedInstruction?: boolean }> {
     const entry = this.entries.get(name)
-    if (!entry) return { resource: "*", inGrant: false, sensitive: true }
+    if (!entry) return { resource: "*", sensitive: true }
     const record = input && typeof input === "object" ? (input as Record<string, unknown>) : {}
     const pathInput =
       typeof record.path === "string"
@@ -432,21 +452,31 @@ export class ToolService {
           ? record.root
           : undefined
     if (pathInput) {
-      const mode = entry.risk === "read" ? "read" : "write"
-      const info = await this.workspace.pathInfo(pathInput, mode)
+      const resolved = this.pathPolicy.resolve(pathInput)
+      const writable = entry.risk === "read" ? !this.pathPolicy.isReadDenied(resolved) : await this.pathPolicy.isWritable(resolved)
+      let protectedInstruction = entry.risk !== "read" && this.pathPolicy.isProtectedInstruction(resolved)
+      if (entry.name === "fs_apply_moves" && Array.isArray(record.moves)) {
+        protectedInstruction =
+          protectedInstruction ||
+          record.moves.some((move) => {
+            if (!move || typeof move !== "object") return false
+            const target = (move as Record<string, unknown>).to
+            return typeof target === "string" && this.pathPolicy.isProtectedInstruction(path.resolve(resolved, target))
+          })
+      }
       return {
-        resource: info.resolved,
-        inGrant: Boolean(info.grant),
-        sensitive: info.sensitive,
+        resource: resolved,
+        sensitive: entry.risk === "read" ? this.pathPolicy.isReadDenied(resolved) : !writable,
+        protectedInstruction,
       }
     }
     if (typeof record.url === "string") {
-      return { resource: record.url, inGrant: false, sensitive: false }
+      return { resource: record.url, sensitive: false }
     }
     if (typeof record.command === "string") {
-      return { resource: record.command, inGrant: false, sensitive: false }
+      return { resource: record.command, sensitive: false }
     }
-    return { resource: "*", inGrant: false, sensitive: false }
+    return { resource: "*", sensitive: false }
   }
 
   async execute(name: string, input: unknown, context: ToolContext): Promise<unknown> {
@@ -454,13 +484,14 @@ export class ToolService {
     if (!entry) throw new Error(`Unknown tool: ${name}`)
     const parsed = entry.inputSchema.parse(input)
     const result = await entry.execute(parsed, context)
+    if (result instanceof ToolContentResult) return result
     return jsonValue(result)
   }
 
   private async fsList(input: unknown) {
     const parsed = z.object({ path: z.string(), limit: z.number().int().optional() }).parse(input)
-    const resolved = this.workspace.resolve(parsed.path)
-    if (this.workspace.isSensitive(resolved)) throw new WorkspaceError("Path is protected")
+    const resolved = this.pathPolicy.resolve(parsed.path)
+    if (this.pathPolicy.isReadDenied(resolved)) throw new PathPolicyError("Path is protected")
     if (!existsSync(resolved)) throw new Error(`Path does not exist: ${resolved}`)
     if (!statSync(resolved).isDirectory()) throw new Error("Path is not a directory")
     const entries = readdirSync(resolved, { withFileTypes: true })
@@ -485,8 +516,8 @@ export class ToolService {
 
   private async fsStat(input: unknown) {
     const parsed = z.object({ path: z.string() }).parse(input)
-    const resolved = this.workspace.resolve(parsed.path)
-    if (this.workspace.isSensitive(resolved)) throw new WorkspaceError("Path is protected")
+    const resolved = this.pathPolicy.resolve(parsed.path)
+    if (this.pathPolicy.isReadDenied(resolved)) throw new PathPolicyError("Path is protected")
     if (!existsSync(resolved)) throw new Error(`Path does not exist: ${resolved}`)
     const stat = lstatSync(resolved)
     return {
@@ -502,13 +533,40 @@ export class ToolService {
     const parsed = z
       .object({ path: z.string(), maxBytes: z.number().int().optional() })
       .parse(input)
-    const resolved = this.workspace.resolve(parsed.path)
-    if (this.workspace.isSensitive(resolved)) throw new WorkspaceError("Path is protected")
+    const resolved = this.pathPolicy.resolve(parsed.path)
+    if (this.pathPolicy.isReadDenied(resolved)) throw new PathPolicyError("Path is protected")
     if (!existsSync(resolved)) throw new Error(`Path does not exist: ${resolved}`)
     const stat = statSync(resolved)
     if (!stat.isFile()) throw new Error("Path is not a file")
-    if (stat.size > (parsed.maxBytes ?? 1_000_000)) throw new Error("File is too large")
     const bytes = readFileSync(resolved)
+    const detected = detectMime(bytes, resolved)
+    if (detected && READ_MEDIA_MIMES.has(detected)) {
+      if (bytes.byteLength > MAX_ATTACHMENT_BYTES) {
+        throw new Error(`Media exceeds ${MAX_ATTACHMENT_BYTES} byte ingestion limit`)
+      }
+      const name = path.basename(resolved)
+      return new ToolContentResult(
+        [
+          {
+            type: "text",
+            text: detected === "application/pdf" ? "PDF read successfully" : "Image read successfully",
+          },
+          {
+            type: "file",
+            uri: `data:${detected};base64,${bytes.toString("base64")}`,
+            mime: detected,
+            name,
+          },
+        ],
+        {
+          path: resolved,
+          size: stat.size,
+          sha256: sha256File(resolved),
+          mime: detected,
+        },
+      )
+    }
+    if (stat.size > (parsed.maxBytes ?? 1_000_000)) throw new Error("File is too large")
     if (bytes.includes(0)) throw new Error("Binary files are not readable by fs_read")
     return {
       path: resolved,
@@ -522,8 +580,8 @@ export class ToolService {
     const parsed = z
       .object({ root: z.string(), pattern: z.string(), maxResults: z.number().int().optional() })
       .parse(input)
-    const root = this.workspace.resolve(parsed.root)
-    if (this.workspace.isSensitive(root)) throw new WorkspaceError("Path is protected")
+    const root = this.pathPolicy.resolve(parsed.root)
+    if (this.pathPolicy.isReadDenied(root)) throw new PathPolicyError("Path is protected")
     if (!existsSync(root) || !statSync(root).isDirectory()) throw new Error("Search root is not a directory")
     const matcher = new RegExp(parsed.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")
     const results: string[] = []
@@ -548,14 +606,13 @@ export class ToolService {
     const parsed = z
       .object({ root: z.string(), moves: z.array(moveInput).min(1).max(5_000) })
       .parse(input)
-    const root = this.workspace.resolve(parsed.root)
-    if (this.workspace.isSensitive(root)) throw new WorkspaceError("Path is protected")
+    const root = await this.pathPolicy.requireWritable(this.pathPolicy.resolve(parsed.root))
     if (!existsSync(root) || !statSync(root).isDirectory()) throw new Error("Root is not a directory")
     const moves = parsed.moves.map((move) => {
-      const source = this.workspace.resolve(path.resolve(root, move.from))
-      const target = this.workspace.resolve(path.resolve(root, move.to))
+      const source = this.pathPolicy.resolve(path.resolve(root, move.from))
+      const target = this.pathPolicy.resolve(path.resolve(root, move.to))
       if (!this.isInside(root, source) || !this.isInside(root, target)) {
-        throw new WorkspaceError("Move escapes the approved root")
+        throw new PathPolicyError("Move escapes the approved root")
       }
       if (!existsSync(source) || !statSync(source).isFile()) throw new Error(`Source missing: ${move.from}`)
       const sourceHash = sha256File(source)
@@ -573,151 +630,130 @@ export class ToolService {
     const parsed = z
       .object({ path: z.string(), content: z.string(), expectedSha256: z.string().optional() })
       .parse(input)
-    const target = this.workspace.resolve(parsed.path)
-    await this.workspace.requireWriteGrant(target)
-    if (this.workspace.isSensitive(target)) throw new WorkspaceError("Path is protected")
+    const target = await this.pathPolicy.requireWritable(this.pathPolicy.resolve(parsed.path))
     const previous = existsSync(target) ? readFileSync(target, "utf8") : null
     const previousHash = previous === null ? null : sha256(previous)
     if (parsed.expectedSha256 && previousHash !== parsed.expectedSha256) {
       throw new Error("Target changed since the plan")
     }
-    const journal = await this.journal.begin({
-      batchId: context.toolCallId ?? `write-${Date.now()}`,
+    const rootPath = this.pathPolicy.rootForPath(target)
+    const checkpoint = await this.checkpoints.ensureCheckpointForPath({
+      rootPath,
       turnId: context.turnId,
       sessionId: context.sessionId,
-      toolName: "fs_write",
-      operation: "write",
-      target,
-      sourceHash: previousHash,
-      undo: { previous },
+      toolCallId: context.toolCallId,
+      reason: "before fs_write",
     })
-    await this.journal.mark(journal.id, "applying")
+    // Re-resolve after the checkpoint: a junction swapped in between must not
+    // redirect the write outside the approved root.
+    const revalidated = await this.pathPolicy.requireWritable(this.pathPolicy.resolve(target))
+    if (path.resolve(revalidated).toLowerCase() !== path.resolve(target).toLowerCase()) {
+      throw new PathPolicyError("Path changed while the checkpoint was being created")
+    }
     const temporary = `${target}.agent1-${process.pid}`
     writeFileSync(temporary, parsed.content, { encoding: "utf8" })
     renameSync(temporary, target)
     const targetHash = sha256File(target)
-    await this.journal.mark(journal.id, "done", { targetHash })
-    return { path: target, sha256: targetHash, journalId: journal.id }
+    await this.checkpoints.recordAgentWrite(rootPath, target)
+    return {
+      path: target,
+      sha256: targetHash,
+      checkpointId: checkpoint?.id ?? null,
+    }
   }
 
   private async fsMkdir(input: unknown, context: ToolContext) {
     const parsed = z.object({ path: z.string() }).parse(input)
-    const target = this.workspace.resolve(parsed.path)
-    await this.workspace.requireWriteGrant(target)
-    if (this.workspace.isSensitive(target)) throw new WorkspaceError("Path is protected")
-    const journal = await this.journal.begin({
-      batchId: context.toolCallId ?? `mkdir-${Date.now()}`,
+    const target = await this.pathPolicy.requireWritable(this.pathPolicy.resolve(parsed.path))
+    const checkpoint = await this.checkpoints.ensureCheckpointForPath({
+      rootPath: this.pathPolicy.rootForPath(target),
       turnId: context.turnId,
       sessionId: context.sessionId,
-      toolName: "fs_mkdir",
-      operation: "mkdir",
-      target,
-      undo: {},
+      toolCallId: context.toolCallId,
+      reason: "before fs_mkdir",
     })
+    const revalidated = await this.pathPolicy.requireWritable(this.pathPolicy.resolve(target))
+    if (path.resolve(revalidated).toLowerCase() !== path.resolve(target).toLowerCase()) {
+      throw new PathPolicyError("Path changed while the checkpoint was being created")
+    }
     mkdirSync(target, { recursive: false })
-    await this.journal.mark(journal.id, "done")
-    return { path: target, journalId: journal.id }
+    return { path: target, checkpointId: checkpoint?.id ?? null }
   }
 
   private async fsApplyMoves(input: unknown, context: ToolContext) {
     const parsed = z
       .object({ root: z.string(), moves: z.array(moveInput).min(1).max(5_000) })
       .parse(input)
-    const root = this.workspace.resolve(parsed.root)
-    await this.workspace.requireWriteGrant(root)
-    if (this.workspace.isSensitive(root)) throw new WorkspaceError("Path is protected")
+    const root = await this.pathPolicy.requireWritable(this.pathPolicy.resolve(parsed.root))
     const batchId = context.toolCallId ?? `moves-${Date.now()}`
-    const existing = await this.journal.listBatch(batchId)
-    const bySource = new Map(existing.map((entry) => [entry.source, entry]))
+    const checkpoint = await this.checkpoints.ensureCheckpointForPath({
+      rootPath: root,
+      turnId: context.turnId,
+      sessionId: context.sessionId,
+      toolCallId: context.toolCallId,
+      reason: "before fs_apply_moves",
+    })
     let applied = 0
     let skipped = 0
     const crashAfter = Number(process.env.AGENT1_CRASH_AFTER_MOVE ?? "0")
 
     for (const move of parsed.moves) {
-      const source = this.workspace.resolve(path.resolve(root, move.from))
-      const target = this.workspace.resolve(path.resolve(root, move.to))
+      const source = this.pathPolicy.resolve(path.resolve(root, move.from))
+      const target = this.pathPolicy.resolve(path.resolve(root, move.to))
       if (!this.isInside(root, source) || !this.isInside(root, target)) {
-        throw new WorkspaceError("Move escapes the approved root")
+        throw new PathPolicyError("Move escapes the approved root")
       }
-      const existingEntry = bySource.get(source)
-      if (existingEntry?.state === "done") {
-        if (existsSync(target) && !existsSync(source)) {
-          skipped++
-          continue
+      const sourceExists = existsSync(source)
+      const targetExists = existsSync(target)
+      if (!sourceExists && targetExists) {
+        const targetHash = sha256File(target)
+        if (move.sha256 && targetHash !== move.sha256) {
+          throw new Error(`Target exists with a different hash: ${target}`)
         }
-        throw new Error(`Journal says move is done but the filesystem disagrees: ${source}`)
+        await this.checkpoints.recordAgentWrite(root, target)
+        skipped++
+        continue
       }
-      if (!existsSync(source) || !statSync(source).isFile()) throw new Error(`Source missing: ${source}`)
-      if (existsSync(target)) throw new Error(`Target already exists: ${target}`)
-      await this.ensureParentDirectories(root, target, batchId, context)
+      if (sourceExists && targetExists) {
+        throw new Error(`Source and target both exist: ${source} -> ${target}`)
+      }
+      if (!sourceExists) throw new Error(`Source missing: ${source}`)
+      if (!statSync(source).isFile()) throw new Error(`Source is not a file: ${source}`)
       const sourceHash = sha256File(source)
       if (move.sha256 && sourceHash !== move.sha256) throw new Error(`Source hash mismatch: ${source}`)
-      const journal =
-        existingEntry ??
-        (await this.journal.begin({
-          batchId,
-          turnId: context.turnId,
-          sessionId: context.sessionId,
-          toolName: "fs_apply_moves",
-          operation: "move",
-          source,
-          target,
-          sourceHash,
-          undo: {},
-        }))
-      await this.journal.mark(journal.id, "applying")
+      await this.ensureParentDirectories(root, target)
+      if (existsSync(target)) throw new Error(`Target already exists: ${target}`)
+      await this.checkpoints.recordAgentWriteHash(root, source, sourceHash)
       renameSync(source, target)
-      const targetHash = sha256File(target)
-      await this.journal.mark(journal.id, "done", { targetHash })
+      await this.checkpoints.recordAgentWrite(root, target)
       applied++
       if (crashAfter > 0 && applied >= crashAfter) {
-        this.logger.error("journal.crash_injected", { after: applied })
+        this.logger.error("checkpoints.crash_injected", { after: applied })
         if (process.env.AGENT1_CRASH_MODE === "throw") {
-          throw new Error(`Injected journal crash after ${applied} moves`)
+          throw new Error(`Injected checkpoint move crash after ${applied} moves`)
         }
         process.exit(9)
       }
     }
 
-    return { batchId, applied, skipped, total: parsed.moves.length }
-  }
-
-  private async ensureParentDirectories(
-    root: string,
-    target: string,
-    batchId: string,
-    context: ToolContext,
-  ): Promise<void> {
-    const parent = path.dirname(target)
-    if (!this.isInside(root, parent)) throw new WorkspaceError("Target parent escapes root")
-    const relative = path.relative(root, parent)
-    if (relative === "") return
-    let current = root
-    for (const segment of relative.split(path.sep)) {
-      current = path.join(current, segment)
-      if (existsSync(current)) continue
-      mkdirSync(current)
-      const dirEntry = await this.journal.begin({
-        batchId,
-        turnId: context.turnId,
-        sessionId: context.sessionId,
-        toolName: "fs_apply_moves",
-        operation: "mkdir",
-        target: current,
-        undo: {},
-      })
-      await this.journal.mark(dirEntry.id, "done")
+    return {
+      batchId,
+      applied,
+      skipped,
+      total: parsed.moves.length,
+      checkpointId: checkpoint?.id ?? null,
     }
   }
 
-  private async fsUndo(input: unknown) {
-    const parsed = z.object({ batchId: z.string().optional() }).parse(input)
-    const batchId = parsed.batchId ?? (await this.journal.latestBatchId())
-    if (!batchId) throw new Error("No journal batch to undo")
-    return this.journal.undoBatch(batchId)
+  private async ensureParentDirectories(root: string, target: string): Promise<void> {
+    const parent = path.dirname(target)
+    if (!this.isInside(root, parent)) throw new PathPolicyError("Target parent escapes root")
+    const relative = path.relative(root, parent)
+    if (relative === "") return
+    mkdirSync(parent, { recursive: true })
   }
 
-  private async shellExec(input: unknown) {
+  private async shellExec(input: unknown, context: ToolContext = {}) {
     const parsed = z
       .object({
         command: z.string().min(1).max(8_000),
@@ -725,8 +761,19 @@ export class ToolService {
         timeoutMs: z.number().int().min(1_000).max(120_000).optional(),
       })
       .parse(input)
-    const cwd = parsed.cwd ? this.workspace.resolve(parsed.cwd) : process.cwd()
+    const cwd = this.pathPolicy.resolve(parsed.cwd ?? process.cwd())
     if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error("Working directory does not exist")
+    await this.pathPolicy.requireWritable(cwd)
+    const checkpointRoot = this.pathPolicy.rootForPath(cwd)
+    if (await this.pathPolicy.isWritable(checkpointRoot)) {
+      await this.checkpoints.ensureCheckpointForPath({
+        rootPath: checkpointRoot,
+        turnId: context.turnId,
+        sessionId: context.sessionId,
+        toolCallId: context.toolCallId,
+        reason: "before shell_exec",
+      })
+    }
     const env = { ...process.env }
     for (const key of Object.keys(env)) {
       if (/PASSWORD|TOKEN|SECRET|API_KEY|AUTH|COOKIE/i.test(key)) delete env[key]

@@ -82,14 +82,14 @@ matching OpenCode. It intentionally does not print a loopback QR code.
 - Providers screen with API-key connection and environment-key detection.
 - Searchable model picker with free/tool/reasoning labels; per-session switching.
 - Models catalog with search, visibility, favorites, testing, and default selection.
-- Titlebar tabs, home workspace/session list, and new-session wordmark/composer.
+- Titlebar tabs, home session list, and new-session wordmark/composer.
 - Streaming chat with stop, models, approvals, and auto-scroll.
 - Approval inbox and inline approval cards with exact arguments.
 - Review panel: pending approvals, journal batches, and undo.
 - Context panel: model, token, turn, cost, and context-window stats.
-- Files panel: `@pierre/trees` workspace tree and `@pierre/diffs` file viewer.
+- Checkpoint diff viewer using `@pierre/diffs`; file work happens through path-aware tools.
 - Review panel: `@pierre/diffs` file/diff previews for journaled changes.
-- Rules, workspaces, journal, provider connection, searchable model catalog, and settings.
+- Rules, approval policy, checkpoints, provider connection, searchable model catalog, and settings.
 - System light/dark theme with a manual override.
 - Offline, reconnecting, asleep, and update-available status banners.
 - Installable PWA with a network-only API policy and prompt-based updates.

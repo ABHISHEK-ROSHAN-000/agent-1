@@ -5,9 +5,9 @@ import path from "node:path"
 import { Logger } from "../core/log"
 import { Database } from "../db/database"
 import { SessionSearchService } from "../memory/session-search-service"
-import { JournalService } from "./journal-service"
+import { createTestCheckpointManager } from "../test/checkpoints"
 import { ToolService } from "./tool-service"
-import { WorkspaceService } from "./workspace-service"
+import { PathPolicy } from "./path-policy"
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -23,9 +23,10 @@ async function setup() {
   })
   const logger = new Logger({ level: "error" })
   const search = new SessionSearchService(db)
+  const checkpoints = await createTestCheckpointManager(db, dir, logger)
   const tools = new ToolService(
-    new WorkspaceService(db, logger, dir),
-    new JournalService(db, logger),
+    new PathPolicy(db, logger, dir),
+    checkpoints,
     logger,
     undefined,
     search,

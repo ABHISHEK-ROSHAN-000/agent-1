@@ -15,14 +15,19 @@ import {
   retryDelayMs,
 } from "./provider-error"
 import { outputLimit } from "./token-budget"
-import type { Database, NewMessage } from "../db/database"
+import type { Database, InboxStepResult, NewMessage } from "../db/database"
 import type { EventService } from "../events/service"
 import type { MemoryReviewService } from "../memory/memory-review-service"
 import type { MemoryService } from "../memory/memory-service"
 import type { MemorySnapshot } from "../memory/types"
-import type { Message, ModelSelection, Session, TokenUsage, Turn } from "../shared/types"
+import type { Message, ModelSelection, Session, TokenUsage, Turn, TurnStatus } from "../shared/types"
 import { argumentsHash, type PermissionService } from "../permissions/permission-service"
-import type { ToolService } from "../tools/tool-service"
+import { ToolContentResult, type ToolService } from "../tools/tool-service"
+import { newId } from "../core/ids"
+import { AttachmentService } from "../attachments/service"
+import { sanitizeModelMessages, userContent } from "../attachments/model-content"
+import { SessionInboxService, type Promotable } from "../sessions/inbox"
+import type { InboxDelivery, InboxItem, PromptFileInput, StoredFile } from "../shared/types"
 import type { TurnBus } from "./turn-bus"
 
 interface PendingToolCall {
@@ -83,8 +88,41 @@ function costFor(model: { costInputPerMillion: number; costOutputPerMillion: num
   )
 }
 
+export class TurnBusyError extends Error {
+  constructor(readonly activeTurn: Turn) {
+    super(`Session already has an active turn: ${activeTurn.id}`)
+    this.name = "TurnBusyError"
+  }
+}
+
+export class EmptyPromptError extends Error {
+  constructor() {
+    super("Prompt text is required")
+    this.name = "EmptyPromptError"
+  }
+}
+
+export interface PromptResult {
+  readonly inbox: InboxItem
+  readonly turn: Turn | null
+  readonly userMessage: Message | null
+  readonly pending: boolean
+}
+
+export class SessionDeletingError extends Error {
+  constructor() {
+    super("Session is being deleted")
+    this.name = "SessionDeletingError"
+  }
+}
+
 export class TurnService {
+  readonly inbox: SessionInboxService
+  readonly attachments: AttachmentService
   private readonly active = new Map<string, AbortController>()
+  private readonly running = new Map<string, Promise<void>>()
+  private readonly deletingSessions = new Set<string>()
+  private readonly wakes = new Map<string, Promotable>()
   private readonly maxSteps: number
   private readonly maxWallMs: number
   private readonly maxCostUsd: number
@@ -109,13 +147,186 @@ export class TurnService {
     this.maxCostUsd = options.maxCostUsd ?? Number(process.env.AGENT1_TURN_MAX_COST_USD ?? "0")
     this.maxRetries = options.maxRetries ?? Number(process.env.AGENT1_TURN_MAX_RETRIES ?? "10")
     this.retryBaseMs = options.retryBaseMs ?? Number(process.env.AGENT1_TURN_RETRY_BASE_MS ?? "2000")
+    this.inbox = new SessionInboxService(db, events, logger)
+    this.attachments = new AttachmentService(db, logger)
   }
 
   async startTurn(
     sessionId: string,
     content: string,
     selection?: ModelSelection,
+    files?: readonly StoredFile[],
   ): Promise<{ turn: Turn; userMessage: Message }> {
+    if (this.deletingSessions.has(sessionId)) throw new SessionDeletingError()
+    const session = await this.db.getSession(sessionId)
+    if (!session) throw new Error("Session not found")
+    const activeTurn = await this.db.getActiveTurn(sessionId)
+    if (activeTurn) throw new TurnBusyError(activeTurn)
+    this.memoryReview?.cancel(sessionId)
+    const resolved = await this.models.resolve(
+      selection ??
+        (session.providerId && session.modelId
+          ? { providerId: session.providerId, modelId: session.modelId }
+          : undefined),
+    )
+    const reasoningEffort = this.models.reasoningEffortFor(
+      resolved.model,
+      selection ? selection.reasoningEffort : session.reasoningEffort,
+    )
+    await this.db.setSessionModel(
+      sessionId,
+      resolved.provider.id,
+      resolved.model.modelId,
+      reasoningEffort ?? null,
+    )
+    let created: Awaited<ReturnType<Database["createTurnWithUserMessage"]>>
+    try {
+      created = await this.db.createTurnWithUserMessage(
+        sessionId,
+        resolved.provider.id,
+        resolved.model.modelId,
+        content,
+        reasoningEffort ?? null,
+        files,
+      )
+    } catch (error) {
+      const raced = await this.db.getActiveTurn(sessionId)
+      if (raced) throw new TurnBusyError(raced)
+      throw error
+    }
+    this.bus.publish(created.turn.id, { type: "status", status: "queued" })
+    await this.events.append("turn.started", sessionId, {
+      turnId: created.turn.id,
+      providerId: resolved.provider.id,
+      modelId: resolved.model.modelId,
+      reasoningEffort: reasoningEffort ?? null,
+    })
+    await this.providers.touchModel(resolved.provider.id, resolved.model.modelId)
+    this.launchRun(created.turn.id, false)
+    return created
+  }
+
+  /**
+   * Durable prompt admission. A busy session admits work instead of failing:
+   * steer wakes the active execution, queue waits for the idle boundary.
+   */
+  async prompt(
+    sessionId: string,
+    content: string,
+    options: {
+      readonly delivery?: InboxDelivery
+      readonly selection?: ModelSelection
+      readonly id?: string
+      readonly files?: readonly PromptFileInput[]
+    } = {},
+  ): Promise<PromptResult> {
+    if (this.deletingSessions.has(sessionId)) throw new SessionDeletingError()
+    if (!content.trim() && (!options.files || options.files.length === 0)) throw new EmptyPromptError()
+    const delivery = options.delivery ?? "steer"
+    return this.inbox.serialized(sessionId, async () => {
+      const session = await this.db.getSession(sessionId)
+      if (!session) throw new Error("Session not found")
+      const materialized = await this.attachments.materialize(options.files)
+      const admitted = await this.inbox.admitWithinLock({
+        id: options.id ?? newId("msg"),
+        sessionId,
+        text: content,
+        delivery,
+        ...(materialized.files.length > 0 ? { files: materialized.files } : {}),
+      })
+
+      const active = await this.db.getActiveTurn(sessionId)
+      if (active) {
+        if (delivery === "steer") this.wakeSession(sessionId, "steer")
+        return {
+          inbox: admitted.item,
+          turn: active,
+          userMessage: null,
+          pending: admitted.pending,
+        }
+      }
+      if (delivery === "queue" || admitted.item.delivery !== "steer") {
+        return { inbox: admitted.item, turn: null, userMessage: null, pending: admitted.pending }
+      }
+      if (!admitted.pending) {
+        return { inbox: admitted.item, turn: null, userMessage: null, pending: false }
+      }
+      const started = await this.startTurnFromInboxLocked(sessionId, admitted.item, options.selection)
+      if (!started) {
+        const current = await this.db.getActiveTurn(sessionId)
+        return { inbox: admitted.item, turn: current, userMessage: null, pending: false }
+      }
+      return {
+        inbox: admitted.item,
+        turn: started.turn,
+        userMessage: started.userMessage,
+        pending: false,
+      }
+    })
+  }
+
+  listInbox(sessionId: string): Promise<InboxItem[]> {
+    return this.inbox.list(sessionId)
+  }
+
+  async cancelInbox(sessionId: string, id: string): Promise<InboxItem | null> {
+    const result = await this.inbox.cancel(sessionId, id)
+    return result.item
+  }
+
+  async setInboxDelivery(
+    sessionId: string,
+    id: string,
+    delivery: InboxDelivery,
+  ): Promise<{ readonly inbox: InboxItem | null; readonly turn: Turn | null }> {
+    return this.inbox.serialized(sessionId, async () => {
+      const result = await this.inbox.setDeliveryWithinLock(sessionId, id, delivery)
+      if (!result.item) return { inbox: null, turn: null }
+      if (delivery === "queue") return { inbox: result.item, turn: null }
+      const active = await this.db.getActiveTurn(sessionId)
+      if (active) {
+        this.wakeSession(sessionId, "steer")
+        return { inbox: result.item, turn: active }
+      }
+      const started = await this.startTurnFromInboxLocked(sessionId, result.item)
+      return { inbox: result.item, turn: started?.turn ?? null }
+    })
+  }
+
+  async interruptSession(
+    sessionId: string,
+    options: { readonly resume?: boolean } = {},
+  ): Promise<{ readonly interrupted: boolean; readonly turn: Turn | null }> {
+    const active = await this.db.getActiveTurn(sessionId)
+    if (!active) return { interrupted: false, turn: null }
+    await this.cancel(active.id)
+    const running = this.running.get(active.id)
+    if (running) {
+      await Promise.race([
+        running,
+        new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+      ])
+    }
+    if (options.resume === false) return { interrupted: true, turn: null }
+    const next = await this.inbox.nextPromotable(sessionId, "steer")
+    if (!next) return { interrupted: true, turn: null }
+    const started = await this.inbox.serialized(sessionId, () =>
+      this.startTurnFromInboxLocked(sessionId, next),
+    )
+    return { interrupted: true, turn: started?.turn ?? null }
+  }
+
+  private wakeSession(sessionId: string, scope: Promotable): void {
+    const current = this.wakes.get(sessionId)
+    if (current === "input" || scope === "steer") this.wakes.set(sessionId, scope)
+  }
+
+  private async startTurnFromInboxLocked(
+    sessionId: string,
+    item: InboxItem,
+    selection?: ModelSelection,
+  ): Promise<{ turn: Turn; userMessage: Message } | null> {
+    if (this.deletingSessions.has(sessionId)) throw new SessionDeletingError()
     const session = await this.db.getSession(sessionId)
     if (!session) throw new Error("Session not found")
     this.memoryReview?.cancel(sessionId)
@@ -135,13 +346,15 @@ export class TurnService {
       resolved.model.modelId,
       reasoningEffort ?? null,
     )
-    const created = await this.db.createTurnWithUserMessage(
+    const created = await this.db.createTurnFromInbox({
       sessionId,
-      resolved.provider.id,
-      resolved.model.modelId,
-      content,
-      reasoningEffort ?? null,
-    )
+      inboxId: item.id,
+      providerId: resolved.provider.id,
+      modelId: resolved.model.modelId,
+      reasoningEffort: reasoningEffort ?? null,
+    })
+    if (!created) return null
+    this.events.publish(created.event)
     this.bus.publish(created.turn.id, { type: "status", status: "queued" })
     await this.events.append("turn.started", sessionId, {
       turnId: created.turn.id,
@@ -150,8 +363,45 @@ export class TurnService {
       reasoningEffort: reasoningEffort ?? null,
     })
     await this.providers.touchModel(resolved.provider.id, resolved.model.modelId)
-    void this.runTurn(created.turn.id, false)
-    return created
+    this.launchRun(created.turn.id, false)
+    return { turn: created.turn, userMessage: created.userMessage }
+  }
+
+  beginSessionDelete(sessionId: string): void {
+    this.deletingSessions.add(sessionId)
+  }
+
+  endSessionDelete(sessionId: string): void {
+    this.deletingSessions.delete(sessionId)
+  }
+
+  async cancelSession(sessionId: string): Promise<Turn | null> {
+    const active = await this.db.getActiveTurn(sessionId)
+    if (!active) return null
+    const cancelled = await this.cancel(active.id)
+    const running = this.running.get(active.id)
+    if (running) {
+      await Promise.race([
+        running,
+        new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+      ])
+    }
+    return cancelled
+  }
+
+  private launchRun(turnId: string, resumed: boolean): void {
+    if (this.running.has(turnId)) return
+    const promise = this.runTurn(turnId, resumed)
+      .catch((error) => {
+        this.logger.error("turn.run_failed", {
+          turnId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+      .finally(() => {
+        this.running.delete(turnId)
+      })
+    this.running.set(turnId, promise)
   }
 
   async cancel(turnId: string): Promise<Turn | null> {
@@ -173,7 +423,7 @@ export class TurnService {
       await this.db.setTurnStatus(turn.id, "resuming")
       this.bus.publish(turn.id, { type: "status", status: "resuming" })
       await this.events.append("turn.resumed", turn.sessionId, { turnId: turn.id })
-      void this.runTurn(turn.id, true)
+      this.launchRun(turn.id, true)
     }
   }
 
@@ -184,7 +434,62 @@ export class TurnService {
   async resumeWaiting(turnId: string): Promise<void> {
     const turn = await this.db.getTurn(turnId)
     if (!turn || turn.status !== "waiting_approval") return
-    await this.runTurn(turnId, true)
+    this.launchRun(turnId, true)
+  }
+
+  private async saveBoundary(
+    turn: Turn,
+    state: CheckpointState,
+    newMessages: readonly NewMessage[],
+    scope: Promotable,
+    requestedStatus: TurnStatus,
+  ): Promise<{
+    state: CheckpointState
+    messages: Message[]
+    status: TurnStatus
+    promoted: number
+  }> {
+    let nextState = state
+    const result = await this.inbox.promote(turn.sessionId, scope, async (items) => {
+      nextState = {
+        ...state,
+        messages: [
+          ...state.messages,
+          ...items.map((item): ModelMessage => ({ role: "user", content: item.payload.text })),
+        ],
+      }
+      const saved = await this.db.saveTurnStepWithInbox({
+        turnId: turn.id,
+        step: state.step,
+        sessionId: turn.sessionId,
+        messages: newMessages,
+        checkpoint: nextState,
+        usage: nextState.usage,
+        status: requestedStatus,
+        inboxIds: items.map((item) => item.id),
+      })
+      for (const event of saved.events) this.events.publish(event)
+      return saved
+    })
+
+    if (!result) {
+      const messages = await this.db.saveTurnStep(turn.id, {
+        step: state.step,
+        sessionId: turn.sessionId,
+        messages: newMessages,
+        checkpoint: state,
+        usage: state.usage,
+        status: requestedStatus,
+      })
+      return { state, messages, status: requestedStatus, promoted: 0 }
+    }
+
+    return {
+      state: nextState,
+      messages: result.messages,
+      status: result.status,
+      promoted: result.delivered.length,
+    }
   }
 
   private async runTurn(turnId: string, resumed: boolean): Promise<void> {
@@ -250,14 +555,8 @@ export class TurnService {
             this.bus.publish(turnId, { type: "status", status: "waiting_approval" })
             return
           }
-          await this.db.saveTurnStep(turnId, {
-            step: state.step,
-            sessionId: turn.sessionId,
-            messages: pending.newMessages,
-            checkpoint: state,
-            usage: state.usage,
-            status: "running",
-          })
+          const saved = await this.saveBoundary(turn, state, pending.newMessages, "steer", "running")
+          state = saved.state
           this.bus.publish(turnId, { type: "status", status: "running" })
         }
 
@@ -318,14 +617,12 @@ export class TurnService {
             state = { ...state, messages: [...state.messages, message] }
             newMessages.push({ role: "assistant", text: step.text, content: message })
           }
-          await this.db.saveTurnStep(turnId, {
-            step: state.step,
-            sessionId: session.id,
-            messages: newMessages,
-            checkpoint: state,
-            usage: state.usage,
-            status: "completed",
-          })
+          const saved = await this.saveBoundary(turn, state, newMessages, "input", "completed")
+          state = saved.state
+          if (saved.status !== "completed") {
+            this.bus.publish(turnId, { type: "status", status: "running" })
+            continue
+          }
           this.bus.publish(turnId, { type: "done", status: "completed" })
           await this.events.append("turn.completed", session.id, {
             turnId,
@@ -348,6 +645,7 @@ export class TurnService {
           const decision = await this.permissions.evaluate(call.toolName, call.input, {
             action: this.tools.action(call.toolName),
             risk: this.tools.risk(call.toolName),
+            sessionId: session.id,
             ...permissionContext,
           })
           await this.permissions.audit({
@@ -381,9 +679,12 @@ export class TurnService {
               sessionId: session.id,
               toolCallId: call.toolCallId,
               toolName: call.toolName,
+              action: decision.action,
+              resource: decision.resource,
+              patternKey: decision.patternKey,
+              displayCommand: decision.displayCommand ?? null,
               arguments: call.input,
               ruleId: decision.ruleId,
-              resource: permissionContext.resource,
             })
             pendingCalls.push(call)
             await this.events.append("approval.created", session.id, {
@@ -395,9 +696,27 @@ export class TurnService {
             continue
           }
 
-          const message = await this.executeToolCall(turnId, session.id, call)
-          state = { ...state, messages: [...state.messages, message] }
-          newMessages.push(this.newToolMessage(call, textFromMessage(message), message))
+          const execution = await this.executeToolCall(turnId, session.id, call)
+          state = {
+            ...state,
+            messages: [
+              ...state.messages,
+              execution.message,
+              ...(execution.followUp ? [execution.followUp] : []),
+            ],
+          }
+          newMessages.push(this.newToolMessage(call, execution.text, execution.message))
+          if (execution.followUp) {
+            newMessages.push({
+              role: "tool",
+              text: execution.followUpText ?? "Tool attachment",
+              content: {
+                role: "user",
+                content: [{ type: "text", text: execution.followUpText ?? "Tool attachment" }],
+              },
+              ...(execution.followUpFiles ? { files: execution.followUpFiles } : {}),
+            })
+          }
         }
 
         if (pendingCalls.length > 0) {
@@ -418,14 +737,8 @@ export class TurnService {
           return
         }
 
-        await this.db.saveTurnStep(turnId, {
-          step: state.step,
-          sessionId: session.id,
-          messages: newMessages,
-          checkpoint: state,
-          usage: state.usage,
-          status: "running",
-        })
+        const saved = await this.saveBoundary(turn, state, newMessages, "steer", "running")
+        state = saved.state
         this.bus.publish(turnId, { type: "status", status: "running" })
       }
     } catch (error) {
@@ -480,11 +793,23 @@ export class TurnService {
       const approval = await this.permissions.findApproval(turn.id, call.toolCallId)
       if (!approval || approval.status === "pending") {
         if (!approval) {
+          const permissionContext = await this.tools.permissionContext(call.toolName, call.input)
+          const command =
+            call.input && typeof call.input === "object"
+              ? (call.input as Record<string, unknown>).command
+              : undefined
           await this.permissions.requestApproval({
             turnId: turn.id,
             sessionId: turn.sessionId,
             toolCallId: call.toolCallId,
             toolName: call.toolName,
+            action: this.tools.action(call.toolName),
+            resource: permissionContext.resource,
+            patternKey:
+              typeof command === "string"
+                ? `${typeof (call.input as Record<string, unknown>).cwd === "string" ? (call.input as Record<string, unknown>).cwd : ""}\u0000${command}`
+                : permissionContext.resource,
+            displayCommand: typeof command === "string" ? command : null,
             arguments: call.input,
           })
         }
@@ -507,9 +832,24 @@ export class TurnService {
             details: { reason: "arguments_changed" },
           })
         } else {
-          const message = await this.executeToolCall(turn.id, turn.sessionId, call)
-          messages = [...messages, message]
-          newMessages.push(this.newToolMessage(call, textFromMessage(message), message))
+          const execution = await this.executeToolCall(turn.id, turn.sessionId, call)
+          messages = [
+            ...messages,
+            execution.message,
+            ...(execution.followUp ? [execution.followUp] : []),
+          ]
+          newMessages.push(this.newToolMessage(call, execution.text, execution.message))
+          if (execution.followUp) {
+            newMessages.push({
+              role: "tool",
+              text: execution.followUpText ?? "Tool attachment",
+              content: {
+                role: "user",
+                content: [{ type: "text", text: execution.followUpText ?? "Tool attachment" }],
+              },
+              ...(execution.followUpFiles ? { files: execution.followUpFiles } : {}),
+            })
+          }
         }
         continue
       }
@@ -549,7 +889,13 @@ export class TurnService {
     turnId: string,
     sessionId: string,
     call: PendingToolCall,
-  ): Promise<ModelMessage> {
+  ): Promise<{
+    message: ModelMessage
+    followUp?: ModelMessage
+    followUpFiles?: StoredFile[]
+    followUpText?: string
+    text: string
+  }> {
     this.bus.publish(turnId, {
       type: "tool",
       phase: "start",
@@ -593,7 +939,61 @@ export class TurnService {
       turnId,
       details: { toolCallId: call.toolCallId, failed },
     })
-    return this.toolResultMessage(call, output)
+    if (output instanceof ToolContentResult) {
+      const text = output.content
+        .filter((item): item is { type: "text"; text: string } => item.type === "text")
+        .map((item) => item.text)
+        .join("\n") || "Tool completed"
+      const files = output.content.filter(
+        (item): item is { type: "file"; uri: string; mime: string; name?: string } => item.type === "file",
+      )
+      const message = this.toolTextMessage(call, text)
+      if (files.length === 0) return { message, text }
+      const followUpText = `Attached tool output: ${files.map((file) => file.name ?? file.mime).join(", ")}`
+      const stored = await this.attachments.materialize(
+        files.map((file) => ({
+          uri: file.uri,
+          name: file.name,
+          source: { type: "inline" as const },
+        })),
+      )
+      const hydrated = await this.attachments.hydrate(stored.files)
+      const followUp: ModelMessage = {
+        role: "user",
+        content: [
+          { type: "text", text: followUpText },
+          ...hydrated.map((file) => ({
+            type: "file" as const,
+            data: { type: "data" as const, data: file.data },
+            mediaType: file.mime,
+            ...(file.name ? { filename: file.name } : {}),
+          })),
+        ],
+      }
+      return {
+        message,
+        followUp,
+        followUpFiles: [...stored.files],
+        followUpText,
+        text,
+      }
+    }
+    const message = this.toolResultMessage(call, output)
+    return { message, text: textFromMessage(message) }
+  }
+
+  private toolTextMessage(call: PendingToolCall, text: string): ModelMessage {
+    return {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: call.toolCallId,
+          toolName: call.toolName,
+          output: { type: "text", value: text },
+        },
+      ],
+    }
   }
 
   private toolResultMessage(
@@ -603,7 +1003,21 @@ export class TurnService {
   ): ModelMessage {
     const result = deniedReason
       ? { type: "execution-denied" as const, reason: deniedReason }
-      : { type: "json" as const, value: output as never }
+      : output instanceof ToolContentResult
+        ? {
+            type: "content" as const,
+            value: output.content.map((item) =>
+              item.type === "text"
+                ? { type: "text" as const, text: item.text }
+                : {
+                    type: "file" as const,
+                    data: { type: "data" as const, data: item.uri.slice(item.uri.indexOf(",") + 1) },
+                    mediaType: item.mime,
+                    ...(item.name ? { filename: item.name } : {}),
+                  },
+            ),
+          }
+        : { type: "json" as const, value: output as never }
     return {
       role: "tool",
       content: [
@@ -644,10 +1058,11 @@ export class TurnService {
     while (true) {
       let outputStarted = false
       try {
+        const requestMessages = sanitizeModelMessages(messages, resolved.model)
         const result = streamText({
           model,
           system,
-          messages,
+          messages: requestMessages,
           ...(resolved.model.supportsTools ? { tools: this.tools.definitions() } : {}),
           stopWhen: stepCountIs(1),
           maxOutputTokens,
@@ -739,7 +1154,7 @@ export class TurnService {
     const visible = stored.filter(
       (message) => !session.summaryThroughSeq || message.seq > session.summaryThroughSeq,
     )
-    let messages = visible.map((message) => this.toModelMessage(message))
+    let messages = await Promise.all(visible.map((message) => this.toModelMessage(message, model)))
     if (tokenEstimate(messages) > Math.floor(model.contextWindow * 0.7) && messages.length > 8) {
       const oldMessages = stored.slice(0, -6)
       const recentMessages = stored.slice(-6)
@@ -750,7 +1165,7 @@ export class TurnService {
           await this.models.resolve({ providerId: model.providerId, modelId: model.modelId }),
         )
         await this.db.setSessionSummary(session.id, summary, throughSeq)
-        messages = recentMessages.map((message) => this.toModelMessage(message))
+        messages = await Promise.all(recentMessages.map((message) => this.toModelMessage(message, model)))
       }
     }
     return messages
@@ -842,7 +1257,17 @@ export class TurnService {
       .join("\n\n")
   }
 
-  private toModelMessage(message: Message): ModelMessage {
+  private async toModelMessage(
+    message: Message,
+    model: ResolvedModel["model"],
+  ): Promise<ModelMessage> {
+    if ((message.role === "user" || message.role === "tool") && message.files && message.files.length > 0) {
+      const files = await this.attachments.hydrate(message.files)
+      const content = userContent(message.text, files, model)
+      return content.length > 0
+        ? { role: "user", content }
+        : { role: "user", content: message.text }
+    }
     if (message.content && typeof message.content === "object") {
       return message.content as ModelMessage
     }

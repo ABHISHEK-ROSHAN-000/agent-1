@@ -10,9 +10,11 @@ import { EventService } from "../events/service"
 import { ModelService } from "../models/model-service"
 import { ProviderService } from "../models/provider-service"
 import { PermissionService } from "../permissions/permission-service"
-import { WorkspaceService } from "../tools/workspace-service"
-import { JournalService } from "../tools/journal-service"
+import { SmartJudge } from "../approvals/smart-judge"
+import { SettingsService } from "../settings/settings-service"
+import { PathPolicy } from "../tools/path-policy"
 import { ToolService } from "../tools/tool-service"
+import { CheckpointManager } from "../checkpoints/manager"
 import { TurnBus } from "../agent/turn-bus"
 import { TurnService } from "../agent/turn-service"
 import { RemoteService } from "../remote/remote-service"
@@ -36,10 +38,13 @@ async function main(): Promise<void> {
   let events: EventService | undefined
   let stopping = false
   let remoteService: RemoteService | undefined
+  let approvalExpiryTimer: ReturnType<typeof setInterval> | undefined
 
   const shutdown = async (reason: string): Promise<void> => {
     if (stopping) return
     stopping = true
+    if (approvalExpiryTimer) clearInterval(approvalExpiryTimer)
+    approvalExpiryTimer = undefined
     logger.info("service.stopping", { reason })
     try {
       await events?.append("service.stopping", null, { reason })
@@ -74,16 +79,26 @@ async function main(): Promise<void> {
     const providers = new ProviderService(db, logger, config.modelSecretsPath)
     await providers.initialize()
     const models = new ModelService(providers)
-    const permissions = new PermissionService(db, logger)
+    const permissions = new PermissionService(db, logger, events)
+    const smartJudge = new SmartJudge(models, logger, db)
+    permissions.setSmartJudge((input) => smartJudge.judge(input))
     await permissions.expireApprovals()
-    const workspace = new WorkspaceService(db, logger, config.dataDir)
-    const journal = new JournalService(db, logger)
-    await journal.reconcile()
+    approvalExpiryTimer = setInterval(() => {
+      void permissions.expireApprovals().catch((error) => {
+        logger.warn("approval.expiry_sweep_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+    }, 15_000)
+    const pathPolicy = new PathPolicy(db, logger, config.dataDir)
+    const checkpoints = new CheckpointManager(db, logger, config.checkpointsDir, events)
+    await checkpoints.initialize()
+    const settings = new SettingsService(db, permissions, providers, checkpoints)
     const memory = new MemoryService(db)
     const memoryReview = new MemoryReviewService(db, events, models, memory, logger)
     await memoryReview.initialize()
     const sessionSearch = new SessionSearchService(db)
-    const tools = new ToolService(workspace, journal, logger, memory, sessionSearch)
+    const tools = new ToolService(pathPolicy, checkpoints, logger, memory, sessionSearch)
     const turnBus = new TurnBus()
     const turns = new TurnService(
       db,
@@ -97,6 +112,7 @@ async function main(): Promise<void> {
       memory,
       memoryReview,
     )
+    void turns.attachments.prune()
     remoteService = new RemoteService(db, logger, () => `127.0.0.1:${server?.port ?? 0}`)
 
     const app = new App({
@@ -109,8 +125,8 @@ async function main(): Promise<void> {
       turns,
       turnBus,
       permissions,
-      workspace,
-      journal,
+      checkpoints,
+      settings,
       tools,
       memory,
       sessionSearch,

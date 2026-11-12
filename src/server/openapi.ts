@@ -3,7 +3,7 @@ export const openApiDocument = {
   info: {
     title: "Agent-1 API",
     version: "0.1.0",
-    description: "Local personal assistant daemon. Phase 7: auth, sessions, tools, web client, remote access, and memory.",
+    description: "Local personal assistant daemon. Phase 8A: auth, sessions, tools, checkpoints, web client, remote access, and memory.",
   },
   servers: [{ url: "http://127.0.0.1:{port}", variables: { port: { default: "0" } } }],
   components: {
@@ -168,46 +168,78 @@ export const openApiDocument = {
         responses: { "200": { description: "Session search result" } },
       },
     },
-    "/v1/workspaces": {
+    "/v1/settings": {
       get: {
-        summary: "List workspace grants",
+        summary: "Read unified Agent-1 settings",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
-        responses: { "200": { description: "Workspaces" } },
+        responses: { "200": { description: "Settings" } },
       },
-      post: {
-        summary: "Grant a folder for read or write",
+      patch: {
+        summary: "Patch unified Agent-1 settings",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
-        responses: { "201": { description: "Workspace created" } },
+        responses: { "200": { description: "Updated settings" } },
       },
     },
-    "/v1/workspaces/{id}": {
+    "/v1/approval-config": {
+      get: {
+        summary: "Read the Agent-1 approval policy",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Approval config" } },
+      },
+      patch: {
+        summary: "Update the Agent-1 approval policy",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Approval config" } },
+      },
+    },
+    "/v1/approval-grants": {
+      get: {
+        summary: "List session and permanent approval grants",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Approval grants" } },
+      },
+    },
+    "/v1/approval-grants/{id}": {
       delete: {
-        summary: "Remove a workspace grant",
+        summary: "Remove an approval grant",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Workspace removed" } },
+        responses: { "200": { description: "Approval grant removed" } },
       },
     },
-    "/v1/journal": {
+    "/v1/checkpoints": {
       get: {
-        summary: "List journaled operations",
+        summary: "List filesystem checkpoints",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
-        responses: { "200": { description: "Journal entries" } },
+        parameters: [
+          { name: "limit", in: "query", required: false, schema: { type: "integer" } },
+          { name: "sessionId", in: "query", required: false, schema: { type: "string" } },
+        ],
+        responses: { "200": { description: "Checkpoint list" } },
       },
     },
-    "/v1/journal/{id}": {
+    "/v1/checkpoints/{id}": {
       get: {
-        summary: "Get a journal entry",
+        summary: "Get a filesystem checkpoint",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Journal entry" } },
+        responses: { "200": { description: "Checkpoint" } },
       },
     },
-    "/v1/journal/undo": {
+    "/v1/checkpoints/{id}/diff": {
+      get: {
+        summary: "Diff a checkpoint against the current filesystem root",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Checkpoint diff" } },
+      },
+    },
+    "/v1/checkpoints/{id}/restore": {
       post: {
-        summary: "Undo a journal batch",
+        summary: "Restore a checkpoint, optionally with safe user-edit preservation",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
-        responses: { "200": { description: "Undo result" } },
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Restore result" } },
       },
     },
     "/v1/rules": {
@@ -332,6 +364,13 @@ export const openApiDocument = {
         responses: { "200": { description: "Default updated" } },
       },
     },
+    "/v1/sessions/active": {
+      get: {
+        summary: "Hydrate active turns by session",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        responses: { "200": { description: "Active session map" } },
+      },
+    },
     "/v1/sessions": {
       get: {
         summary: "List sessions",
@@ -351,6 +390,26 @@ export const openApiDocument = {
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Session" }, "404": { description: "Not found" } },
       },
+      patch: {
+        summary: "Rename a session",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Session renamed" }, "404": { description: "Not found" } },
+      },
+      delete: {
+        summary: "Delete a session and its owned data",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Session deleted" }, "404": { description: "Not found" } },
+      },
+    },
+    "/v1/media/{hash}": {
+      get: {
+        summary: "Read an attachment blob referenced by a message or inbox item",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "hash", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Attachment bytes" }, "404": { description: "Not found" } },
+      },
     },
     "/v1/sessions/{id}/messages": {
       get: {
@@ -360,10 +419,49 @@ export const openApiDocument = {
         responses: { "200": { description: "Messages" } },
       },
       post: {
-        summary: "Send a user message and start a turn",
+        summary: "Admit a user message as steer or queue work",
         security: [{ basicAuth: [] }, { sessionCookie: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "202": { description: "Turn started" } },
+        responses: { "202": { description: "Prompt admitted" }, "409": { description: "Inbox conflict" } },
+      },
+    },
+    "/v1/sessions/{id}/inbox": {
+      get: {
+        summary: "List pending session inbox items",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Pending inbox items" } },
+      },
+    },
+    "/v1/sessions/{id}/inbox/{inboxID}": {
+      patch: {
+        summary: "Change pending inbox delivery",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "inboxID", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: { "200": { description: "Delivery changed" }, "409": { description: "Inbox conflict" } },
+      },
+      delete: {
+        summary: "Cancel pending inbox input",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "inboxID", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: { "200": { description: "Inbox item cancelled or already delivered" } },
+      },
+    },
+    "/v1/sessions/{id}/interrupt": {
+      post: {
+        summary: "Interrupt the active session execution",
+        security: [{ basicAuth: [] }, { sessionCookie: [] }],
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "resume", in: "query", required: false, schema: { type: "boolean" } },
+        ],
+        responses: { "200": { description: "Interrupt result" } },
       },
     },
     "/v1/turns/{id}": {

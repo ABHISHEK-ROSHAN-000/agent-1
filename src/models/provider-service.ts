@@ -352,6 +352,10 @@ export class ProviderService {
     )
   }
 
+  async clearDefault(): Promise<void> {
+    await this.db.setSetting(DEFAULT_MODEL_SETTING, "")
+  }
+
   async setDefault(selection: ModelSelection): Promise<CatalogModel> {
     const provider = await this.getProvider(selection.providerId)
     if (!provider?.connected) throw new ProviderError("Provider is not connected")

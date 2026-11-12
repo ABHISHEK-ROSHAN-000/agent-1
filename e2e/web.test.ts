@@ -16,7 +16,6 @@ let fake: FakeOpenAI
 let browser: Browser
 let context: BrowserContext
 let page: Page
-let workspaceDir: string
 let taskDir: string
 
 beforeAll(async () => {
@@ -29,12 +28,8 @@ beforeAll(async () => {
     maxOutputTokens: 256,
     reasoningOptions: [{ type: "effort", values: ["none", "low", "high", "max"] }],
   })
-  workspaceDir = await mkdtemp(path.join(os.tmpdir(), "agent-1-web-workspace-"))
-  await writeFile(path.join(workspaceDir, "hello.txt"), "Web file content", "utf8")
-  await daemon.client.addWorkspace({ path: workspaceDir, label: "Web fixture", access: "read" })
   taskDir = await mkdtemp(path.join(os.tmpdir(), "agent-1-web-task-"))
   await writeFile(path.join(taskDir, "a.txt"), "A\n", "utf8")
-  await daemon.client.addWorkspace({ path: taskDir, label: "Task fixture", access: "write" })
   const executablePath = await Bun.file(EDGE).exists()
     ? EDGE
     : (await Bun.file(CHROME).exists())
@@ -53,7 +48,6 @@ afterAll(async () => {
   await browser?.close()
   await daemon?.cleanup()
   fake?.close()
-  if (workspaceDir) await rm(workspaceDir, { recursive: true, force: true })
   if (taskDir) await rm(taskDir, { recursive: true, force: true })
 })
 
@@ -148,7 +142,7 @@ describe("Agent-1 web UI", () => {
     await visible("Fake response:", page, 15_000)
     await page.locator(".send-button.stop").waitFor({ state: "hidden", timeout: 15_000 }).catch(() => undefined)
     expect(await page.locator(".side-panel").count()).toBe(0)
-    await page.locator(".session-header .icon-button").last().click()
+    await page.locator(".session-panel-toggle").click()
     await page.locator(".side-panel").waitFor({ timeout: 5_000 })
     const sideBox = await page.locator(".side-panel").boundingBox()
     expect(sideBox).not.toBeNull()
@@ -173,26 +167,6 @@ describe("Agent-1 web UI", () => {
     await visible("Fake final answer", page, 15_000)
     await page.waitForTimeout(600)
     await page.screenshot({ path: "test-results/session-dark.png", fullPage: true })
-
-    await page.evaluate(() => {
-      const button = [...document.querySelectorAll("button")].find(
-        (entry) => entry.textContent?.trim() === "Files",
-      )
-      button?.click()
-    })
-    await page.locator(".side-content select").selectOption({ label: "Web fixture · read" })
-    await page.locator(".pierre-tree-host file-tree-container").waitFor()
-    const treeBox = await page.locator(".pierre-tree-host").boundingBox()
-    expect(treeBox).not.toBeNull()
-    const fileResponse = page.waitForResponse(
-      (response) => response.url().includes("/file?") && response.status() === 200,
-      { timeout: 15_000 },
-    )
-    await page.mouse.click(treeBox!.x + 100, treeBox!.y + 44)
-    await fileResponse
-    await page.locator(".files-preview").waitFor()
-    await page.screenshot({ path: "test-results/files-dark.png", fullPage: true })
-
     await page.evaluate(() => {
       const button = [...document.querySelectorAll("button")].find(
         (entry) => entry.textContent?.trim() === "Context",
@@ -205,14 +179,6 @@ describe("Agent-1 web UI", () => {
     const move = { root: taskDir, moves: [{ from: "a.txt", to: "sorted/a.txt" }] }
     await page.locator(".session-screen textarea").fill(`apply moves: ${JSON.stringify(move)}`)
     await page.evaluate(() => (document.querySelector(".send-button") as HTMLElement | null)?.click())
-    await visible("Approval required", page, 15_000)
-    await page.screenshot({ path: "test-results/approval-task-dark.png", fullPage: true })
-    await page.evaluate(() => {
-      const button = [...document.querySelectorAll("button")].find((entry) =>
-        entry.textContent?.trim() === "Approve",
-      )
-      button?.click()
-    })
     await waitForPath(path.join(taskDir, "sorted", "a.txt"))
 
     await page.evaluate(() => {
@@ -221,17 +187,14 @@ describe("Agent-1 web UI", () => {
       )
       button?.click()
     })
-    await visible("Undo batch", page, 15_000)
-    await page.evaluate(() => {
-      const summary = document.querySelector(".journal-details summary") as HTMLElement | null
-      summary?.click()
-    })
-    await page.locator(".journal-file .pierre-file-host").waitFor({ timeout: 15_000 })
+    await page.getByRole("button", { name: "Review changes" }).first().click({ timeout: 15_000 })
+    await page.locator(".checkpoint-diff").waitFor({ timeout: 30_000 })
     await page.waitForTimeout(500)
     await page.screenshot({ path: "test-results/review-diff-dark.png", fullPage: true })
+    page.once("dialog", (dialog) => void dialog.accept())
     await page.evaluate(() => {
       const button = [...document.querySelectorAll("button")].find(
-        (entry) => entry.textContent?.trim() === "Undo batch",
+        (entry) => entry.textContent?.trim() === "Restore",
       )
       button?.click()
     })
@@ -273,9 +236,7 @@ describe("Agent-1 web UI", () => {
       "effort-picker-popover.png",
       "session-dark.png",
       "approval-dark.png",
-      "files-dark.png",
       "context-dark.png",
-      "approval-task-dark.png",
       "review-diff-dark.png",
       "home-sessions-dark.png",
       "settings-dark.png",
@@ -369,7 +330,7 @@ describe("Agent-1 web UI", () => {
     await mobilePage.waitForURL(/\/sessions\//)
     await mobilePage.locator(".session-screen").waitFor()
     await mobilePage.evaluate(() => {
-      const button = document.querySelector(".session-header .icon-button") as HTMLElement | null
+      const button = document.querySelector(".session-panel-toggle") as HTMLElement | null
       button?.click()
     })
     await mobilePage.locator(".side-panel").waitFor()

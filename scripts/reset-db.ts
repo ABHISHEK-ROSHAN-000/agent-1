@@ -8,9 +8,10 @@ import { resetDatabaseFiles } from "../src/db/reset"
 const confirmed = process.argv.includes("--yes")
 const config = resolveConfig()
 
-console.log(`Database: ${config.dbPath}`)
-console.log(`Backups:  ${config.backupDir}`)
-console.log(`Version:  v${schemaVersion(config.dbPath)}`)
+console.log(`Database:    ${config.dbPath}`)
+console.log(`Backups:     ${config.backupDir}`)
+console.log(`Checkpoints: ${config.checkpointsDir}`)
+console.log(`Version:     v${schemaVersion(config.dbPath)}`)
 
 if (!confirmed) {
   console.error("Refusing to delete the development database without --yes.")

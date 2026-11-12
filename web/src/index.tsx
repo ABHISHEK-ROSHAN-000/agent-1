@@ -7,14 +7,13 @@ import { LoginPage } from "./login"
 import { HomePage, NewSessionPage } from "./home"
 import {
   ApprovalsPage,
-  JournalPage,
+  CheckpointsPage,
   MemoryPage,
   ModelsPage,
   ProvidersPage,
   RulesPage,
   SessionPage,
   SettingsPage,
-  WorkspacesPage,
 } from "./pages"
 import { applyTheme, getThemePreference, watchSystemTheme } from "./theme"
 import "./styles.css"
@@ -57,8 +56,7 @@ render(
         <Route path="/sessions/:id" component={SessionPage} />
         <Route path="/approvals" component={ApprovalsPage} />
         <Route path="/rules" component={RulesPage} />
-        <Route path="/workspaces" component={WorkspacesPage} />
-        <Route path="/journal" component={JournalPage} />
+        <Route path="/checkpoints" component={CheckpointsPage} />
         <Route path="/memory" component={MemoryPage} />
         <Route path="/providers" component={ProvidersPage} />
         <Route path="/models" component={ModelsPage} />

@@ -29,15 +29,6 @@ async function setup() {
   dirs.push(root)
   await writeFile(path.join(root, "a.txt"), "A\n")
   await writeFile(path.join(root, "b.txt"), "B\n")
-  const workspace = await fetch(`${daemon.state.url}/v1/workspaces`, {
-    method: "POST",
-    headers: {
-      authorization: basic(daemon.password),
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ path: root, label: "Fixture", access: "write" }),
-  })
-  expect(workspace.status).toBe(201)
   const session = await daemon.client.createSession("Folder Ops reference")
   return { fake, daemon, root, sessionId: String(session.session.id) }
 }
@@ -66,7 +57,7 @@ async function turnStatus(daemon: TestDaemon, turnId: string) {
 }
 
 describe("Folder Ops reference through generic tools", () => {
-  test("grants a workspace, applies an approved batch, journals it, and undoes it", async () => {
+  test("applies a checkpoint-first batch without a per-write approval", async () => {
     const { daemon, root, sessionId } = await setup()
     const moves = [
       { from: "a.txt", to: "sorted/a.txt" },
@@ -77,26 +68,6 @@ describe("Folder Ops reference through generic tools", () => {
       sessionId,
       `apply moves: ${JSON.stringify({ root, moves })}`,
     )
-    await waitFor(async () => {
-      const status = await turnStatus(daemon, started.turn.id)
-      return status.turn.status === "waiting_approval" ? status : undefined
-    }, 10_000)
-
-    const pending = await fetch(`${daemon.state.url}/v1/approvals?status=pending`, {
-      headers: { authorization: basic(daemon.password) },
-    })
-    const approval = ((await pending.json()) as { approvals: Array<{ id: string; toolName: string }> })
-      .approvals[0]!
-    expect(approval.toolName).toBe("fs_apply_moves")
-    const approved = await fetch(`${daemon.state.url}/v1/approvals/${approval.id}/decision`, {
-      method: "POST",
-      headers: {
-        authorization: basic(daemon.password),
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ decision: "approve" }),
-    })
-    expect(approved.status).toBe(200)
 
     const completed = await waitFor(async () => {
       const status = await turnStatus(daemon, started.turn.id)
@@ -106,36 +77,41 @@ describe("Folder Ops reference through generic tools", () => {
     expect(await readFile(path.join(root, "sorted", "a.txt"), "utf8")).toBe("A\n")
     expect(await readFile(path.join(root, "sorted", "b.txt"), "utf8")).toBe("B\n")
 
-    const journal = await fetch(`${daemon.state.url}/v1/journal`, {
+    const checkpointResponse = await fetch(`${daemon.state.url}/v1/checkpoints`, {
       headers: { authorization: basic(daemon.password) },
     })
-    const entries = (await journal.json()) as {
-      entries: Array<{ batchId: string; toolName: string; state: string }>
+    const checkpoints = (await checkpointResponse.json()) as {
+      checkpoints: Array<{ id: string; rootPath: string; reason: string; commit: string }>
     }
-    expect(entries.entries.some((entry) => entry.toolName === "fs_apply_moves")).toBe(true)
-    const batchId = entries.entries.find((entry) => entry.toolName === "fs_apply_moves")?.batchId
-    expect(batchId).toBeDefined()
+    const checkpoint = checkpoints.checkpoints.find(
+      (entry) => entry.rootPath.toLowerCase() === path.resolve(root).toLowerCase(),
+    )
+    expect(checkpoint).toBeDefined()
+    expect(checkpoint!.commit).toHaveLength(40)
 
-    const undone = await fetch(`${daemon.state.url}/v1/journal/undo`, {
+    const diff = await fetch(`${daemon.state.url}/v1/checkpoints/${checkpoint!.id}/diff`, {
+      headers: { authorization: basic(daemon.password) },
+    })
+    expect(diff.status).toBe(200)
+    const diffBody = (await diff.json()) as { diff: { files: unknown[] } }
+    expect(diffBody.diff.files.length).toBeGreaterThan(0)
+
+    const restored = await fetch(`${daemon.state.url}/v1/checkpoints/${checkpoint!.id}/restore`, {
       method: "POST",
       headers: {
         authorization: basic(daemon.password),
         "content-type": "application/json",
       },
-      body: JSON.stringify({ batchId }),
+      body: JSON.stringify({ safe: true }),
     })
-    expect(undone.status).toBe(200)
+    expect(restored.status).toBe(200)
     expect(await readFile(path.join(root, "a.txt"), "utf8")).toBe("A\n")
     expect(await readFile(path.join(root, "b.txt"), "utf8")).toBe("B\n")
     expect(await readdir(path.join(root, "sorted")).catch(() => [])).toEqual([])
 
-    const workspaces = await fetch(`${daemon.state.url}/v1/workspaces`, {
-      headers: { authorization: basic(daemon.password) },
-    })
-    expect(((await workspaces.json()) as { workspaces: unknown[] }).workspaces).toHaveLength(1)
   }, 45_000)
 
-  test("lists tools and exposes workspace grants", async () => {
+  test("lists tools and does not expose workspace grants", async () => {
     const { daemon } = await setup()
     const tools = await fetch(`${daemon.state.url}/v1/tools`, {
       headers: { authorization: basic(daemon.password) },
@@ -143,12 +119,13 @@ describe("Folder Ops reference through generic tools", () => {
     expect(tools.status).toBe(200)
     const body = (await tools.json()) as { tools: Array<{ name: string; risk: string }> }
     expect(body.tools.some((tool) => tool.name === "fs_apply_moves")).toBe(true)
+    expect(body.tools.some((tool) => tool.name === "fs_undo")).toBe(false)
     expect(body.tools.some((tool) => tool.name === "shell_exec")).toBe(true)
     expect(body.tools.some((tool) => tool.name === "web_fetch")).toBe(true)
 
     const workspaces = await fetch(`${daemon.state.url}/v1/workspaces`, {
       headers: { authorization: basic(daemon.password) },
     })
-    expect(workspaces.status).toBe(200)
+    expect(workspaces.status).toBe(404)
   })
 })

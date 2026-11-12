@@ -15,7 +15,6 @@ const ACTUAL = "test-results/visual"
 
 let daemon: TestDaemon
 let browser: Browser
-let workspaceDir: string
 const contexts: BrowserContext[] = []
 
 async function executablePath() {
@@ -77,8 +76,6 @@ async function capture(page: Page, name: string) {
 
 beforeAll(async () => {
   daemon = await startTestDaemon()
-  workspaceDir = await mkdtemp(path.join(os.tmpdir(), "agent-1-visual-workspace-"))
-  await daemon.client.addWorkspace({ path: workspaceDir, label: "Visual project", access: "read" })
   browser = await chromium.launch({ executablePath: await executablePath(), headless: true })
 }, 45_000)
 
@@ -86,7 +83,6 @@ afterAll(async () => {
   for (const context of contexts) await context.close()
   await browser?.close()
   await daemon?.cleanup()
-  if (workspaceDir) await rm(workspaceDir, { recursive: true, force: true })
 })
 
 describe("visual regression", () => {
@@ -100,7 +96,6 @@ describe("visual regression", () => {
     await capture(page, "login-dark")
 
     await login(page, daemon.password)
-    await page.locator('.home-project-row:has-text("Visual project")').waitFor()
     await capture(page, "home-dark")
 
     await page.goto(`${daemon.state.url}/new`)
@@ -125,7 +120,6 @@ describe("visual regression", () => {
     await lightPage.locator(".connect-header h1").waitFor()
     await capture(lightPage, "login-light-mobile")
     await login(lightPage, daemon.password)
-    await lightPage.locator(".home-mobile-project select").waitFor()
     await capture(lightPage, "home-light-mobile")
 
     const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: "dark" })
@@ -134,7 +128,6 @@ describe("visual regression", () => {
     await mobilePage.goto(`${daemon.state.url}/login`)
     await mobilePage.locator(".connect-header h1").waitFor()
     await login(mobilePage, daemon.password)
-    await mobilePage.locator(".home-mobile-project select").waitFor()
     await capture(mobilePage, "home-mobile-dark")
   }, 40_000)
 })

@@ -4,7 +4,7 @@ import { Popover } from "@kobalte/core/popover"
 import DOMPurify from "dompurify"
 import { marked } from "marked"
 import { Icon } from "./icons"
-import type { Approval, CatalogModel, ToolInfo } from "./api"
+import type { Approval, ApprovalScope, CatalogModel, ToolInfo } from "./api"
 
 export function formatDate(value: string | null | undefined): string {
   if (!value) return "—"
@@ -347,8 +347,14 @@ function ReasoningPicker(props: {
     </Show>
   )
 }
+export interface ComposerFile {
+  uri: string
+  name?: string
+  source?: { type: "inline" } | { type: "uri"; uri: string }
+}
+
 export function Composer(props: {
-  onSubmit: (text: string) => void | Promise<void>
+  onSubmit: (text: string, files: ComposerFile[]) => void | Promise<void>
   onStop?: () => void
   busy?: boolean
   disabled?: boolean
@@ -361,16 +367,40 @@ export function Composer(props: {
   compact?: boolean
 }) {
   const [value, setValue] = createSignal("")
+  const [files, setFiles] = createSignal<ComposerFile[]>([])
   const selectedModel = () =>
     props.models.find((model) => `${model.providerId}/${model.modelId}` === props.modelId)
   let textarea: HTMLTextAreaElement | undefined
+  let fileInput: HTMLInputElement | undefined
 
   const submit = async () => {
     const text = value().trim()
-    if (!text || props.busy || props.disabled) return
+    if ((!text && files().length === 0) || props.busy || props.disabled) return
+    const outgoing = files()
     setValue("")
-    await props.onSubmit(text)
+    setFiles([])
+    await props.onSubmit(text, outgoing)
     textarea?.focus()
+  }
+
+  const addFiles = async (list: FileList | null) => {
+    if (!list) return
+    const next = [...files()]
+    for (const file of Array.from(list)) {
+      if (file.size > 20 * 1024 * 1024) continue
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result ?? ""))
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(file)
+      })
+      next.push({
+        uri: data,
+        name: file.name,
+        source: { type: "inline" },
+      })
+    }
+    setFiles(next.slice(0, 32))
   }
 
   const onKeyDown = (event: KeyboardEvent) => {
@@ -384,6 +414,24 @@ export function Composer(props: {
     <div class="composer-wrap">
       <div class="composer-dock">
         <div class="composer">
+        <Show when={files().length > 0}>
+          <div class="composer-attachments">
+            <For each={files()}>
+              {(file, index) => (
+                <span class="composer-attachment">
+                  {file.name ?? "attachment"}
+                  <button
+                    type="button"
+                    title="Remove attachment"
+                    onClick={() => setFiles((current) => current.filter((_, i) => i !== index()))}
+                  >
+                    ×
+                  </button>
+                </span>
+              )}
+            </For>
+          </div>
+        </Show>
         <textarea
           ref={textarea}
           value={value()}
@@ -393,8 +441,25 @@ export function Composer(props: {
           disabled={props.disabled}
           rows={props.compact ? 2 : 3}
         />
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          accept="image/*,application/pdf,text/*,.json,.ts,.tsx,.js,.jsx,.md"
+          style={{ display: "none" }}
+          onChange={(event) => {
+            void addFiles(event.currentTarget.files)
+            event.currentTarget.value = ""
+          }}
+        />
         <div class="composer-footer">
-          <button class="composer-control" type="button" title="Add context" disabled={props.disabled}>
+          <button
+            class="composer-control"
+            type="button"
+            title="Add attachment"
+            disabled={props.disabled}
+            onClick={() => fileInput?.click()}
+          >
             <Icon name="plus" size={14} />
           </button>
           <ModelPicker
@@ -414,10 +479,10 @@ export function Composer(props: {
             when={props.busy}
             fallback={
               <button
-                class={`send-button ${value().trim() ? "ready" : ""}`}
+                class={`send-button ${value().trim() || files().length > 0 ? "ready" : ""}`}
                 type="button"
                 onClick={() => void submit()}
-                disabled={props.disabled || !value().trim()}
+                disabled={props.disabled || (!value().trim() && files().length === 0)}
                 title="Send"
               >
                 <Icon name="send" size={15} />
@@ -437,7 +502,7 @@ export function Composer(props: {
 
 export function ApprovalCard(props: {
   approval: Approval
-  onDecide: (decision: "approve" | "reject") => void | Promise<void>
+  onDecide: (decision: "approve" | "reject", scope?: ApprovalScope) => void | Promise<void>
   busy?: boolean
   compact?: boolean
 }) {
@@ -452,6 +517,9 @@ export function ApprovalCard(props: {
         <div class="grow" />
         <span class="tiny faint">{formatDate(props.approval.expiresAt)}</span>
       </div>
+      <Show when={props.approval.displayCommand}>
+        <div class="approval-args mono">{props.approval.displayCommand}</div>
+      </Show>
       <div class="approval-args">
         {showArgs() ? args() : `${args().slice(0, 220)}${args().length > 220 ? "…" : ""}`}
       </div>
@@ -468,6 +536,15 @@ export function ApprovalCard(props: {
           onClick={() => void props.onDecide("reject")}
         >
           Reject
+        </button>
+        <button
+          class="button button-secondary button-small"
+          type="button"
+          disabled={props.busy}
+          onClick={() => void props.onDecide("approve", "always")}
+          title="Approve this exact action permanently"
+        >
+          Always allow
         </button>
         <button
           class="button button-primary button-small"

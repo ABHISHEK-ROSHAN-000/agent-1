@@ -3,10 +3,11 @@ import { existsSync, rmSync } from "node:fs"
 export interface ResetDatabaseOptions {
   readonly dbPath: string
   readonly backupDir: string
+  readonly checkpointsDir?: string
 }
 
 /**
- * Delete the development database and its backups.
+ * Delete the development database, its backups, and the filesystem checkpoint store.
  *
  * This is intentionally explicit: normal daemon startup never wipes data.
  */
@@ -17,6 +18,7 @@ export function resetDatabaseFiles(options: ResetDatabaseOptions): string[] {
     `${options.dbPath}-shm`,
     `${options.dbPath}-journal`,
     options.backupDir,
+    ...(options.checkpointsDir ? [options.checkpointsDir] : []),
   ]
   const removed: string[] = []
   for (const target of targets) {
