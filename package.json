@@ -5,7 +5,16 @@
   "type": "module",
   "packageManager": "bun@1.4.4",
   "description": "Agent-1: a local, approval-gated personal assistant for Windows.",
-  "license": "UNLICENSED",
+  "author": "Abhishek Roshan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ABHISHEK-ROSHAN-000/agent-1.git"
+  },
+  "homepage": "https://github.com/ABHISHEK-ROSHAN-000/agent-1#readme",
+  "bugs": {
+    "url": "https://github.com/ABHISHEK-ROSHAN-000/agent-1/issues"
+  },
   "bin": {
     "agent-1": "./bin/agent-1.js"
   },

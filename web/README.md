@@ -1,31 +1,24 @@
-# Agent-1 Web Client / PWA
+# Agent-1 Web Client
 
-The web client is a thin SolidJS app served by the local daemon. It owns no
-sessions, permissions, tools, or execution state; all state comes from the
-daemon API and all approvals go back through the daemon.
+The web client is a thin SolidJS application served by the local daemon. It owns no sessions, permissions, tools, or execution state. Data comes from the daemon API, and approvals go back through the daemon.
 
 ## Stack
 
-- SolidJS + Vite + `vite-plugin-solid`
-- Tailwind CSS 4 via `@tailwindcss/vite`
-- `@solidjs/router`
+- SolidJS and Vite
+- Tailwind CSS 4
+- Solid Router
 - TanStack Solid Query
-- Kobalte (available for accessible primitives; the current shell uses native
-  controls where that is simpler)
+- Kobalte primitives
 - `qr-scanner` for camera pairing
 - `vite-plugin-pwa` for the manifest and service worker
-- `solid-sonner` for transient notifications
-- `marked` + DOMPurify for sanitized assistant Markdown
-- `@pierre/trees`, `@pierre/diffs`, and `@pierre/highlights` for the OpenCode-style
-  file tree and code/diff review surfaces
-- Vendored OpenCode presentation tokens, CSS, and icon renderer at pinned commit
-  `30e7a4d573cb8f83d186cef682569cb5758ad8f3`
+- `solid-sonner` for notifications
+- `marked` and DOMPurify for sanitized assistant Markdown
+- `@pierre/trees`, `@pierre/diffs`, and `@pierre/highlights` for file and diff review
+- A vendored UI foundation retained under `src/ui-foundation/`
 
-All dependencies are exact-pinned in `web/package.json` and `web/bun.lock`.
-OpenCode material is MIT-licensed and retained under `src/opencode/LICENSE`;
-see `../THIRD_PARTY_NOTICES.md`. The Agent-1 wordmark, product name, data layer,
-auth, and approval behavior are original Agent-1 work. OpenCode branding,
-telemetry, and server/client protocol are not used.
+Dependencies are pinned exactly in `package.json` and `bun.lock`.
+
+Third-party licensing is documented in `../THIRD_PARTY_NOTICES.md`. The vendored UI foundation retains its upstream MIT license and notices under `src/ui-foundation/`.
 
 ## Run
 
@@ -38,88 +31,50 @@ bun run web:build
 bun src/cli/main.ts service start
 ```
 
-Open the URL printed by `service start`, or run `bun src/cli/main.ts pair` for a
-one-time pairing link. Use `bun src/cli/main.ts pair --remote` to expose the
-public HTTPS tunnel URL and print the remote QR payload.
+Open the URL printed by `service start`, or run `bun src/cli/main.ts pair` for a one-time pairing link. Use `bun src/cli/main.ts pair --remote` to expose the HTTPS tunnel URL and print the remote QR payload.
 
-Connect a model provider in **Settings → Providers**. OpenRouter stores the key
-once through the provider form. Choose an enabled model from the searchable
-composer picker; model changes apply to the current session.
+Connect a model provider in **Settings → Providers**. OpenRouter stores the key through the provider form. Choose an enabled model from the composer model picker; model changes apply to the current session.
 
-For development:
+## Development
+
+Start the daemon on the port expected by the Vite proxy:
 
 ```powershell
-# Start the daemon on the port the Vite proxy expects.
 $env:AGENT1_PORT = "49499"
 bun src/cli/main.ts service start
+```
 
-# In another shell.
+Start Vite in another shell:
+
+```powershell
 bun run web:dev
 ```
 
-The Vite dev server proxies `/v1`, `/pair`, and `/auth/connect` to
-`AGENT1_DEV_SERVER_URL` (default `http://127.0.0.1:49499`). QR camera scanning
-requires a secure context (`localhost` or HTTPS).
+The Vite server proxies `/v1`, `/pair`, and `/auth/connect` to `AGENT1_DEV_SERVER_URL`, which defaults to `http://127.0.0.1:49499`.
 
-To verify pairing manually:
+QR camera scanning requires a secure context (`localhost` or HTTPS).
 
-1. For a remote phone connection, run `agent-1 pair --remote` (or
-   `agent-1 pair --remote --yes`). This enables OpenTunnel and prints the public
-   `/auth/connect/<code>` link and remote QR payload.
-2. On the phone, open the printed public URL/link first. A normal camera cannot
-   open the JSON QR payload directly.
-3. From the Agent-1 login screen, choose **Scan QR code** and scan the terminal
-   QR with the in-app scanner.
-4. If no camera is available, use **Upload a QR image instead** with a screenshot
-   of the terminal QR.
+## Pairing flow
 
-`agent-1 pair` without `--remote` prints local links and the SSH-forwarding hint,
-matching OpenCode. It intentionally does not print a loopback QR code.
+1. Run `agent-1 pair` locally, or `agent-1 pair --remote` for remote access.
+2. Open the printed pairing link on the target device.
+3. The browser receives a 30-day session cookie and redirects to the app.
+4. Existing sessions survive daemon restarts while the local service port and browser cookie remain unchanged.
+
+For remote access, open the public HTTPS URL first. The terminal QR payload is intended for the in-app scanner, not a normal camera app.
 
 ## Surfaces
 
-- OpenCode-style connect screen: pairing link, QR scan, password fallback.
-- Providers screen with API-key connection and environment-key detection.
-- Searchable model picker with free/tool/reasoning labels; per-session switching.
-- Models catalog with search, visibility, favorites, testing, and default selection.
-- Titlebar tabs, home session list, and new-session wordmark/composer.
-- Streaming chat with stop, models, approvals, and auto-scroll.
-- Approval inbox and inline approval cards with exact arguments.
-- Review panel: pending approvals, journal batches, and undo.
-- Context panel: model, token, turn, cost, and context-window stats.
-- Checkpoint diff viewer using `@pierre/diffs`; file work happens through path-aware tools.
-- Review panel: `@pierre/diffs` file/diff previews for journaled changes.
-- Rules, approval policy, checkpoints, provider connection, searchable model catalog, and settings.
-- System light/dark theme with a manual override.
-- Offline, reconnecting, asleep, and update-available status banners.
-- Installable PWA with a network-only API policy and prompt-based updates.
-- Visual regression screenshots for login, home, new session, session, files,
-  review diff, settings, offline state, and mobile/light layouts.
+- Pairing link, QR scan, and password login.
+- Providers and model catalog.
+- Home session list and new-session composer.
+- Session tabs and streaming chat.
+- Approval inbox and inline approval cards.
+- Context and token usage panels.
+- Checkpoint diff and restore screens.
+- Rules, approval policy, providers, models, and settings.
+- System light and dark themes.
+- Installable PWA with network-only API access.
+- Offline, reconnecting, asleep, and update-available states.
 
-The visual port deliberately does not include OpenCode's multi-server UI,
-plugins, terminal, voice, worktrees, LSP, sharing, provider accounts, or its
-client/server protocol. Those features have no Agent-1 backend yet.
-
-## Checks
-
-```powershell
-bun run web:typecheck
-bun run web:build
-bun run test:e2e     # builds web/dist and runs Playwright against a real daemon
-bun test e2e/visual.test.ts
-```
-
-The visual suite compares against `e2e/visual-baseline/`. Regenerate baselines
-only after an intentional visual change:
-
-```powershell
-$env:UPDATE_VISUAL_BASELINES = "1"
-bun test e2e/visual.test.ts
-Remove-Item Env:UPDATE_VISUAL_BASELINES
-```
-
-The browser suite uses the installed Edge or Chrome executable. It covers
-password login, a one-time pairing link, home/new-session/session flows,
-streaming chat, an approval-gated real file move, journal undo, files/context
-panels, the mobile shell, system light/dark theme, and PWA manifest/service-worker
-availability.
+The daemon remains authoritative for all state and side effects.

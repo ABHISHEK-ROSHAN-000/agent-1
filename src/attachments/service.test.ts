@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test"
+﻿import { afterEach, describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
@@ -108,7 +108,7 @@ describe("attachments", () => {
     expect(JSON.stringify(sanitized)).toContain("does not support image")
   })
 
-  test("hydrates a missing blob as OpenCode's unavailable text", async () => {
+  test("hydrates a missing blob as unavailable text", async () => {
     const { service } = await setup()
     const file = {
       uri: `media:${"0".repeat(64)}` as const,
@@ -121,7 +121,7 @@ describe("attachments", () => {
     expect(Buffer.from(hydrated[0]!.data, "base64").toString("utf8")).toContain("media unavailable")
   })
 
-  test("resizes an oversized image into the OpenCode limits", async () => {
+  test("resizes an oversized image into the media limits", async () => {
     const { service } = await setup()
     const width = 2_500
     const height = 10

@@ -1,11 +1,11 @@
-import type { CliRenderer, Renderable } from "@opentui/core"
+﻿import type { CliRenderer, Renderable } from "@opentui/core"
 import type { TuiClipboard } from "./clipboard"
 
 type ClipboardTextRenderable = Renderable & {
   getClipboardText?: (text: string) => string
 }
 
-// Adapted from OpenCode's TUI selection copy behavior. A successful copy
+// Adapted from the reference TUI selection copy behavior. A successful copy
 // leaves the selection intact; empty or unsupported selections are handled by
 // the caller so Ctrl+C can continue to prompt-clear/exit handling.
 export function copySelection(

@@ -1,5 +1,5 @@
-@import "./opencode/index.css";
-@import "./opencode/session-css/components__markdown.css";
+@import "./ui-foundation/index.css";
+@import "./ui-foundation/session-css/components__markdown.css";
 
 :root {
   --a1-titlebar-height: 36px;

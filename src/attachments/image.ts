@@ -1,4 +1,4 @@
-import {
+﻿import {
   PhotonImage,
   SamplingFilter,
   resize,
@@ -36,7 +36,7 @@ function hasTransparency(pixels: Uint8Array, width: number, height: number): boo
 }
 
 /**
- * Resize only when OpenCode's advertised limits require it. Small PNGs are
+ * Resize only when the advertised limits require it. Small PNGs are
  * passed through unchanged so screenshots keep their pixel fidelity.
  */
 export function normalizeImage(

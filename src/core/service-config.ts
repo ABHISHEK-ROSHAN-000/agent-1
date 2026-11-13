@@ -1,9 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+﻿import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import path from "node:path"
 
-// OpenCode uses 0xC0DE on Unix and 0x70DE on Windows. Agent-1 keeps the same
-// fixed-port design but uses adjacent channel ports so both products can run
-// on one machine without contending for the same listener.
+// Agent-1 uses fixed channel ports so local apps can run side by side
+// without contending for the same listener.
 export const DEFAULT_SERVICE_PORT_WINDOWS = 0x70df
 export const DEFAULT_SERVICE_PORT = 0xc0df
 

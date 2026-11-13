@@ -1,4 +1,4 @@
-import type { Logger } from "../../core/log"
+﻿import type { Logger } from "../../core/log"
 import type { Database, InboxAdmissionResult, InboxMutationResult, InboxStepResult } from "../../db/database"
 import type { EventService } from "../../events/service"
 import type { InboxDelivery, InboxItem } from "../../shared/types"
@@ -11,7 +11,7 @@ export type InboxDeliveryCallback = (
 ) => Promise<InboxStepResult>
 
 /**
- * Durable, pending-only session input. The service mirrors OpenCode's inbox
+ * Durable, pending-only session input. The service mirrors the durable inbox
  * semantics: one serialized mutation stream per session, ordered by enqueue
  * sequence, with steer-first promotion at step boundaries.
  */

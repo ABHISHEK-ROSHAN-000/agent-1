@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+﻿import { describe, expect, test } from "bun:test"
 import {
   activeSessionsResponseSchema,
   knownDurableEventSchema,
@@ -56,7 +56,7 @@ describe("shared contracts", () => {
     ).toBeNull()
   })
 
-  test("parses every inbox event with the OpenCode payload", () => {
+  test("parses every inbox event with the durable inbox payload", () => {
     const item = {
       id: "msg_1",
       sessionId: "ses_1",

@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest a product or engineering improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the behavior you would like.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: textarea
+    id: risks
+    attributes:
+      label: Security, privacy, or compatibility considerations
+      description: Mention any effects on permissions, approvals, local data, or remote access.
+    validations:
+      required: false

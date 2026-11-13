@@ -1,4 +1,4 @@
-const OUTPUT_TOKEN_FALLBACK = 32_000
+﻿const OUTPUT_TOKEN_FALLBACK = 32_000
 const OUTPUT_TOKEN_MAX = 256_000
 const OUTPUT_TOKEN_MIN = 1_024
 const ESTIMATE_ERROR = 0.15
@@ -16,7 +16,7 @@ export interface InputTokenEstimate {
 }
 
 /**
- * OpenCode's default output budget: the catalog limit, capped and fitted into
+ * Default output budget: the catalog limit, capped and fitted into
  * the room the prompt leaves in the context window.
  */
 export function outputLimit(

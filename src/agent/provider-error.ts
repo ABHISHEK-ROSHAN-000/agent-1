@@ -1,4 +1,4 @@
-export type ProviderErrorKind =
+﻿export type ProviderErrorKind =
   | "rate-limit"
   | "quota"
   | "auth"
@@ -189,7 +189,7 @@ function transportCode(error: unknown): string | undefined {
 }
 
 /**
- * OpenCode's one-shot policy: only retry when the provider clearly did not run
+ * One-shot retry policy: only retry when the provider clearly did not run
  * the request. One-shot calls can be billed per attempt, so this budget is much
  * smaller than the streaming-turn budget.
  */

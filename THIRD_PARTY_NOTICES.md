@@ -1,4 +1,4 @@
-# Third-Party Notices
+﻿# Third-Party Notices
 
 ## OpenCode
 
@@ -9,7 +9,7 @@ Portions of the Agent-1 web client are vendored from the OpenCode repository:
 - License: MIT
 - Copyright: Copyright (c) 2025 opencode
 
-The full MIT license is preserved at `web/src/opencode/LICENSE`.
+The full MIT license is preserved at `web/src/ui-foundation/LICENSE`.
 
 Vendored areas include design tokens, base styles, app surface CSS, icon catalog
 data, and presentation patterns from `packages/ui`, `packages/session-ui`, and
@@ -36,7 +36,7 @@ the installed package at `node_modules/@silvia-odwyer/photon-node/LICENSE.md`.
 
 Interactive CLI prompts use `@clack/prompts` and `@clack/core` `1.0.0-alpha.1`,
 licensed MIT (https://github.com/bombshell-dev/clack). These are pinned to the
-same versions used by OpenCode.
+same versions used by the upstream implementation.
 
 ## models.dev
 
@@ -48,7 +48,7 @@ metadata from https://models.dev, licensed MIT. See
 
 Remote access uses `@opentunnel/client` `0.6.2` from
 https://github.com/anomalyco/opentunnel, licensed MIT. Agent-1 uses
-OpenTunnel's standard/default profile and storage exactly as OpenCode does.
+OpenTunnel's standard/default profile and storage.
 
 ## Pierre
 
@@ -58,7 +58,7 @@ The file tree and code/diff viewer use these Apache-2.0 packages:
 - `@pierre/diffs` `1.6.1`
 - `@pierre/highlights` `0.2.0`
 
-Their license texts are preserved at `web/src/opencode/PIERRE-*-LICENSE.md`.
+Their license texts are preserved at `web/src/ui-foundation/PIERRE-*-LICENSE.md`.
 `@pierre/trees` also includes MIT-licensed ideas/code derived from
 `@headless-tree/core`; see the upstream NOTICE for attribution.
 
@@ -70,7 +70,7 @@ The web client bundles or references fonts under the SIL Open Font License 1.1:
 - IBM Plex Mono
 - JetBrains Mono Nerd Font Mono
 
-The OFL text is preserved at `web/src/opencode/OFL-1.1.txt`.
+The OFL text is preserved at `web/src/ui-foundation/OFL-1.1.txt`.
 
-The OpenCode MIT license and these notices must remain with redistributed copies
+The upstream MIT license and these notices must remain with redistributed copies
 of the combined work.

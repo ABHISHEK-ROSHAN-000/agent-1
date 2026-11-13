@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+﻿import { readFileSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import type { PromptFileInput } from "../shared/types"
@@ -39,7 +39,7 @@ function candidates(value: string): string[] {
 }
 
 /**
- * Resolves pasted local file paths the same way OpenCode's TUI does, but sends
+ * Resolves pasted local file paths the same way the reference TUI does, but sends
  * bytes inline so a remote daemon never reads the client's filesystem.
  */
 export function resolvePastedAttachments(value: string): PromptFileInput[] | undefined {
@@ -70,7 +70,7 @@ export function resolvePastedAttachments(value: string): PromptFileInput[] | und
 
 export function attachmentLabel(file: { name?: string; mime?: string; uri?: string }): string {
   const mime = file.mime ?? (file.uri?.startsWith("data:") ? file.uri.slice(5, file.uri.indexOf(";")) : "attachment")
-  return `${file.name ?? "attachment"} · ${mime}`
+  return `${file.name ?? "attachment"} Â· ${mime}`
 }
 
 export function isAttachmentPath(value: string): boolean {

@@ -1,4 +1,4 @@
-import path from "node:path"
+﻿import path from "node:path"
 
 const MEDIA_MIMES = new Set([
   "image/png",
@@ -49,7 +49,7 @@ function ascii(bytes: Uint8Array, start: number, end: number): string {
   return String.fromCharCode(...bytes.subarray(start, end))
 }
 
-/** Magic-byte detection followed by an extension fallback, matching OpenCode's media handling. */
+/** Magic-byte detection followed by an extension fallback, for media handling. */
 export function detectMime(bytes: Uint8Array, filename?: string): string | undefined {
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png"
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "image/jpeg"

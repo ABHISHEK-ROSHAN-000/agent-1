@@ -1,4 +1,4 @@
-import { Icon as OpenCodeIcon } from "./opencode/icons/icon/icon"
+import { Icon as BaseIcon } from "./ui-foundation/icons/icon/icon"
 
 type IconName =
   | "home"
@@ -60,13 +60,13 @@ const names: Record<IconName, string> = {
 }
 
 /**
- * Thin Agent-1 wrapper around the vendored OpenCode icon component. It keeps the
- * original sprite artwork and maps Agent-1's stable icon names onto its catalog.
+ * Thin Agent-1 wrapper around the vendored icon component. It keeps the original
+ * sprite artwork and maps Agent-1's stable icon names onto its catalog.
  */
 export function Icon(props: { name: IconName; size?: number }) {
   const size = props.size ?? 16
   return (
-    <OpenCodeIcon
+    <BaseIcon
       name={names[props.name]}
       size={size <= 13 ? "small" : size >= 19 ? "large" : "normal"}
     />

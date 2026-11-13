@@ -29,3 +29,9 @@ Thumbs.db
 # Test artifacts
 test-results/
 playwright-report/
+
+# Internal planning and phase evidence
+.opencode/
+PLAN.md
+P*_RESULTS.md
+P*_LIVE_TEST_REPORT.md

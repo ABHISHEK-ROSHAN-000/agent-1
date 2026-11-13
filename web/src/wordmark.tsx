@@ -1,7 +1,7 @@
-import { createUniqueId } from "solid-js"
+﻿import { createUniqueId } from "solid-js"
 
 /**
- * Agent-1's wordmark uses the same presentation geometry as the OpenCode connect
+ * Agent-1's wordmark uses the same presentation geometry as the connect
  * and new-session wordmarks, but the Agent-1 name and letterforms are ours.
  */
 export function AgentOneWordmark(props: {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test"
+﻿import { afterEach, describe, expect, test } from "bun:test"
 import path from "node:path"
 import { startTestDaemon, type TestDaemon } from "../test/helpers"
 
@@ -25,7 +25,7 @@ async function cli(args: string[]) {
 }
 
 describe("CLI pairing", () => {
-  test("matches OpenCode local pairing: links, no loopback QR, SSH hint", async () => {
+  test("creates local pairing links without a loopback QR", async () => {
     const daemon = await startTestDaemon()
     daemons.push(daemon)
 

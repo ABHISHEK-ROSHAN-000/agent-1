@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/ABHISHEK-ROSHAN-000/agent-1/security/advisories/new
+    about: Report vulnerabilities privately. Do not open a public issue.
+  - name: Usage and setup questions
+    url: https://github.com/ABHISHEK-ROSHAN-000/agent-1/discussions
+    about: Ask setup or usage questions in Discussions when available.

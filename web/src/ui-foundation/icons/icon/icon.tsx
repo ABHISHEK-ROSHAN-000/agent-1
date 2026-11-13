@@ -1,13 +1,13 @@
-import { createSignal, onMount, type ComponentProps, splitProps } from "solid-js"
+﻿import { createSignal, onMount, type ComponentProps, splitProps } from "solid-js"
 import { iconNames, isIconName, getIcon, type IconName } from "../catalog"
 import { getNewIcon, newIconViewBox } from "../new-icons"
 import "./icon.css"
 
-const spriteID = "opencode-v2-icon-sprite"
+const spriteID = "agent1-icon-sprite"
 
-const symbol = (name: IconName) => `opencode-v2-icon-${name}`
+const symbol = (name: IconName) => `agent1-icon-${name}`
 
-const newSymbol = (name: IconName) => `opencode-v2-icon-new-${name}`
+const newSymbol = (name: IconName) => `agent1-icon-new-${name}`
 
 let spriteInserted = false
 

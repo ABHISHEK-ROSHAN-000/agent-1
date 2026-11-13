@@ -1,17 +1,17 @@
 # Desktop shell
 
-Phase 12.
+The desktop client is an Electron window and Windows tray that connects to the local Agent-1 daemon.
 
-Electron window hosting the web app, plus the Windows tray:
+Planned responsibilities:
 
-- service state and approval count
+- service state and pending approval count
 - open the app
-- keep-awake while a turn is running or an approval is pending
-- pause/resume
-- autostart at login
-- resume notification
-- update integration in the installer phase
+- keep the system awake while a turn is running or an approval is pending
+- pause and resume
+- start at user sign-in
+- resume notifications
+- update integration
 
-Electron is pinned to **40.10.2** until the 44.9.1 binary download issue is resolved. The tray in the retired prototype proved `Tray`, `powerMonitor`, `powerSaveBlocker`, and `setLoginItemSettings` work on this machine.
+Electron is pinned to `40.10.2` until newer binary distribution is verified in this environment.
 
-The daemon must run without the desktop shell.
+The daemon must continue to run without the desktop shell.

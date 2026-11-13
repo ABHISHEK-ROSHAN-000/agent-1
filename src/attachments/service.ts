@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+﻿import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import type { Logger } from "../core/log"
@@ -84,7 +84,7 @@ export class AttachmentService {
             ? declaredMime
             : detected ?? declaredMime ?? "application/octet-stream"
       if (!isMediaMime(mime) && !isTextMime(mime)) {
-        // OpenCode accepts the bytes but does not send unsupported MIME types to the model.
+        // Unsupported MIME types are accepted locally but are not sent to the model.
         // Keeping them out of the attachment list avoids storing data we can never use.
         throw new Error(`Unsupported attachment type: ${mime}`)
       }
@@ -108,7 +108,7 @@ export class AttachmentService {
           if (Buffer.byteLength(data, "utf8") > 5 * 1024 * 1024) {
             throw new Error(`Image could not be normalized: ${input.name ?? "image"}`)
           }
-          // Match OpenCode's resizer-unavailable fallback: send the original if it fits.
+          // Match the resizer-unavailable fallback: send the original if it fits.
         }
       }
 

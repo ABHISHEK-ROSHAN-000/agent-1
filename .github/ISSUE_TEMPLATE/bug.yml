@@ -1,0 +1,72 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, API keys, cookies, tokens, prompts, private file contents, or unredacted logs.
+        Security vulnerabilities must be reported through the repository Security tab, not this form.
+  - type: input
+    id: version
+    attributes:
+      label: Agent-1 version
+      description: Output of the version command or the release tag.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 24H2 x64"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Terminal UI
+        - Browser client or PWA
+        - CLI or daemon
+        - Pairing or authentication
+        - Provider or model setup
+        - Permissions or approvals
+        - Checkpoints or restore
+        - Attachments or media
+        - Remote access
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: Describe the problem and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Start the daemon
+        2. Open ...
+        3. Run ...
+        4. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or screenshots
+      description: Remove secrets, prompts, private paths, and file contents before posting.
+    validations:
+      required: false

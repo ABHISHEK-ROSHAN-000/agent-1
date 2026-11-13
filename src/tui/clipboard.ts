@@ -1,4 +1,4 @@
-import {
+﻿import {
   createClipboard,
   createHostClipboard,
   createRendererClipboardAdapter,
@@ -10,7 +10,7 @@ export interface TuiClipboard {
   dispose(): Promise<void>
 }
 
-// Adapted from OpenCode's TUI clipboard adapter. The host clipboard is
+// Adapted from the reference TUI clipboard adapter. The host clipboard is
 // preferred, with OSC 52 fallback for terminals that support it.
 export function createTuiClipboard(renderer: RendererClipboardBoundary): TuiClipboard {
   const clipboard = createClipboard({

@@ -1,7 +1,7 @@
-import { expect, test } from "bun:test"
+﻿import { expect, test } from "bun:test"
 import { outputLimit } from "./token-budget"
 
-test("caps a catalog output limit at OpenCode's maximum", () => {
+test("caps a catalog output limit at the supported maximum", () => {
   expect(outputLimit({ contextWindow: 512_000, maxOutputTokens: 460_800 })).toBe(256_000)
   expect(outputLimit({ contextWindow: 512_000, maxOutputTokens: 200_000 })).toBe(200_000)
   expect(outputLimit({ contextWindow: 512_000, maxOutputTokens: 0 })).toBe(32_000)

@@ -1,10 +1,10 @@
-import { Effect } from "effect"
+﻿import { Effect } from "effect"
 import { SqlClient } from "effect/sql"
 
 /**
  * Replace the Phase 8C placeholder inbox with the pending-only queue used by
  * Phase 8E. The placeholder never admitted work, so there is no queue data to
- * preserve; the table is rebuilt with the OpenCode-compatible shape.
+ * preserve; the table is rebuilt with the durable inbox shape.
  */
 export const sessionInboxQueue = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient

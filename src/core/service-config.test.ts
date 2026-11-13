@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test"
+﻿import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -25,7 +25,7 @@ function configPath(): string {
 }
 
 describe("service config", () => {
-  test("uses fixed Agent-1 channel ports distinct from OpenCode", () => {
+  test("uses fixed Agent-1 channel ports distinct from common local defaults", () => {
     expect(DEFAULT_SERVICE_PORT_WINDOWS).toBe(0x70df)
     expect(DEFAULT_SERVICE_PORT).toBe(0xc0df)
     expect(defaultServicePort("win32")).toBe(28895)

@@ -1,4 +1,4 @@
-import type { FilePart, ModelMessage, TextPart } from "ai"
+﻿import type { FilePart, ModelMessage, TextPart } from "ai"
 import type { CatalogModel, HydratedFile } from "../shared/types"
 import { isTextMime } from "./mime"
 
@@ -54,7 +54,7 @@ export function attachmentPart(file: HydratedFile, model: CatalogModel): TextPar
   return filePart(file)
 }
 
-/** Builds the OpenCode-shaped user content array: text, then text attachments, then media. */
+/** Builds the user content array: text, then text attachments, then media. */
 export function userContent(
   text: string,
   files: readonly HydratedFile[],
@@ -119,7 +119,7 @@ function replacePart(part: unknown, model: CatalogModel): unknown {
   return part
 }
 
-/** Replaces unsupported media in user and tool-result content with OpenCode's error text. */
+/** Replaces unsupported media in user and tool-result content with the expected error text. */
 export function filterUnsupportedMedia(messages: ModelMessage[], model: CatalogModel): ModelMessage[] {
   return messages.map((message) => {
     if (!Array.isArray(message.content)) return message
@@ -130,7 +130,7 @@ export function filterUnsupportedMedia(messages: ModelMessage[], model: CatalogM
   })
 }
 
-/** Keeps the newest images under the OpenCode 25 MiB / 15 MiB replay budget. */
+/** Keeps the newest images under the 25 MiB / 15 MiB replay budget. */
 export function boundImages(messages: ModelMessage[]): ModelMessage[] {
   const images: Array<{ message: number; part: number; size: number }> = []
   messages.forEach((message, messageIndex) => {

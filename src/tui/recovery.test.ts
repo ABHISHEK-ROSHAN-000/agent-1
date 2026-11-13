@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test"
+﻿import { afterEach, describe, expect, test } from "bun:test"
 import { CONNECTION_DEFAULTS, ConnectionManager, type ConnectionState } from "./recovery"
 
 const servers: Array<ReturnType<typeof Bun.serve>> = []
@@ -65,7 +65,7 @@ function waitFor<T>(fn: () => T | undefined, timeoutMs = 3_000): Promise<T> {
 }
 
 describe("ConnectionManager", () => {
-  test("uses OpenCode recovery defaults", () => {
+  test("uses recovery defaults", () => {
     expect(CONNECTION_DEFAULTS).toEqual({
       connectTimeoutMs: 2_000,
       reconnectDelayMs: 1_000,

@@ -1,4 +1,4 @@
-import { newToken, sha256 } from "../core/ids"
+﻿import { newToken, sha256 } from "../core/ids"
 import { isExpired, nowPlusSeconds } from "../core/time"
 import type { Logger } from "../core/log"
 import type { Database } from "../db/database"
@@ -57,7 +57,7 @@ export class LoginRateLimiter {
 export class AuthService {
   private readonly limiter: LoginRateLimiter
   // Pairing links are intentionally process-local and one-time. A daemon
-  // restart invalidates unused links, matching OpenCode's 5-minute cache.
+  // restart invalidates unused links, matching the five-minute cache.
   private readonly pairingTokens = new Map<string, number>()
 
   constructor(
