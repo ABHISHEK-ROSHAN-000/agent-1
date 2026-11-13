@@ -68,18 +68,44 @@ try {
       if ($name -match 'agent-1-windows-x64-(.+)$') { $Version = $Matches[1] }
       elseif ($name -match 'agent-1-(.+)$') { $Version = $Matches[1] }
     }
-    if (-not $Version) { $Version = "0.1.1" }
+    if (-not $Version) { $Version = "0.1.2" }
     Write-Host "    Using local package $FromFile"
   } else {
     $manifest = Invoke-RestMethod -Uri $manifestUrl -UseBasicParsing -Headers @{ Accept = "application/json" }
     if (-not $Version) { $Version = [string]$manifest.version }
     if (-not $Version) { Fail "The update manifest did not contain a version." }
-    $downloadUrl = [string]$manifest.url
-    if (-not $downloadUrl) {
-      $downloadUrl = "$releaseBase/download/v$Version/agent-1-windows-x64.zip"
+    if ($manifest.parts -and $manifest.parts.Count -gt 0) {
+      $partPaths = @()
+      foreach ($part in $manifest.parts) {
+        $name = [System.IO.Path]::GetFileName([string]$part.name)
+        $partPath = Join-Path $tempRoot $name
+        Write-Host "    Downloading $name"
+        Download-File ([string]$part.url) $partPath
+        if ($part.sha256) {
+          $partActual = (Get-FileHash -Algorithm SHA256 -Path $partPath).Hash.ToLowerInvariant()
+          if ($partActual -ne ([string]$part.sha256).ToLowerInvariant()) {
+            Fail "Part checksum mismatch for $name."
+          }
+        }
+        $partPaths += $partPath
+      }
+      $output = [System.IO.File]::Open($zip, [System.IO.FileMode]::Create)
+      try {
+        foreach ($partPath in $partPaths) {
+          $stream = [System.IO.File]::OpenRead($partPath)
+          try { $stream.CopyTo($output) } finally { $stream.Dispose() }
+        }
+      } finally {
+        $output.Dispose()
+      }
+    } else {
+      $downloadUrl = [string]$manifest.url
+      if (-not $downloadUrl) {
+        $downloadUrl = "$releaseBase/download/v$Version/agent-1-windows-x64.zip"
+      }
+      Write-Host "    Downloading $downloadUrl"
+      Download-File $downloadUrl $zip
     }
-    Write-Host "    Downloading $downloadUrl"
-    Download-File $downloadUrl $zip
     if ($manifest.sha256) {
       $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
       if ($actual -ne ([string]$manifest.sha256).ToLowerInvariant()) {

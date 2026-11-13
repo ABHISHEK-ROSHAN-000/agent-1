@@ -10,6 +10,7 @@ const out = path.join(root, "dist", "release")
 const stage = path.join(out, `agent-1-windows-x64-${version}`)
 const zip = path.join(out, `agent-1-windows-x64-${version}.zip`)
 const webRoot = path.join(root, "web", "dist")
+const partSize = 16 * 1024 * 1024
 
 async function build(entrypoint: string, outfile: string, plugin?: BunPlugin): Promise<void> {
   const result = await Bun.build({
@@ -70,7 +71,18 @@ if (archive.exitCode !== 0) throw new Error("Compress-Archive failed")
 
 const bytes = readFileSync(zip)
 const sha256 = createHash("sha256").update(bytes).digest("hex")
-writeFileSync(path.join(out, "SHA256SUMS"), `${sha256}  ${path.basename(zip)}\n`, "utf8")
+const checksums = [`${sha256}  ${path.basename(zip)}`]
+const releaseBase = `https://github.com/ABHISHEK-ROSHAN-000/agent-1/releases/download/v${version}`
+const parts: Array<{ name: string; url: string; sha256: string; size: number }> = []
+for (let offset = 0, index = 1; offset < bytes.byteLength; offset += partSize, index++) {
+  const chunk = bytes.subarray(offset, Math.min(bytes.byteLength, offset + partSize))
+  const name = `${path.basename(zip)}.part${String(index).padStart(3, "0")}`
+  const partHash = createHash("sha256").update(chunk).digest("hex")
+  writeFileSync(path.join(out, name), chunk)
+  checksums.push(`${partHash}  ${name}`)
+  parts.push({ name, url: `${releaseBase}/${name}`, sha256: partHash, size: chunk.byteLength })
+}
+writeFileSync(path.join(out, "SHA256SUMS"), `${checksums.join("\n")}\n`, "utf8")
 cpSync(path.join(root, "packaging", "install.ps1"), path.join(out, "install.ps1"))
 writeFileSync(
   path.join(out, "latest.json"),
@@ -78,8 +90,9 @@ writeFileSync(
     {
       channel: "stable",
       version,
-      url: `https://github.com/ABHISHEK-ROSHAN-000/agent-1/releases/download/v${version}/agent-1-windows-x64-${version}.zip`,
+      url: `${releaseBase}/${path.basename(zip)}`,
       sha256,
+      parts,
       minimumVersion: version,
       releaseNotes: `https://github.com/ABHISHEK-ROSHAN-000/agent-1/releases/tag/v${version}`,
     },
