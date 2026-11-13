@@ -68,7 +68,7 @@ try {
       if ($name -match 'agent-1-windows-x64-(.+)$') { $Version = $Matches[1] }
       elseif ($name -match 'agent-1-(.+)$') { $Version = $Matches[1] }
     }
-    if (-not $Version) { $Version = "0.1.2" }
+    if (-not $Version) { $Version = "0.1.3" }
     Write-Host "    Using local package $FromFile"
   } else {
     $manifest = Invoke-RestMethod -Uri $manifestUrl -UseBasicParsing -Headers @{ Accept = "application/json" }

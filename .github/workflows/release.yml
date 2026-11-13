@@ -76,6 +76,7 @@ jobs:
         with:
           files: |
             dist/release/agent-1-windows-x64-*.zip
+            dist/release/agent-1-windows-x64-*.zip.part*
             dist/release/latest.json
             dist/release/SHA256SUMS
             dist/release/install.ps1
