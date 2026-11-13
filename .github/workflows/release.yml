@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package Windows release
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install web dependencies
+        run: bun install --cwd web --frozen-lockfile
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($tag -ne $version) { throw "Tag $tag does not match package version $version" }
+
+      - name: Run gate
+        run: bun run check
+
+      - name: Run integration tests
+        run: bun run test:e2e
+
+      - name: Build release package
+        run: bun run package:win
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-1-windows-x64
+          path: dist/release/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release package
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-1-windows-x64
+          path: dist/release
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/release/agent-1-windows-x64-*.zip
+            dist/release/latest.json
+            dist/release/SHA256SUMS
+            dist/release/install.ps1
+          fail_on_unmatched_files: true

@@ -1,9 +1,27 @@
-﻿import {
-  PhotonImage,
-  SamplingFilter,
-  resize,
-} from "@silvia-odwyer/photon-node"
+﻿import { existsSync } from "node:fs"
+import { createRequire } from "node:module"
+import path from "node:path"
 import { isImageMime } from "./mime"
+
+type PhotonModule = typeof import("@silvia-odwyer/photon-node")
+type PhotonImage = ReturnType<PhotonModule["PhotonImage"]["new_from_byteslice"]>
+
+const require = createRequire(import.meta.url)
+let photon: PhotonModule | undefined
+
+function loadPhoton(): PhotonModule {
+  if (photon) return photon
+  const external = process.env.AGENT1_PHOTON_PATH
+  const bundled = path.join(path.dirname(process.execPath), "resources", "photon", "photon_rs.js")
+  const candidates = [external, bundled].filter((value): value is string => Boolean(value))
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue
+    photon = require(candidate) as PhotonModule
+    return photon
+  }
+  photon = require(["@silvia-odwyer", "photon-node"].join("/")) as PhotonModule
+  return photon
+}
 
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 export const MAX_IMAGE_BASE64_BYTES = 5 * 1024 * 1024
@@ -47,9 +65,11 @@ export function normalizeImage(
   if (!isImageMime(mime)) {
     throw new Error("Image attachment has an unsupported MIME type")
   }
+  let module: PhotonModule
   let decoded: PhotonImage
   try {
-    decoded = PhotonImage.new_from_byteslice(Buffer.from(data, "base64"))
+    module = loadPhoton()
+    decoded = module.PhotonImage.new_from_byteslice(Buffer.from(data, "base64"))
   } catch {
     throw new Error(`Image could not be decoded: ${filename}`)
   }
@@ -67,7 +87,7 @@ export function normalizeImage(
       const resized =
         currentWidth === width && currentHeight === height
           ? decoded
-          : resize(decoded, currentWidth, currentHeight, SamplingFilter.Lanczos3)
+          : module.resize(decoded, currentWidth, currentHeight, module.SamplingFilter.Lanczos3)
       try {
         const transparent =
           mime !== "image/jpeg" && hasTransparency(resized.get_raw_pixels(), currentWidth, currentHeight)

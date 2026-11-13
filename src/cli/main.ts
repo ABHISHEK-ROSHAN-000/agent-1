@@ -1,4 +1,7 @@
-import { EOL } from "node:os"
+import { spawn } from "node:child_process"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { EOL, tmpdir } from "node:os"
+import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import {
   cancel,
@@ -19,6 +22,7 @@ import { AgentOneClient } from "../client/client"
 import { autostartStatus, disableAutostart, enableAutostart } from "../daemon/autostart"
 import { startService, stopService, serviceStatus, type StatusResult } from "../daemon/service"
 import { launchTui } from "../tui/launcher"
+import { canApplyUpdates, checkForUpdate, DEFAULT_UPDATE_URL, updateInstallerUrl } from "../update/service"
 
 const HELP = `${PRODUCT_NAME} ${VERSION}
 
@@ -29,6 +33,8 @@ Commands:
   service start|stop|status|restart
   service set port [port]
   service autostart on|off|status
+  onboard                        Start the service and show first-run details
+  update [--check]               Check for or install an update
   tui                            Open the terminal client
   status
   auth login [provider]          Connect a provider with an API key
@@ -227,6 +233,113 @@ async function serviceCommand(parsed: ParsedArgs): Promise<void> {
   }
 
   throw new Error("Usage: agent-1 service start|stop|status|restart|set port|autostart")
+}
+
+async function onboardCommand(parsed: ParsedArgs): Promise<void> {
+  const config = configFor(parsed)
+  ensureDataDirs(config)
+  const started = await startService(config)
+  const json = hasFlag(parsed, "json")
+  const result = {
+    status: "ready",
+    url: started.state.url,
+    dataDir: config.dataDir,
+    autostart: autostartStatus().enabled,
+    next: [
+      "agent-1 auth show",
+      "agent-1 auth login openrouter",
+      "agent-1 pair",
+      "agent-1 service autostart on",
+      "agent-1",
+    ],
+  }
+  output(
+    json,
+    result,
+    [
+      "Agent-1 is ready.",
+      `  URL:       ${result.url}`,
+      `  Data:      ${result.dataDir}`,
+      `  Autostart: ${result.autostart ? "enabled" : "disabled"}`,
+      "",
+      "Next:",
+      "  agent-1 auth show              Show the local password",
+      "  agent-1 auth login openrouter  Connect a model provider",
+      "  agent-1 pair                   Create a one-time pairing link",
+      "  agent-1 service autostart on   Start the daemon at sign-in",
+      "  agent-1                        Open the terminal UI",
+    ].join("\n"),
+  )
+}
+
+async function updateCommand(parsed: ParsedArgs): Promise<void> {
+  const json = hasFlag(parsed, "json")
+  const checkOnly = hasFlag(parsed, "check")
+  const status = await checkForUpdate(VERSION)
+  if (!status.available) {
+    output(
+      json,
+      { status: "up-to-date", current: status.current },
+      `Agent-1 ${status.current} is up to date.`,
+    )
+    return
+  }
+
+  if (checkOnly || json) {
+    output(
+      json,
+      {
+        status: "available",
+        current: status.current,
+        latest: status.latest,
+        releaseNotes: status.manifest?.releaseNotes,
+      },
+      `Agent-1 ${status.latest} is available (current ${status.current}).\nRun: agent-1 update`,
+    )
+    return
+  }
+
+  if (!canApplyUpdates()) {
+    throw new Error(
+      `Agent-1 ${status.latest} is available, but updates apply only to installed builds. Download the release or run from a packaged install.`,
+    )
+  }
+
+  const temporary = await mkdtemp(path.join(tmpdir(), "agent-1-update-"))
+  const installer = path.join(temporary, "install.ps1")
+  try {
+    const response = await fetch(updateInstallerUrl(), {
+      signal: AbortSignal.timeout(30_000),
+      headers: { accept: "text/plain" },
+    })
+    if (!response.ok) throw new Error(`Could not download the installer (HTTP ${response.status})`)
+    await writeFile(installer, await response.text(), "utf8")
+    const code = await new Promise<number>((resolve, reject) => {
+      const child = spawn(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          installer,
+          "-Version",
+          status.latest,
+          "-ManifestUrl",
+          process.env.AGENT1_UPDATE_URL ?? DEFAULT_UPDATE_URL,
+          "-InstallDir",
+          path.dirname(path.dirname(path.dirname(process.execPath))),
+          "-NoAutostart",
+        ],
+        { stdio: "inherit", windowsHide: false },
+      )
+      child.once("error", reject)
+      child.once("exit", (exitCode) => resolve(exitCode ?? 1))
+    })
+    if (code !== 0) throw new Error(`Installer exited with code ${code}`)
+  } finally {
+    await rm(temporary, { recursive: true, force: true, maxRetries: 5 })
+  }
 }
 
 class CliCancelled extends Error {
@@ -1291,6 +1404,14 @@ async function main(argv: readonly string[]): Promise<number> {
 
   try {
     if (!command) return await launchTui()
+    if (command === "onboard") {
+      await onboardCommand(parsed)
+      return 0
+    }
+    if (command === "update" || command === "upgrade") {
+      await updateCommand(parsed)
+      return 0
+    }
     if (command === "status") {
       await serviceCommand({ ...parsed, positionals: ["service", "status", ...parsed.positionals.slice(1)] })
       return 0

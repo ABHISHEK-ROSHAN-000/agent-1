@@ -2,6 +2,7 @@ import { spawn } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
 import type { AppConfig } from "../core/config"
+import { packagedDaemon } from "../core/runtime-layout"
 import { ensureServiceConfig } from "../core/service-config"
 import { AgentOneClient } from "../client/client"
 import { isProcessAlive } from "./lock"
@@ -64,9 +65,10 @@ export async function startService(config: AppConfig): Promise<StartResult> {
     ensureServiceConfig(config.serviceConfigPath, config.port)
   }
 
-  const daemon = path.join(repoRoot(), "src", "daemon", "main.ts")
-  const child = spawn(process.execPath, [daemon], {
-    cwd: repoRoot(),
+  const packaged = packagedDaemon()
+  const daemon = packaged ?? path.join(repoRoot(), "src", "daemon", "main.ts")
+  const child = spawn(packaged ?? process.execPath, packaged ? [] : [daemon], {
+    cwd: packaged ? path.dirname(packaged) : repoRoot(),
     detached: true,
     windowsHide: true,
     stdio: "ignore",

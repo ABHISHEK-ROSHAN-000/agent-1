@@ -9,7 +9,9 @@ import {
 } from "@opentui/core"
 import { AgentOneClient, ClientError } from "../client/client"
 import { SseParser } from "../client/event-stream"
+import { isPackaged } from "../core/runtime-layout"
 import { readState } from "../daemon/state"
+import { checkForUpdate } from "../update/service"
 import type {
   Approval,
   Checkpoint,
@@ -1283,6 +1285,15 @@ export function TuiApp(props: { bootstrap: TuiBootstrap }) {
     void refreshSessions()
     void refreshActive()
     void refreshApprovals()
+    if (isPackaged()) {
+      void checkForUpdate()
+        .then((status) => {
+          if (status.available) {
+            showToast(`Agent-1 ${status.latest} is available. Run: agent-1 update`, "info")
+          }
+        })
+        .catch(() => undefined)
+    }
     onCleanup(() => manager.stop())
   })
 

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import { packagedDaemon } from "../core/runtime-layout"
 
 export const DEFAULT_ENTRY_NAME = "Agent-1"
 
@@ -13,7 +14,9 @@ function repoRoot(): string {
   return path.resolve(import.meta.dir, "../..")
 }
 
-export function autostartCommand(): { executable: string; script: string } {
+export function autostartCommand(): { executable: string; script?: string } {
+  const packaged = packagedDaemon()
+  if (packaged) return { executable: packaged }
   return {
     executable: process.execPath,
     script: path.join(repoRoot(), "src", "daemon", "main.ts"),
@@ -51,9 +54,12 @@ export function enableAutostart(entryName = DEFAULT_ENTRY_NAME): AutostartStatus
   mkdirSync(directory, { recursive: true })
   const command = autostartCommand()
   const file = entryPath(entryName)
+  const run = command.script
+    ? `shell.Run """${escapeVbs(command.executable)}"" ""${escapeVbs(command.script)}""", 0, False`
+    : `shell.Run """${escapeVbs(command.executable)}""", 0, False`
   const script = [
     'Set shell = CreateObject("WScript.Shell")',
-    `shell.Run """${escapeVbs(command.executable)}"" ""${escapeVbs(command.script)}""", 0, False`,
+    run,
     "",
   ].join("\r\n")
   writeFileSync(file, script, { encoding: "utf8", mode: 0o600 })

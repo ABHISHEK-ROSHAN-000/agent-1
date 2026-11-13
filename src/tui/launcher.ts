@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process"
 import path from "node:path"
 import { resolveConfig } from "../core/config"
+import { packagedTui } from "../core/runtime-layout"
 import { discoverTui } from "./discovery"
 
 function repoRoot(): string {
@@ -13,12 +14,13 @@ export async function launchTui(): Promise<number> {
   }
   const config = resolveConfig()
   await discoverTui()
+  const packaged = packagedTui()
   const entry = path.join(repoRoot(), "src", "tui", "main.tsx")
   const child = spawn(
-    process.execPath,
-    ["--preload", "@opentui/solid/preload", entry],
+    packaged ?? process.execPath,
+    packaged ? [] : ["--preload", "@opentui/solid/preload", entry],
     {
-      cwd: repoRoot(),
+      cwd: packaged ? path.dirname(packaged) : repoRoot(),
       stdio: "inherit",
       windowsHide: false,
       env: {

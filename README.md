@@ -6,9 +6,9 @@ Agent-1 is intentionally local-first. Reads and searches run freely, file change
 
 ## Status
 
-The core platform is usable from source: daemon lifecycle, SQLite storage, event streaming, authentication and pairing, model providers, permissions and approvals, shadow-Git checkpoints, filesystem and shell tools, memory, session search, a terminal UI, and a browser client/PWA.
+The core platform is available as a Windows alpha package: daemon lifecycle, SQLite storage, event streaming, authentication and pairing, model providers, permissions and approvals, shadow-Git checkpoints, filesystem and shell tools, memory, session search, a terminal UI, and a browser client/PWA.
 
-A packaged Windows installer and automatic updater are not available yet. Until then, run Agent-1 from a development checkout.
+The alpha build is not code-signed yet. Windows SmartScreen may warn on first install.
 
 ## Features
 
@@ -25,6 +25,24 @@ A packaged Windows installer and automatic updater are not available yet. Until 
 - Responsive browser client and installable PWA.
 - One-time pairing links and remote access through an HTTPS tunnel.
 - Content-addressed attachment storage with image and PDF support.
+
+## Install on Windows
+
+```powershell
+irm https://github.com/ABHISHEK-ROSHAN-000/agent-1/releases/latest/download/install.ps1 | iex
+agent-1 onboard
+```
+
+Then:
+
+```powershell
+agent-1
+agent-1 pair
+agent-1 service autostart on
+agent-1 update --check
+```
+
+The installer is per-user and does not require administrator rights. It installs under `%LOCALAPPDATA%\Programs\Agent-1`.
 
 ## Requirements
 

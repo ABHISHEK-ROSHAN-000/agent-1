@@ -29,6 +29,7 @@
     "test:unit": "bun test src",
     "test:e2e": "bun run web:build && bun test e2e",
     "test:all": "bun run check && bun run test:e2e",
+    "package:win": "bun run scripts/package-windows.ts",
     "db:reset": "bun run scripts/reset-db.ts",
     "tui": "bun --preload @opentui/solid/preload src/tui/main.tsx",
     "tui:typecheck": "tsc --noEmit -p tsconfig.tui.json",

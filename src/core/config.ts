@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { packagedWebRoot } from "./runtime-layout"
 import { defaultServicePort, readServiceConfig } from "./service-config"
 import { VERSION } from "./version"
 
@@ -108,7 +109,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     checkpointsDir: path.join(dataDir, "checkpoints"),
     webRoot: env.AGENT1_WEB_ROOT
       ? path.resolve(env.AGENT1_WEB_ROOT)
-      : path.resolve(import.meta.dir, "..", "..", "web", "dist"),
+      : packagedWebRoot() ?? path.resolve(import.meta.dir, "..", "..", "web", "dist"),
     host: "127.0.0.1",
     port,
     portSource,
