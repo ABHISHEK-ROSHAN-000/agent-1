@@ -24,8 +24,10 @@ import type {
 import type { ActiveTurn } from "../shared/contracts"
 import type { TuiBootstrap } from "./discovery"
 import { ConnectionManager, type ConnectionState } from "./recovery"
-import { APPROVAL_OPTIONS, APPROVAL_SCOPES, canInterrupt } from "./behavior"
+import { APPROVAL_OPTIONS, APPROVAL_SCOPES, canInterrupt, ctrlCAction, ctrlDAction } from "./behavior"
 import { attachmentLabel, resolvePastedAttachments } from "./attachments"
+import { createTuiClipboard, type TuiClipboard } from "./clipboard"
+import { copySelection } from "./selection"
 
 type Route = { type: "home" } | { type: "session"; id: string }
 type Dialog =
@@ -176,6 +178,13 @@ export function TuiApp(props: { bootstrap: TuiBootstrap }) {
     timeoutMs: 15_000,
   })
   const client = () => runtimeClient
+  let clipboard: TuiClipboard | undefined
+  const getClipboard = () => (clipboard ??= createTuiClipboard(renderer))
+  onCleanup(() => {
+    const current = clipboard
+    clipboard = undefined
+    if (current) void current.dispose().catch(() => undefined)
+  })
 
   const [route, setRoute] = createSignal<Route>({ type: "home" })
   const [dialog, setDialog] = createSignal<Dialog>(null)
@@ -249,8 +258,40 @@ export function TuiApp(props: { bootstrap: TuiBootstrap }) {
     return messages().filter((message) => !pendingIds.has(message.id))
   })
   const promptFocused = () => Boolean(promptInput?.focused)
+  const promptText = () => (home() ? homeDraft() : draft())
   const compact = createMemo(() => dimensions().width < 72)
   const veryCompact = createMemo(() => dimensions().width < 50)
+
+  function clearCurrentPrompt(): void {
+    if (home()) {
+      setHomeDraft("")
+      setHomeFiles([])
+    } else {
+      setDraft("")
+      setDraftFiles([])
+    }
+    promptInput?.setText("")
+  }
+
+  function tryCopySelection(): boolean {
+    if (!renderer.getSelection()) return false
+    let target: TuiClipboard
+    try {
+      target = getClipboard()
+    } catch (error) {
+      renderer.clearSelection()
+      showToast(error instanceof Error ? error.message : String(error), "error")
+      return false
+    }
+    const copied = copySelection(
+      renderer,
+      target,
+      () => showToast("Copied to clipboard", "info"),
+      (error) => showToast(error instanceof Error ? error.message : String(error), "error"),
+    )
+    if (!copied) renderer.clearSelection()
+    return copied
+  }
 
   function showToast(message: string, kind: ToastInfo["kind"] = "info"): void {
     if (toastTimer) clearTimeout(toastTimer)
@@ -1037,7 +1078,7 @@ export function TuiApp(props: { bootstrap: TuiBootstrap }) {
     if (name === "r") return "rules.list"
     if (name === "c") return "checkpoint.list"
     if (name === "m") return "model.list"
-    if (name === "q") return "session.queued_prompts"
+    if (name === "q") return queuedPrompts().length > 0 ? "session.queued_prompts" : "app.quit"
     if (name === "d") return "prompt.clear_attachments"
     if (name === "return" || name === "enter" || name === "linefeed") return "prompt.queue"
     return null
@@ -1066,6 +1107,35 @@ export function TuiApp(props: { bootstrap: TuiBootstrap }) {
         submitCurrent("steer")
       }
       return true
+    }
+    if (key.ctrl && key.name === "c") {
+      if (tryCopySelection()) {
+        key.preventDefault()
+        key.stopPropagation()
+        return true
+      }
+      const action = ctrlCAction({
+        overlayOpen: Boolean(dialog() || pendingApproval()),
+        promptFocused: promptFocused(),
+        hasText: promptText().length > 0,
+      })
+      key.preventDefault()
+      if (action === "clear") clearCurrentPrompt()
+      else renderer.destroy()
+      return true
+    }
+    if (key.ctrl && key.name === "d") {
+      const action = ctrlDAction({
+        dialogOpen: dialog() !== null,
+        promptFocused: promptFocused(),
+        hasText: promptText().length > 0,
+      })
+      if (action === "exit") {
+        key.preventDefault()
+        renderer.destroy()
+        return true
+      }
+      return false
     }
     if (key.ctrl && key.name === "q") {
       key.preventDefault()

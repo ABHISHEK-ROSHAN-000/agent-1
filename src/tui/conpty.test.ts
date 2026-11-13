@@ -110,6 +110,47 @@ describe("TUI ConPTY smoke", () => {
     await Bun.sleep(250)
   }, 30_000)
 
+  test("clears a non-empty prompt on Ctrl+C and exits on the next Ctrl+C", async () => {
+    if (process.platform !== "win32") return
+    const daemon = await startTestDaemon()
+    daemons.push(daemon)
+    const terminal = pty.spawn(
+      process.execPath,
+      [path.join("src", "cli", "main.ts")],
+      {
+        name: "xterm-256color",
+        cols: 100,
+        rows: 30,
+        cwd: path.resolve(import.meta.dir, "..", ".."),
+        env: {
+          ...process.env,
+          AGENT1_DATA_DIR: daemon.dir,
+          AGENT1_LOG_LEVEL: "error",
+        },
+      },
+    )
+    terminals.push(terminal)
+    let output = ""
+    let exitCode: number | undefined
+    terminal.onData((data) => {
+      output += data
+    })
+    terminal.onExit(({ exitCode: code }) => {
+      exitCode = code
+    })
+    await waitFor(() => (plain(output).includes("AGENT-1") ? true : undefined), 20_000)
+
+    terminal.write("draft text")
+    await waitFor(() => (plain(output).includes("draft text") ? true : undefined), 10_000)
+    terminal.write("\x03")
+    await Bun.sleep(400)
+    expect(exitCode).toBeUndefined()
+
+    terminal.write("\x03")
+    await waitFor(() => (exitCode !== undefined ? true : undefined), 10_000)
+    expect(exitCode).toBe(0)
+  }, 45_000)
+
   test("queues a follow-up with the leader binding in a real terminal", async () => {
     if (process.platform !== "win32") return
     const fake = startFakeOpenAI()

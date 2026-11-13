@@ -11,7 +11,7 @@ async function main(): Promise<void> {
       exitOnCtrlC: false,
       useKittyKeyboard: {},
       autoFocus: false,
-      useMouse: false,
+      useMouse: true,
       openConsoleOnError: false,
     },
   )
