@@ -27,7 +27,7 @@ function Fail([string]$Message) {
 
 function Download-File([string]$Uri, [string]$OutFile) {
   $lastError = $null
-  for ($attempt = 1; $attempt -le 3; $attempt++) {
+  for ($attempt = 1; $attempt -le 10; $attempt++) {
     Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
     try {
       Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -TimeoutSec 600
@@ -40,7 +40,7 @@ function Download-File([string]$Uri, [string]$OutFile) {
   }
   if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
     Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
-    & curl.exe -L --fail --retry 3 --retry-delay 2 --output $OutFile $Uri
+    & curl.exe -L --fail --http1.1 --retry 10 --retry-all-errors --retry-delay 2 --output $OutFile $Uri
     if ($LASTEXITCODE -eq 0 -and (Test-Path $OutFile)) { return }
   }
   throw $lastError
@@ -68,7 +68,7 @@ try {
       if ($name -match 'agent-1-windows-x64-(.+)$') { $Version = $Matches[1] }
       elseif ($name -match 'agent-1-(.+)$') { $Version = $Matches[1] }
     }
-    if (-not $Version) { $Version = "0.1.3" }
+    if (-not $Version) { $Version = "0.1.4" }
     Write-Host "    Using local package $FromFile"
   } else {
     $manifest = Invoke-RestMethod -Uri $manifestUrl -UseBasicParsing -Headers @{ Accept = "application/json" }

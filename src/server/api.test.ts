@@ -117,7 +117,7 @@ describe("Phase 1 HTTP API", () => {
     expect(health.status).toBe(200)
     const healthBody = (await health.json()) as { status: string; version: string }
     expect(healthBody.status).toBe("ok")
-    expect(healthBody.version).toBe("0.1.3")
+    expect(healthBody.version).toBe("0.1.4")
 
     const unauthorized = await fetch(`${instance.state.url}/v1/info`)
     expect(unauthorized.status).toBe(401)
@@ -282,7 +282,7 @@ describe("Phase 1 HTTP API", () => {
       baseUrl: instance.state.url,
       password: rotated.password,
     })
-    expect((await newClient.info()).version).toBe("0.1.3")
+    expect((await newClient.info()).version).toBe("0.1.4")
     await newClient.stop()
   })
 
