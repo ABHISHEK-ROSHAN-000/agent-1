@@ -23,6 +23,7 @@ import { launchTui } from "../tui/launcher"
 const HELP = `${PRODUCT_NAME} ${VERSION}
 
 Usage: ${CLI_NAME} <command> [options]
+       ${CLI_NAME}                   Open the terminal client
 
 Commands:
   service start|stop|status|restart
@@ -1279,12 +1280,17 @@ async function main(argv: readonly string[]): Promise<number> {
     process.stdout.write(PAIR_HELP)
     return 0
   }
-  if (!command || command === "help" || hasFlag(parsed, "help") || command === "-h") {
+  if (command === "help" || hasFlag(parsed, "help") || command === "-h") {
+    printHelp()
+    return 0
+  }
+  if (!command && !(process.stdin.isTTY && process.stdout.isTTY)) {
     printHelp()
     return 0
   }
 
   try {
+    if (!command) return await launchTui()
     if (command === "status") {
       await serviceCommand({ ...parsed, positionals: ["service", "status", ...parsed.positionals.slice(1)] })
       return 0

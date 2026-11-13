@@ -70,13 +70,13 @@ describe("TUI ConPTY smoke", () => {
     expect(terminal.rows).toBe(24)
   }, 45_000)
 
-  test("handles bracketed paste, Unicode, resize, and process cleanup", async () => {
+  test("no-argument launch handles bracketed paste, Unicode, resize, and process cleanup", async () => {
     if (process.platform !== "win32") return
     const daemon = await startTestDaemon()
     daemons.push(daemon)
     const terminal = pty.spawn(
       process.execPath,
-      [path.join("src", "cli", "main.ts"), "tui"],
+      [path.join("src", "cli", "main.ts")],
       {
         name: "xterm-256color",
         cols: 100,

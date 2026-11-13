@@ -16,10 +16,27 @@ test("CLI prints help and version", () => {
   const help = run(cli, ["--help"])
   expect(help.exitCode).toBe(0)
   expect(help.stdout.toString()).toContain("Usage: agent-1")
+  expect(help.stdout.toString()).toContain("Open the terminal client")
+
+  const helpCommand = run(cli, ["help"])
+  expect(helpCommand.exitCode).toBe(0)
+  expect(helpCommand.stdout.toString()).toContain("Usage: agent-1")
 
   const version = run(cli, ["--version"])
   expect(version.exitCode).toBe(0)
   expect(version.stdout.toString()).toBe(`agent-1 ${VERSION}\n`)
+})
+
+test("no arguments prints help when the terminal is not interactive", () => {
+  const result = run(cli, [])
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout.toString()).toContain("Usage: agent-1")
+})
+
+test("explicit tui requires an interactive terminal", () => {
+  const result = run(cli, ["tui"])
+  expect(result.exitCode).toBe(1)
+  expect(result.stderr.toString()).toContain("interactive terminal")
 })
 
 test("bin launcher forwards to the CLI", () => {

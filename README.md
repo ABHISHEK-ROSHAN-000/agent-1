@@ -36,6 +36,7 @@ bun run check
 bun run web:build
 bun run test:e2e
 
+bun src/cli/main.ts                       # opens the TUI in an interactive terminal
 bun src/cli/main.ts service start
 bun src/cli/main.ts service status
 bun src/cli/main.ts auth show
