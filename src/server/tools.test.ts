@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { startFakeOpenAI, type FakeOpenAI } from "../test/fake-openai"
@@ -83,8 +83,9 @@ describe("Folder Ops reference through generic tools", () => {
     const checkpoints = (await checkpointResponse.json()) as {
       checkpoints: Array<{ id: string; rootPath: string; reason: string; commit: string }>
     }
+    const canonicalRoot = (await realpath(root)).toLowerCase()
     const checkpoint = checkpoints.checkpoints.find(
-      (entry) => entry.rootPath.toLowerCase() === path.resolve(root).toLowerCase(),
+      (entry) => entry.rootPath.toLowerCase() === canonicalRoot,
     )
     expect(checkpoint).toBeDefined()
     expect(checkpoint!.commit).toHaveLength(40)

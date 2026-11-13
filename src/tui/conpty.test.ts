@@ -24,7 +24,9 @@ function plain(value: string): string {
   return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1B\][^\x07]*\x07/g, "")
 }
 
-describe("TUI ConPTY smoke", () => {
+const describeConPTY = process.platform === "win32" && !process.env.CI ? describe : describe.skip
+
+describeConPTY("TUI ConPTY smoke", () => {
   test("launches in a real Windows pseudo terminal, submits, and renders approval", async () => {
     if (process.platform !== "win32") return
     const fake = startFakeOpenAI()

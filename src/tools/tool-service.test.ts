@@ -38,7 +38,7 @@ async function setup() {
 
 describe("filesystem tools", () => {
   test("lists, reads, searches, writes, and restores without a workspace grant", async () => {
-    const { root, tools, checkpoints } = await setup()
+    const { root, tools, checkpoints, pathPolicy } = await setup()
     await writeFile(path.join(root, "a.txt"), "alpha\n")
     await writeFile(path.join(root, "b.txt"), "beta\n")
 
@@ -53,7 +53,7 @@ describe("filesystem tools", () => {
     const search = (await tools.execute("fs_search", { root, pattern: "a" }, {})) as {
       matches: string[]
     }
-    expect(search.matches).toContain(path.join(root, "a.txt"))
+    expect(search.matches).toContain(pathPolicy.resolve(path.join(root, "a.txt")))
 
     const written = (await tools.execute(
       "fs_write",

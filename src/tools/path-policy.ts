@@ -83,7 +83,7 @@ export class PathPolicy {
     }
     const home = process.env.USERPROFILE
     if (home) roots.push(path.join(home, ".ssh"), path.join(home, ".aws"), path.join(home, ".config"))
-    this.protectedRoots = roots.map((root) => path.resolve(root))
+    this.protectedRoots = roots.map((root) => realPathFor(root))
   }
 
   resolve(input: string): string {

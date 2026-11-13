@@ -44,11 +44,15 @@ describe("PathPolicy", () => {
     await writeFile(path.join(root, "AGENTS.md"), "rules\n")
     expect(policy.isProtectedInstruction(path.join(root, "AGENTS.md"))).toBe(true)
     expect(policy.isProtectedInstruction(path.join(root, "src", "index.ts"))).toBe(false)
-    await expect(policy.requireWritable(path.join(root, "a.txt"))).resolves.toBe(path.join(root, "a.txt"))
+    await expect(policy.requireWritable(path.join(root, "a.txt"))).resolves.toBe(
+      policy.resolve(path.join(root, "a.txt")),
+    )
 
     await db.setSetting("approval.write_safe_root", root)
-    expect(await policy.writeSafeRoot()).toBe(path.resolve(root))
-    await expect(policy.requireWritable(path.join(root, "a.txt"))).resolves.toBe(path.join(root, "a.txt"))
+    expect(await policy.writeSafeRoot()).toBe(policy.resolve(root))
+    await expect(policy.requireWritable(path.join(root, "a.txt"))).resolves.toBe(
+      policy.resolve(path.join(root, "a.txt")),
+    )
     await expect(policy.requireWritable(path.join(os.tmpdir(), "outside.txt"))).rejects.toThrow(
       "outside the write-safe root",
     )
@@ -96,6 +100,6 @@ describe("PathPolicy", () => {
     const nested = path.join(project, "src", "feature")
     await mkdir(nested, { recursive: true })
     await writeFile(path.join(project, "package.json"), "{}\n")
-    expect(policy.rootForPath(path.join(nested, "file.ts"))).toBe(path.resolve(project))
+    expect(policy.rootForPath(path.join(nested, "file.ts"))).toBe(policy.resolve(project))
   })
 })
