@@ -2,7 +2,7 @@ export const openApiDocument = {
   openapi: "3.1.0",
   info: {
     title: "Agent-1 API",
-    version: "0.1.0",
+    version: "0.1.1",
     description: "Local personal assistant daemon. Phase 8G: auth, sessions, tools, checkpoints, web client, remote access, memory, and stable service identity.",
   },
   servers: [{ url: "http://127.0.0.1:{port}", variables: { port: { default: "0" } } }],

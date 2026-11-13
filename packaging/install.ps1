@@ -14,6 +14,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Write-Step([string]$Message) {
   Write-Host "==> $Message"
@@ -22,6 +23,27 @@ function Write-Step([string]$Message) {
 function Fail([string]$Message) {
   Write-Error $Message
   exit 1
+}
+
+function Download-File([string]$Uri, [string]$OutFile) {
+  $lastError = $null
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
+    try {
+      Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -TimeoutSec 600
+      if (Test-Path $OutFile) { return }
+    } catch {
+      $lastError = $_
+      Write-Warning "Download attempt $attempt failed: $($_.Exception.Message)"
+      Start-Sleep -Seconds (2 * $attempt)
+    }
+  }
+  if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+    Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
+    & curl.exe -L --fail --retry 3 --retry-delay 2 --output $OutFile $Uri
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $OutFile)) { return }
+  }
+  throw $lastError
 }
 
 if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
@@ -46,7 +68,7 @@ try {
       if ($name -match 'agent-1-windows-x64-(.+)$') { $Version = $Matches[1] }
       elseif ($name -match 'agent-1-(.+)$') { $Version = $Matches[1] }
     }
-    if (-not $Version) { $Version = "0.1.0" }
+    if (-not $Version) { $Version = "0.1.1" }
     Write-Host "    Using local package $FromFile"
   } else {
     $manifest = Invoke-RestMethod -Uri $manifestUrl -UseBasicParsing -Headers @{ Accept = "application/json" }
@@ -57,7 +79,7 @@ try {
       $downloadUrl = "$releaseBase/download/v$Version/agent-1-windows-x64.zip"
     }
     Write-Host "    Downloading $downloadUrl"
-    Invoke-WebRequest -Uri $downloadUrl -OutFile $zip -UseBasicParsing
+    Download-File $downloadUrl $zip
     if ($manifest.sha256) {
       $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
       if ($actual -ne ([string]$manifest.sha256).ToLowerInvariant()) {

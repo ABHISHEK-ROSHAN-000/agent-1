@@ -15,7 +15,7 @@ async function build(entrypoint: string, outfile: string, plugin?: BunPlugin): P
   const result = await Bun.build({
     entrypoints: [path.join(root, entrypoint)],
     target: "bun",
-    minify: false,
+    minify: true,
     sourcemap: "none",
     plugins: plugin ? [plugin] : [],
     compile: {

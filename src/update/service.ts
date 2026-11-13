@@ -74,7 +74,7 @@ export async function fetchUpdateManifest(
 }
 
 export async function checkForUpdate(
-  current = VERSION,
+  current: string = VERSION,
   url = process.env.AGENT1_UPDATE_URL ?? DEFAULT_UPDATE_URL,
 ): Promise<UpdateStatus> {
   const manifest = await fetchUpdateManifest(url)
