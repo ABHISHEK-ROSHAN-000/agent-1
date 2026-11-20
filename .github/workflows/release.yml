@@ -72,7 +72,7 @@ jobs:
           path: dist/release
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/release/agent-1-windows-x64-*.zip
